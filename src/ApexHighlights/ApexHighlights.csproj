@@ -23,4 +23,19 @@
     <PackageReference Include="Vortice.MediaFoundation" Version="3.*" />
   </ItemGroup>
 
+  <!--
+    游戏配置随 exe 内嵌。发布版是单文件，不能指望用户旁边还放着一个 games/ 目录；
+    启动时 Paths.EnsureGames() 会把它们释放到数据目录，用户之后可以就地改。
+  -->
+  <ItemGroup>
+    <EmbeddedResource Include="..\..\games\**\*" LogicalName="games/%(RecursiveDir)%(Filename)%(Extension)" />
+  </ItemGroup>
+
+  <!--
+    发布形态（见 docs/apex-v1-spec.md §0.1）：单个 exe，自带运行时。
+    参数放在 Properties/PublishProfiles/single-file.pubxml，别写在这里 ——
+    RuntimeIdentifier 写进 csproj 会把普通 build 的输出目录也改成 .../win-x64/，
+    连日常开发和 run-live.bat 都跟着变，不值得。
+  -->
+
 </Project>

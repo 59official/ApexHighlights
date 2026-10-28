@@ -44,13 +44,18 @@ public sealed class GameProfile
     /// <summary>JSON 所在目录，模板图片的相对路径基于它解析。</summary>
     [JsonIgnore] public string BaseDir { get; private set; } = ".";
 
-    /// <summary>按 id 找配置：显式路径 → 当前目录 → 从 exe 目录逐级向上找 games/&lt;id&gt;.json</summary>
+    /// <summary>按 id 找配置：显式路径 → 数据目录 → 当前目录 → 从 exe 目录逐级向上找 games/&lt;id&gt;.json</summary>
     public static string ResolvePath(string idOrPath)
     {
         if (File.Exists(idOrPath)) return Path.GetFullPath(idOrPath);
 
         var name = idOrPath.EndsWith(".json", StringComparison.OrdinalIgnoreCase) ? idOrPath : idOrPath + ".json";
         var tried = new List<string>();
+
+        // 数据目录优先：安装版把内置配置释放到这里，用户改过的也在这里
+        var data = Path.Combine(Paths.Games, name);
+        tried.Add(data);
+        if (File.Exists(data)) return data;
 
         var cwd = Path.Combine(Directory.GetCurrentDirectory(), "games", name);
         tried.Add(cwd);

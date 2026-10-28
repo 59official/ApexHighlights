@@ -27,3 +27,6 @@ desktop.ini
 
 # 临时脚本
 tmp_*.ps1
+
+# 单文件发布产物（70MB，由 CI 重新构建，不进仓库）
+dist/

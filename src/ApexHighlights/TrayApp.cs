@@ -238,7 +238,7 @@ internal sealed class TrayApp : ApplicationContext
             _libForm.Activate();
             return;
         }
-        var dir = _cap?.ClipDir ?? Path.Combine(@"D:\played\captures", "clips");
+        var dir = _cap?.ClipDir ?? Paths.Clips;
         _libForm = new LibraryForm(new ClipLibrary(dir), _policy);
         _libForm.FormClosed += (_, _) => _libForm = null;
         _libForm.Show();
@@ -246,7 +246,7 @@ internal sealed class TrayApp : ApplicationContext
 
     private void Reveal(string? path)
     {
-        var dir = _cap?.ClipDir ?? Path.Combine(@"D:\played\captures", "clips");
+        var dir = _cap?.ClipDir ?? Paths.Clips;
         try
         {
             Directory.CreateDirectory(dir);

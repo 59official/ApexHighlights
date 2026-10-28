@@ -17,6 +17,12 @@ internal static class Program
             bool tray = true;    // 默认常驻托盘（用户要的形态）；--no-tray 退回纯控制台
             bool ui = false;     // --ui：先把库窗口打开再开始录
 
+            // --data= 必须在任何路径被访问前生效（Paths 是懒初始化的）
+            var dataArg = args.FirstOrDefault(a => a.StartsWith("--data=", StringComparison.OrdinalIgnoreCase));
+            if (dataArg is not null) Paths.Override(dataArg[7..]);
+            Paths.EnsureGames();
+            Console.WriteLine($"[0] 数据目录 {Paths.DataRoot}");
+
             for (int i = 0; i < args.Length; i++)
             {
                 var a = args[i];
@@ -60,7 +66,7 @@ internal static class Program
             if (args.Any(a => a == "--ui-test"))
             {
                 var d = args.FirstOrDefault(a => a.StartsWith("--dir=", StringComparison.OrdinalIgnoreCase))?[6..]
-                        ?? @"D:\played\captures\clips";
+                        ?? Paths.Clips;
                 var n = args.FirstOrDefault(a => a.StartsWith("--samples=", StringComparison.OrdinalIgnoreCase));
                 return UiTest.Run(d, n is not null ? int.Parse(n[10..]) : 3);
             }
@@ -79,12 +85,12 @@ internal static class Program
             }
 
             if (args.Any(a => a == "--enc-test"))
-                return EncTest.Run(2560, 1440, 180, @"D:\played\captures\enc_test");
+                return EncTest.Run(2560, 1440, 180, Path.Combine(Paths.Captures, "enc_test"));
 
             if (args.Any(a => a == "--av-test"))
             {
                 var s = args.FirstOrDefault(a => a.StartsWith("--sec=", StringComparison.OrdinalIgnoreCase));
-                return AvTest.Run(@"D:\played\captures\av_test", s is not null ? int.Parse(s[6..]) : 4);
+                return AvTest.Run(Path.Combine(Paths.Captures, "av_test"), s is not null ? int.Parse(s[6..]) : 4);
             }
 
             if (args.Any(a => a == "--gpu-test"))
@@ -92,19 +98,19 @@ internal static class Program
                 var sm = args.FirstOrDefault(a => a.StartsWith("--surface-mode=", StringComparison.OrdinalIgnoreCase));
                 if (sm is not null) NvEncoder.SurfaceMode = int.Parse(sm[15..]);
                 Console.WriteLine($"[0] surface-mode={NvEncoder.SurfaceMode}");
-                return GpuTest.Run(2560, 1440, 180, @"D:\played\captures\gpu_test");
+                return GpuTest.Run(2560, 1440, 180, Path.Combine(Paths.Captures, "gpu_test"));
             }
 
             var profile = GameProfile.Load(GameProfile.ResolvePath(game));
             var engine = new BannerEngine(profile);
 
-            // 配额配置：--config= 指定，否则找 cwd 下的 config.json
+            // 配额配置：--config= 指定，否则找数据目录下的 config.json
             var cfgPath = args.FirstOrDefault(a => a.StartsWith("--config=", StringComparison.OrdinalIgnoreCase))?[9..]
-                          ?? Path.Combine(Directory.GetCurrentDirectory(), "config.json");
+                          ?? Paths.ConfigFile;
             var quota = QuotaPolicy.Load(cfgPath);
 
             return offline is not null
-                ? Offline(engine, offline.Length == 0 ? @"D:\played\probe\bands.bin" : offline)
+                ? Offline(engine, offline.Length == 0 ? Path.Combine(Paths.DataRoot, "probe", "bands.bin") : offline)
                 : Live(engine, dump, title ?? (profile.WindowTitles.Length > 0 ? profile.WindowTitles[0] : profile.Name), logPath, fps, bitrate, encode, gop, fakeHit, duration, audio, beep, quota, tray, ui, traySelfTest);
         }
         catch (Exception ex)
@@ -186,9 +192,9 @@ internal static class Program
     {
         bool doRun = args.Any(a => a == "--quota-run");
         var dir = args.FirstOrDefault(a => a.StartsWith("--dir=", StringComparison.OrdinalIgnoreCase))?[6..]
-                  ?? @"D:\played\captures\clips";
+                  ?? Paths.Clips;
         var cfgPath = args.FirstOrDefault(a => a.StartsWith("--config=", StringComparison.OrdinalIgnoreCase))?[9..]
-                      ?? Path.Combine(Directory.GetCurrentDirectory(), "config.json");
+                      ?? Paths.ConfigFile;
         var policy = QuotaPolicy.Load(cfgPath);
         var lib = new ClipLibrary(dir);
 
@@ -275,9 +281,9 @@ internal static class Program
     private static int LibUi(string[] args)
     {
         var dir = args.FirstOrDefault(a => a.StartsWith("--dir=", StringComparison.OrdinalIgnoreCase))?[6..]
-                  ?? @"D:\played\captures\clips";
+                  ?? Paths.Clips;
         var cfgPath = args.FirstOrDefault(a => a.StartsWith("--config=", StringComparison.OrdinalIgnoreCase))?[9..]
-                      ?? Path.Combine(Directory.GetCurrentDirectory(), "config.json");
+                      ?? Paths.ConfigFile;
         var policy = QuotaPolicy.Load(cfgPath);
 
         Console.WriteLine($"[1] 回顾库 {dir}");

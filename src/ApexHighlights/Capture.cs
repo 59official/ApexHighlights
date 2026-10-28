@@ -123,8 +123,8 @@ internal sealed class Capture : IDisposable
         public long Bytes { get; init; }
     }
 
-    public string OutDir { get; set; } = @"D:\played\captures";
-    public string ClipDir { get; set; } = @"D:\played\captures\clips";
+    public string OutDir { get; set; } = Paths.Captures;
+    public string ClipDir { get; set; } = Paths.Clips;
     public string? RingDir { get; set; }
 
     /// <summary>逐帧诊断 CSV（t_ms,score,x,y）；为空则不写。</summary>

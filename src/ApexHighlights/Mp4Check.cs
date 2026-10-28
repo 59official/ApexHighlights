@@ -5,7 +5,11 @@ namespace ApexHighlights;
 /// <summary>用系统解码链路读一遍 mp4，验证我们写出来的文件确实能被 MF 解析。</summary>
 internal static class Mp4Check
 {
-    public static int Run(string path)
+    /// <param name="requireAudio">
+    /// 视频-only 的自检（--gpu-test、--enc-test）要传 false —— 它们写出来的片子本来就没有音轨，
+    /// 按“必须有音轨”判就会把正常结果报成失败。
+    /// </param>
+    public static int Run(string path, bool requireAudio = true)
     {
         MediaFactory.MFStartup(false);
 
@@ -15,6 +19,11 @@ internal static class Mp4Check
         if (v.Samples == 0) return 4;
         if (a.Samples == 0)
         {
+            if (!requireAudio)
+            {
+                Console.WriteLine("[!] 无音轨（本次不要求音轨）");
+                return 0;
+            }
             Console.WriteLine("[!] 没有音频样本（要么没录音轨，要么音轨写坏了）");
             return 7;
         }

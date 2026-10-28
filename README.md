@@ -4,7 +4,7 @@ Apex Legends 自动击倒录制器：常驻环形缓冲，检测到屏幕中间�
 
 不注入、不读内存、不装驱动、不模拟输入、不联网。单文件、无账号、无服务器。
 
-> 状态：采集/编码/音频/切片/配额清理/回顾库 UI/托盘常驻已跑通并实测（1440p 60fps 零丢帧，双轨成片，后摇完整）。详见 [docs/apex-v1-spec.md](docs/apex-v1-spec.md)。
+> 状态：采集/编码/音频/切片/配额清理/回顾库 UI/托盘常驻已跑通并实测（1440p 60fps 零丢帧，双轨成片，后摇完整），单文件自包含发布已验证。详见 [docs/apex-v1-spec.md](docs/apex-v1-spec.md)。
 
 ## 为什么不用 OBS
 
@@ -27,6 +27,14 @@ WASAPI loopback → AAC 160kbps → 内存音频环 ─────────�
 - **音频和视频共用同一个 `Stopwatch` 时间轴**，切片时按第一帧视频的绝对时间对齐两条轨。
 - **不用 ffmpeg**：mp4 封装是自己写的（`Mp4.cs` / `Mp4Writer.cs`），单文件直接装 `avc1` + `mp4a` 两轨。
 
+## 下载即用
+
+从 [Releases](../../releases) 下载 `ApexHighlights.exe`，放到任意可写目录双击即可 —— 单文件、自带 .NET 运行时，不需要安装任何东西。
+
+首次启动会在 exe 旁边建出 `captures/`、`games/`、`config.json`（内嵌的默认配置会释放出来，之后可以就地改）。想清空就删掉整个目录。
+
+如果 exe 放在 Program Files 之类不可写的位置，会自动改用 `%LOCALAPPDATA%\ApexHighlights`。也可以用 `--data=<目录>` 显式指定。
+
 ## 构建
 
 需要 .NET 8 SDK 和 Windows 10 19041+：
@@ -38,18 +46,27 @@ dotnet build -c Release
 
 依赖 `Vortice.Direct3D11` / `Vortice.MediaFoundation`（NuGet 自动拉取）。
 
+出单文件（约 70MB，自带运行时）：
+
+```
+dotnet publish src/ApexHighlights/ApexHighlights.csproj -c Release -p:PublishProfile=single-file
+```
+
+产物在 `dist/ApexHighlights.exe`。推 `v*` tag 时 GitHub Actions 会自动跑这条并建 Release（见 `.github/workflows/release.yml`）。
+
 ## 运行
 
 ```
-# 实时录制，默认找标题含 "Apex Legends" 的窗口
-ApexHighlights.exe --fps=60 --bitrate=20
+# 托盘常驻（双击 run-live.bat 或直接跑 exe）
+ApexHighlights.exe
 
-# 指定窗口标题（开发时用任意动画窗口测试）
+# 前台跑，指定窗口标题（开发时用任意动画窗口测试）
 ApexHighlights.exe --title="BenchWnd" --fps=60 --bitrate=20 --duration=30 --fake-hit=12
 ```
 
 | 参数 | 说明 |
 |---|---|
+| `--data=<目录>` | 数据目录（captures/games/config.json 都在这下面） |
 | `--title=<片段>` | 窗口标题子串；`self` 表示自己的控制台窗口 |
 | `--fps=<n>` | 目标帧率，默认 60（30/60/120） |
 | `--bitrate=<n>` | 码率 Mbps，默认 20 |
@@ -57,12 +74,14 @@ ApexHighlights.exe --title="BenchWnd" --fps=60 --bitrate=20 --duration=30 --fake
 | `--duration=<n>` | 跑 n 秒后退出（不填则一直跑） |
 | `--fake-hit=<n>` | 第 n 秒伪造一次命中，用于端到端验证 |
 | `--no-audio` / `--no-beep` | 关闭音轨 / 关闭落盘提示音 |
-| `--config=<路径>` | 配额配置文件，默认当前目录 `config.json` |
+| `--no-tray` | 不常驻托盘，纯控制台 |
+| `--ui` | 启动时先把回顾库窗口打开 |
+| `--config=<路径>` | 配额配置文件，默认数据目录下 `config.json` |
 | `--log=<路径>` | 诊断日志（会归档上一份） |
 
 ## 配额与保留期
 
-默认 **40GB 配额 / 保留 30 天 / 2GB 磁盘水位**，写在 `config.json`：
+默认 **40GB 配额 / 保留 30 天 / 2GB 磁盘水位**，写在数据目录下的 `config.json`：
 
 ```json
 { "QuotaGb": 40, "RetainDays": 30, "WatermarkGb": 2, "CheckMinutes": 60 }
@@ -106,6 +125,8 @@ ApexHighlights.exe --title="BenchWnd" --fps=60 --bitrate=20 --duration=30 --fake
 ## 配置
 
 `games/<id>.json` 描述一个游戏：窗口标题、参考分辨率、条带位置、模板图与阈值、前摇/后摇。新增游戏 = 加一个 json + 一张横幅截图，不用改代码。
+
+内置配置以资源形式编进 exe，首次启动释放到数据目录的 `games/`；之后的改动以磁盘上的为准（不会被覆盖）。
 
 ## 许可
 

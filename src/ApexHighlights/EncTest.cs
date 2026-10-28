@@ -71,7 +71,7 @@ internal static class EncTest
         var clip = ring.BuildClip(0, long.MaxValue);
         File.WriteAllBytes(clipPath, clip);
         Console.WriteLine($"[7] 写出 {clipPath}  {clip.Length / 1024.0 / 1024.0:F1} MB  (init {ring.Init!.Length} 字节)");
-        Console.WriteLine($"[9] MF 回读 clip.mp4: {(Mp4Check.Run(clipPath) == 0 ? "ok" : "失败")}");
+        Console.WriteLine($"[9] MF 回读 clip.mp4: {(Mp4Check.Run(clipPath, requireAudio: false) == 0 ? "ok" : "失败")}");
 
         Console.WriteLine($"[8] 码率 {(bytes * 8.0 / Math.Max(1, frames) * 60 / 1e6):F1} Mbps");
         return 0;

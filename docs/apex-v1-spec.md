@@ -21,7 +21,7 @@
 |---|---|---|
 | **开源** | MIT，代码在 GitHub 公开 | 用户的核心目标就是做成开源项目 |
 | **无账号 / 无服务器** | 不登录、不上传、不联网 | 录制文件在本地；没有后端就没有运维和隐私问题 |
-| **分发形态** | GitHub Releases 下载即用，单个 exe（framework-dependent 需 .NET 8 桌面运行时，或 self-contained 约 60MB） | 开源项目的第一次运行成本是生死线 |
+| **分发形态** | GitHub Releases 下载即用，**单个 self-contained exe**（约 70MB，自带 .NET 运行时，目标机无需预装任何东西） | 开源项目的第一次运行成本是生死线 |
 | **不注入** | 不 DLL 注入、不读内存、不装驱动、不模拟输入 | 反作弊风险 + 可移植性 |
 | **禁止把 OBS 拖进来当引擎** | 见 §0.2 | GPL 传染 + 300MB 依赖 + 「先装 OBS」的首次体验 |
 
@@ -112,7 +112,8 @@ OBS 给不了或代价太大：
 - **坐标一律以 `refWidth×refHeight` 为基准**，运行时按实际窗口尺寸等比缩放 → 同一份配置跑 1080p/1440p/4K。
 - **模板是 PNG**（灰度/彩色都行，内部转亮度 + 高通），社区贡献门槛是“截一张图、裁一条、存成 png”。
 - 多模板：每个模板独立阈值，取全场最高分；标签随命中模板走（将来 `assist.png` 可以标“助攻”）。
-- 配置文件查找顺序：显式路径 → `./games/<id>.json` → 从 exe 目录逐级向上找 `games/<id>.json`（最多 8 级）。
+- 配置文件查找顺序：显式路径 → **数据目录 `games/`** → `./games/<id>.json` → 从 exe 目录逐级向上找 `games/<id>.json`（最多 8 级）。
+- 内置配置以 `EmbeddedResource` 形式编进 exe（`LogicalName="games/%(RecursiveDir)%(Filename)%(Extension)"`），首次启动由 `Paths.EnsureGames()` 释放到数据目录；**目标文件已存在就跳过**，所以用户改过的配置不会被升级覆盖。
 - 新增一款游戏 = 新增一个 `games/<id>.json` + 一张模板图，**不改代码**。
 
 ---
@@ -181,7 +182,7 @@ OBS 给不了或代价太大：
 | `WatermarkGb` | **2** | 磁盘可用空间低于此值 → 暂停录制；**0 = 不检查** |
 | `CheckMinutes` | **60** | 定时检查间隔 |
 
-配置来自 `config.json`（`--config=` 可指定），读不到或写坏了都退回默认值，**绝不因配置问题启动失败**。
+配置来自数据目录下的 `config.json`（`--config=` 可指定），读不到或写坏了都退回默认值，**绝不因配置问题启动失败**。
 
 清理是两条独立的删除理由，顺序固定：
 1. **超期**：`CreatedLocal < now - RetainDays` 的一律删，不看体积。
@@ -222,6 +223,27 @@ OBS 给不了或代价太大：
 
 **关闭开关**：`--no-audio`（整个音轨）、`--no-beep`（只关提示音）。
 
+---
+
+### 5.6 路径与分发（2026-10-28 已实现）
+
+**问题**：此前有 14 处硬编码 `D:\played`（`Capture.cs` 的 `OutDir`/`ClipDir` 默认值、`Program.cs` 各处自检目录、`TrayApp.cs` 开库/开目录、`run-live.bat`）。换机器或别人下载就写不进文件。实测从 `C:\` 目录跑 `--lib-list` 仍报 `D:\played\captures\clips`，证明是编译期写死的。
+
+**`Paths.cs` 是唯一来源**，数据根按顺序决定（第一个命中）：
+1. 命令行 `--data=<dir>`（必须在任何路径被访问前调用）
+2. exe 同目录（可写时）—— 便携式，解压即用，删目录 = 清空
+3. `%LOCALAPPDATA%\ApexHighlights` —— exe 在 Program Files 之类只读位置时
+
+可写性判定是**真的写一个 `.write_test` 文件再删**，不查 ACL（UAC 虚拟化会骗人）。
+
+**开发态特判**：exe 路径含 `bin` 段时，向上找 `.git` 或 `games/apex.json`，命中就用源码树根作数据根 —— 开发时 `captures/` 仍落在仓库里；发布版不在 `bin` 下，不会误判。
+
+**单文件分发**：`Properties/PublishProfiles/single-file.pubxml`（`PublishSingleFile` + `SelfContained` + `RuntimeIdentifier=win-x64` + `IncludeNativeLibrariesForSelfExtract` + `EnableCompressionInSingleFile`）。参数**刻意不写进 csproj** —— `RuntimeIdentifier` 一旦进 csproj，普通 build 也会多出 `win-x64/` 子目录，`run-live.bat` 与日常调试路径全跟着变。
+
+**内置配置随 exe**：`<EmbeddedResource Include="..\..\games\**\*" LogicalName="games/%(RecursiveDir)%(Filename)%(Extension)" />`；`Paths.EnsureGames()` 首启释放，**已存在则跳过**（用户改过的配置不能丢）。
+
+**实测**：`dist/ApexHighlights.exe` 70MB 单文件，单独拷到空目录后 `--gpu-test` / `--av-test` / `--audio-check` / 真实录制 / `--lib-ui` / `--tray-test` 全部通过，`[0] 数据目录` 指向该空目录，全流程无一处 `D:\played`。
+
 **提示音**：录完一段响一声两音符（C6→G6，181ms），`winmm.PlaySound` + 内存合成的 WAV，**不弹任何窗口**（用户明确要求）。现场合成而不带音频文件，是为了挪目录也不会坏。
 
 ---
@@ -243,9 +265,9 @@ OBS 给不了或代价太大：
 
 | 文件 | 作用 |
 |---|---|
-| `Detector.cs` | 高通 + NCC，粗扫 + 细化；与 `probe/ncc_test3.py` 结果逐帧一致 |
+| `Engine.cs` | 配置加载（`GameProfile`）+ 检测器（高通 + NCC，粗扫 + 细化）；在线/离线共用 |
 | `Native.cs` | WGC / WinRT 互操作（vtable 直调） |
-| `Capture.cs` | 采集 → 整帧读回 → 10fps 条带检测 → 编码队列 → 环形 → 命中登记 → clip 线程等后摇录满再切片落盘 |
+| `Capture.cs` | WGC 采集 → GPU 直转 NV12 喂编码器（不落 CPU）→ 10fps 条带读回检测 → 环形 → 命中登记 → clip 线程等后摇录满再切片落盘 |
 | `Detector.cs` | 同上（配置驱动，模板/阈值来自 `games/*.json`） |
 | `Encoder.cs` / `EncoderChain.cs` | NVENC MFT（事件驱动 601/602）+ `ICodecAPI` 定 GOP；全程单会话，不重建 |
 | `Nv12.cs` | BGRA → NV12（标量实现 ~2.4ms/帧@1440p） |
@@ -256,10 +278,11 @@ OBS 给不了或代价太大：
 | `ClipLibrary.cs` | 片段索引（文件名即索引）+ 配额/保留期清理 + 水位判定 |
 | `Mp4Probe.cs` / `ShellThumb.cs` | 列表用的轻量元数据读取（纯 box 树，不开 MF）+ Explorer 缩略图 |
 | `LibraryForm.cs` / `TrayApp.cs` / `AppIcon.cs` | 回顾库窗口（筛选/搜索/预览/删除/打开目录）+ 托盘常驻（状态/暂停/开库/退出） |
-| `Program.cs` | `--offline` 离线回放 / 实时模式 / `--fps=` `--bitrate=` `--gop=` `--fake-hit=` `--no-audio` `--no-beep` `--config=` |
+| `Paths.cs` | 可写路径的唯一来源（`--data=` → exe 同目录 → `%LOCALAPPDATA%`），并负责释放内嵌游戏配置 |
+| `Program.cs` | `--offline` 离线回放 / 实时模式 / `--fps=` `--bitrate=` `--gop=` `--fake-hit=` `--no-audio` `--no-beep` `--no-tray` `--ui` `--data=` `--config=` |
 
-自检命令：`--gpu-test`（GPU 直通编码自检）、`--av-test`（双轨封装自检）、`--audio-test`（loopback 采音自检）、`--audio-check <mp4>`（音轨解码自检）、`--mp4-check <mp4>`（双轨样本数自检）、`--aac-probe`（可用 AAC 编码器枚举）、`--beep-test <wav>`、`--quota-test`（配额/保留期逻辑自检）。
-库操作：`--lib-list`（列出现状）、`--quota-run`（真跑一次清理）。
+自检命令：`--gpu-test`（GPU 直通编码自检）、`--av-test`（双轨封装自检）、`--audio-test`（loopback 采音自检）、`--audio-check <mp4>`（音轨解码自检）、`--mp4-check <mp4>`（双轨样本数自检）、`--aac-probe`（可用 AAC 编码器枚举）、`--beep-test <wav>`、`--quota-test`（配额/保留期逻辑自检）、`--ui-test`（回顾库非交互自检）、`--tray-test=N`（托盘菜单自检）、`--probe <mp4>`（纯 box 树读元数据）。
+库操作：`--lib-list`（列出现状）、`--quota-run`（真跑一次清理）、`--lib-ui`（只开窗口）。
 
 离线验证：715 帧 4 事件（174.0 / 202.6 / 272.8 / 345.2s），分数 0.86 / 1.00 / 0.82 / 0.83，事件外最高 0.33 —— 与 Python 探针完全一致。
 实时冒烟：1649×1069 窗口 10s 内 569 帧 / 93 采样 / 0 误报。
@@ -280,7 +303,15 @@ OBS 给不了或代价太大：
 
 `--fake-hit=40` 端到端：切片 1800 样本 / 30.35s / 0.9MB，MF 解码通过。编码裕量约 196fps@1264×805、~120fps@1440p，60fps 目标安全。
 
-**尚未实现**：多游戏配置分发、被击倒（v2）。
+**分发形态实测（2026-10-28）**：`dotnet publish -p:PublishProfile=single-file` → `dist/ApexHighlights.exe` **72,512,939 字节 / 70MB 单文件**（自包含 win-x64 + 压缩）。把它单独拷到一个空目录 `C:\...\Temp\ship_test\` 运行：
+- `--lib-list` → `[0] 数据目录 C:\...\Temp\ship_test`，库指向 `ship_test\captures\clips`，**不再出现任何 `D:\played`**；exe 旁边自动生成 `games/apex.json` + `games/apex/knock.png`（与源文件逐字节相同）。
+- 删掉 `games/` 再跑 → 自动重新释放；手工改 `games/apex.json` 再跑 → **改动被保留**（存在即跳过）。
+- `--gpu-test` → 全链路 ok（NV12 转换 0.37ms/帧、180 包 0 丢、码率 8.2Mbps、MF 回读 ok）。
+- `--av-test --sec=4` → box 树 `hdlr=vide/avc1 + hdlr=soun/mp4a`，回读视频 240 样本 3.98s / 音频 185 样本 3.93s；`--audio-check` 峰值 12014 有真实波形。
+- 真实录制（BenchWnd 2566×1454@60，`--duration=16 --fake-hit=9`）→ `帧=1210 编码=1202 丢帧=0 音频=937帧/390KB`，出片 32.7MB，`--mp4-check` 视频 809 样本 13.67s / 音频 629 样本 13.40s，`--probe` 音轨「有」。
+- `--lib-ui`、`--tray-test=8` 均正常（后者因干净机器没有 Apex 窗口而正确显示「没找到游戏窗口」，菜单项与暂停切换行为正确）。
+
+**尚未实现**：被击倒（v2）。多游戏配置分发已由「内嵌 `games/**` + 首启释放到数据目录 + 存在即不覆盖」落地。
 
 ---
 
