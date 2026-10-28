@@ -1,4 +1,4 @@
-using System.Drawing.Drawing2D;
+﻿using System.Drawing.Drawing2D;
 using System.Globalization;
 
 namespace ApexHighlights;
@@ -146,7 +146,12 @@ internal sealed class ClipListView : ListView
         using (var pen = new Pen(UiKit.Line))
             g.DrawLine(pen, e.Bounds.Left, e.Bounds.Bottom - 1, e.Bounds.Right, e.Bounds.Bottom - 1);
 
-        var r = new Rectangle(e.Bounds.X + 8, e.Bounds.Y, Math.Max(0, e.Bounds.Width - 16), e.Bounds.Height);
+        // 表头用跟子项完全一样的内缩，左右对齐才咬得死。
+        // 第一列还要多让出缩略图那段（表头的原点比行早 13px，用行的原点对齐）。
+        int padL = e.ColumnIndex == 0 ? TextInset + 6 : 6;
+        int left = e.ColumnIndex == 0 && Items.Count > 0 ? GetItemRect(0).Left : e.Bounds.X;
+        var r = new Rectangle(left + padL, e.Bounds.Y,
+                              Math.Max(0, e.Bounds.Width - padL - 6), e.Bounds.Height);
         var flags = TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix
                     | TextFormatFlags.EndEllipsis | AlignOf(e.ColumnIndex);
         TextRenderer.DrawText(g, e.Header?.Text ?? "", UiKit.F9, r, UiKit.Dim, flags);

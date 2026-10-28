@@ -1,4 +1,4 @@
-using System.Drawing.Drawing2D;
+﻿using System.Drawing.Drawing2D;
 using System.Runtime.InteropServices;
 
 namespace ApexHighlights;
@@ -67,30 +67,78 @@ internal static class UiKit
         g.DrawPath(pen, path);
     }
 
-    /// <summary>把下拉框刷成深色。系统下拉列表底色改不动，但每项自绘后看不出白底。</summary>
-    public static void ThemeCombo(ComboBox c, int itemHeight = 26)
+    /// <summary>
+    /// 把下拉框刷成「胶囊」：整块自绘成圆角、融入背景的一条，右边一个小箭头。
+    ///
+    /// 为什么要盖掉原生的样子：ComboBox 的右侧按钮是系统画的浅色方块，
+    /// 放在深色界面上像贴了张白纸；而且它不吃 BackColor。做法是自绘时把裁剪区
+    /// 换成整块控件、先铺一层宿主底色（角落才不会露出方形），再画圆角胶囊，
+    /// 这样原生按钮就被盖在下面看不见了。
+    /// </summary>
+    /// <param name="host">宿主背景色，用来填四角。</param>
+    public static void ThemePillCombo(ComboBox c, Color host, int itemHeight = 26)
     {
         c.DrawMode = DrawMode.OwnerDrawFixed;
         c.DropDownStyle = ComboBoxStyle.DropDownList;
         c.FlatStyle = FlatStyle.Flat;
-        c.BackColor = Surface;
+        c.BackColor = host;
         c.ForeColor = Text;
         c.ItemHeight = itemHeight;
-        c.Font = F9;
-        c.DrawItem += (_, e) =>
-        {
-            if (e.Index < 0) return;
-            var g = e.Graphics;
-            var r = e.Bounds;
-            bool sel = (e.State & DrawItemState.Selected) != 0;
-            using (var b = new SolidBrush(sel ? SelectTint : Surface))
-                g.FillRectangle(b, r);
-            TextRenderer.DrawText(g, c.Items[e.Index]?.ToString() ?? "", c.Font, r,
-                sel ? Accent : Text,
-                TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix
-                | TextFormatFlags.EndEllipsis | TextFormatFlags.LeftAndRightPadding);
-        };
+        c.Font = F95;
+        c.Cursor = Cursors.Hand;
+
+        c.DrawItem += (_, e) => DrawPillCombo(c, e, host);
     }
+
+    private static void DrawPillCombo(ComboBox c, DrawItemEventArgs e, Color host)
+    {
+        var g = e.Graphics;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+
+        using var bg = new SolidBrush(host);
+        var all = new Rectangle(0, 0, c.Width, c.Height);
+
+        // 收起态（画在框里）与展开态（画在弹出的列表里）要分开：
+        // 收起态整块盖掉原生按钮，展开态只画一行。
+        bool closed = (e.State & DrawItemState.ComboBoxEdit) != 0;
+        if (!closed)
+        {
+            bool sel = (e.State & DrawItemState.Selected) != 0;
+            var row = new Rectangle(e.Bounds.X + 3, e.Bounds.Y + 2, Math.Max(0, e.Bounds.Width - 6), e.Bounds.Height - 4);
+            g.FillRectangle(bg, e.Bounds);
+            if (sel) Fill(g, row, 7, SelectTint);
+            TextRenderer.DrawText(g, c.Items[e.Index]?.ToString() ?? "", c.Font,
+                new Rectangle(row.X + 9, row.Y, row.Width - 18, row.Height),
+                sel ? Text : Dim,
+                TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix
+                | TextFormatFlags.EndEllipsis);
+            return;
+        }
+
+        var st = g.Save();
+        g.SetClip(all, CombineMode.Replace);
+        g.FillRectangle(bg, all);
+
+        var pill = new Rectangle(all.X, all.Y, all.Width - 1, all.Height - 1);
+        FillAndStroke(g, pill, pill.Height / 2, PillFill, Color.FromArgb(38, 41, 50));
+
+        var text = c.SelectedIndex >= 0 ? c.Items[c.SelectedIndex]?.ToString() ?? "" : "";
+        int padL = 14, arrow = 26;
+        var tr = new Rectangle(pill.X + padL, pill.Y, Math.Max(0, pill.Width - padL - arrow), pill.Height);
+        TextRenderer.DrawText(g, text, c.Font, tr, Text,
+            TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix
+            | TextFormatFlags.EndEllipsis);
+
+        // 小箭头：不用字符（不同字体下位置飘），直接画两条线
+        int cx = pill.Right - arrow / 2 - 6, cy = pill.Top + pill.Height / 2 - 1;
+        using var pen = new Pen(Dim, 1.6f) { StartCap = LineCap.Round, EndCap = LineCap.Round };
+        g.DrawLines(pen, new[] { new Point(cx - 4, cy - 2), new Point(cx, cy + 2), new Point(cx + 4, cy - 2) });
+
+        g.Restore(st);
+    }
+
+    /// <summary>胶囊里那块「比背景亮一点、但不勾边」的底色。</summary>
+    public static readonly Color PillFill = Color.FromArgb(27, 29, 35);
 
     // ---- Win11 窗口外观：圆角 + 深色标题栏。老系统上调用失败就安静忽略。----
     private const int DwmUseImmersiveDarkMode = 20;
@@ -237,6 +285,12 @@ internal sealed class Pill : Panel
 {
     public Color Fill { get; set; } = UiKit.Sunken;
 
+    /// <summary>
+    /// 自己不画底板，只当布局容器用。下拉框要自己画成一整块胶囊（连四角都要盖住），
+    /// 外面再套一层带边框的容器就会套娃。
+    /// </summary>
+    public bool Chrome { get; set; } = true;
+
     public Pill()
     {
         SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint
@@ -251,9 +305,9 @@ internal sealed class Pill : Panel
         var g = e.Graphics;
         g.SmoothingMode = SmoothingMode.AntiAlias;
         g.Clear(Parent?.BackColor ?? UiKit.Bg);
+        if (!Chrome) return;
         var r = new Rectangle(0, 0, Width - 1, Height - 1);
         UiKit.FillAndStroke(g, r, Height / 2, Fill, UiKit.Line);
-        base.OnPaint(e);
     }
 }
 
@@ -270,7 +324,7 @@ internal sealed class CueTextBox : TextBox
     public CueTextBox()
     {
         BorderStyle = BorderStyle.None;
-        BackColor = UiKit.Sunken;
+        BackColor = UiKit.PillFill;   // 跟下拉胶囊同一种「比背景亮一点」的底，读起来是一套
         ForeColor = UiKit.Text;
         Font = UiKit.F95;
     }

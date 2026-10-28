@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.Globalization;
 
 namespace ApexHighlights;
@@ -29,9 +29,9 @@ public sealed class LibraryForm : Form
     private readonly Label _empty = new();
     private readonly Label _title = new();
     private readonly Label _count = new();
-    private readonly ComboBox _kindFilter = new();
-    private readonly ComboBox _timeFilter = new();
-    private readonly ComboBox _thCombo = new();
+    private readonly PillSelect _kindFilter = new();
+    private readonly PillSelect _timeFilter = new();
+    private readonly PillSelect _thCombo = new();
     private readonly Label _thLabel = new();
     private readonly CueTextBox _search = new();
     private readonly Label _status = new();
@@ -141,12 +141,11 @@ public sealed class LibraryForm : Form
         _thLabel.AutoSize = true;
         _thLabel.TextAlign = ContentAlignment.MiddleLeft;
 
-        UiKit.ThemeCombo(_thCombo);
-        _thCombo.BackColor = UiKit.Sunken;
-        _thPill = PillHost(_thCombo, 214);
+        _thPill = PillHostSelect(_thCombo, 232);
 
         _search.Cue = "搜索文件名";
         _searchPill = PillHost(_search, 250);
+        ((Pill)_searchPill).Fill = UiKit.PillFill;
 
         _head.Controls.Add(_title);
         _head.Controls.Add(_count);
@@ -165,20 +164,16 @@ public sealed class LibraryForm : Form
         _btnDel.Style = RoundButton.Look.Danger;
         _btnDel.Click += (_, _) => DeleteSelected();
 
-        UiKit.ThemeCombo(_kindFilter);
-        _kindFilter.BackColor = UiKit.Sunken;
         _kindFilter.Items.AddRange(new object[]
             { "全部种类", "击倒", "再次击倒", "助攻击倒", "小队淘汰", "助攻淘汰", "击杀", "被击倒" });
         _kindFilter.SelectedIndex = 0;   // ComboBox 不像 ListBox 会自动选第一项，不设就是空白
         _kindFilter.SelectedIndexChanged += (_, _) => ApplyFilter();
-        _kindPill = PillHost(_kindFilter, 160);
+        _kindPill = PillHostSelect(_kindFilter, 168);
 
-        UiKit.ThemeCombo(_timeFilter);
-        _timeFilter.BackColor = UiKit.Sunken;
         _timeFilter.Items.AddRange(new object[] { "全部时间", "今天", "最近 7 天", "最近 30 天" });
         _timeFilter.SelectedIndex = 0;
         _timeFilter.SelectedIndexChanged += (_, _) => ApplyFilter();
-        _timePill = PillHost(_timeFilter, 152);
+        _timePill = PillHostSelect(_timeFilter, 158);
 
         _bar.Controls.Add(_btnPlay);
         _bar.Controls.Add(_btnReveal);
@@ -306,7 +301,7 @@ public sealed class LibraryForm : Form
         var thPill = _thPill!;
         search.SetBounds(hw - search.Width, 8, search.Width, 38);
         thPill.SetBounds(search.Left - 8 - thPill.Width, 8, thPill.Width, 38);
-        _thLabel.Text = Threshold > 0 ? $"灵敏度 {Threshold:F2}" : "灵敏度";
+        _thLabel.Text = "灵敏度";
         int thLabelW = TextRenderer.MeasureText(_thLabel.Text, _thLabel.Font).Width;
         _thLabel.SetBounds(thPill.Left - 10 - thLabelW, 8 + (38 - _thLabel.Height) / 2, thLabelW, _thLabel.Height);
 
@@ -347,6 +342,19 @@ public sealed class LibraryForm : Form
         return pill;
     }
 
+    /// <summary>下拉的容器：不画底板，胶囊由 PillSelect 自己画满整块。</summary>
+    private static Pill PillHostSelect(PillSelect sel, int width, int height = 38)
+    {
+        var pill = new Pill { Size = new Size(width, height), Chrome = false, Margin = new Padding(8, 2, 0, 2) };
+        pill.BackColor = UiKit.Bg;
+        pill.Controls.Add(sel);
+        void Place() => sel.SetBounds(0, 0, pill.Width, pill.Height);
+        pill.Resize += (_, _) => Place();
+        pill.HandleCreated += (_, _) => Place();
+        Place();
+        return pill;
+    }
+
     // ------------------------------------------------------------------ 数据
 
     /// <summary>
@@ -359,7 +367,7 @@ public sealed class LibraryForm : Form
         _thCombo.Items.Clear();
         _thCombo.Items.Add("按模板自带");
         foreach (var v in DetectPolicy.Presets)
-            _thCombo.Items.Add($"{v:F2}  {DetectPolicy.HintFor(v)}");
+            _thCombo.Items.Add($"{v:F2} · {DetectPolicy.ShortHintFor(v)}");
         SyncThresholdCombo();
     }
 
@@ -384,7 +392,7 @@ public sealed class LibraryForm : Form
         var idx = _thCombo.SelectedIndex;
         var v = idx <= 0 ? 0f : DetectPolicy.Presets[idx - 1];
         Threshold = DetectPolicy.Clamp(new DetectPolicy { Threshold = v }).Threshold;
-        _thLabel.Text = Threshold > 0 ? $"灵敏度 {Threshold:F2}" : "灵敏度";
+        _thLabel.Text = "灵敏度";
         OnThresholdChanged?.Invoke(Threshold);
     }
 

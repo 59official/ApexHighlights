@@ -116,4 +116,16 @@ public sealed class DetectPolicy
         <= 0.80f => "偏严：只认很清楚的横幅，闪太快/被遮挡时会漏",
         _ => "很严：几乎只认完整显示的横幅，漏录风险高",
     };
+
+    /// <summary>
+    /// 下拉框里用的短标签。胶囊控件只有两百来像素，HintFor 那几行长句放不下，
+    /// 所以列表里只给四五个字的结论，长句留给提示条。
+    /// </summary>
+    public static string ShortHintFor(float v) => v switch
+    {
+        <= 0.60f => "宽松",
+        <= 0.70f => "默认推荐",
+        <= 0.80f => "偏严",
+        _ => "很严",
+    };
 }

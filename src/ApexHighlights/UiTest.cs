@@ -1,4 +1,4 @@
-using System.Drawing.Imaging;
+﻿using System.Drawing.Imaging;
 using System.Runtime.InteropServices;
 
 namespace ApexHighlights;
@@ -125,7 +125,7 @@ internal static class UiTest
             try
             {
                 using var form = new LibraryForm(lib, new QuotaPolicy());
-                var combo = (ComboBox)Field(form, "_thCombo")!;
+                var combo = (PillSelect)Field(form, "_thCombo")!;
                 var label = (Label)Field(form, "_thLabel")!;
                 _ = form.Handle;            // 建句柄，子控件才会真的初始化（不用 Show 出来闪一下）
 
@@ -172,7 +172,7 @@ internal static class UiTest
         return fail;
     }
 
-    private static object? Field(object o, string name) =>
+    internal static object? Field(object o, string name) =>
         o.GetType().GetField(name, System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)?.GetValue(o);
 
     private static int DeleteCheck(ClipLibrary lib, ClipInfo src)

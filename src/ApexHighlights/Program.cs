@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 
 namespace ApexHighlights;
 
@@ -340,7 +340,8 @@ internal static class Program
             return 0;
         }
 
-        return Shot(form, shot);
+        var menuField = args.FirstOrDefault(a => a.StartsWith("--shot-menu=", StringComparison.OrdinalIgnoreCase))?[12..];
+        return Shot(form, shot, menuField);
     }
 
     /// <summary>
@@ -348,7 +349,7 @@ internal static class Program
     /// 用 PrintWindow(PW_RENDERFULLCONTENT) 而不是屏幕截图：窗口被别的窗口盖住、
     /// 或者跑在最小化的桌面上时，屏幕截图会是黑的。
     /// </summary>
-    private static int Shot(Form form, string file)
+    private static int Shot(Form form, string file, string? menuField = null)
     {
         form.StartPosition = FormStartPosition.Manual;
         form.Location = new Point(40, 40);
@@ -360,6 +361,23 @@ internal static class Program
         {
             Application.DoEvents();
             Thread.Sleep(40);
+        }
+
+        // 下拉菜单是独立的顶层窗口，PrintWindow 抓主窗口时抓不到，单独抓一张。
+        if (menuField is not null && UiTest.Field(form, menuField) is PillSelect sel && sel.ShowMenu() is { } menu)
+        {
+            Application.DoEvents();
+            Thread.Sleep(250);
+            Application.DoEvents();
+            using (var mb = new Bitmap(Math.Max(1, menu.Width), Math.Max(1, menu.Height)))
+            {
+                Native.PrintWindowTo(menu.Handle, mb);
+                var mp = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(file))!,
+                                      Path.GetFileNameWithoutExtension(file) + "_menu.png");
+                mb.Save(mp, System.Drawing.Imaging.ImageFormat.Png);
+                Console.WriteLine($"[3] 菜单截图 {mp}  {mb.Width}x{mb.Height}");
+            }
+            menu.Close();
         }
 
         var sz = form.Size;
