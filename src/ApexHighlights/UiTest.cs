@@ -65,6 +65,9 @@ internal static class UiTest
         // ---- 删除后能扫回来（用副本，不动真库）----
         fail += DeleteCheck(lib, all[^1]);
 
+        // ---- 灵敏度下拉（WinForms，单独 STA 线程）----
+        fail += ThresholdCheck(lib);
+
         Console.WriteLine(fail == 0 ? "[ok] 界面层自检全过" : $"[!] {fail} 项失败");
         return fail == 0 ? 0 : 9;
     }
@@ -97,6 +100,69 @@ internal static class UiTest
         void Log(string label, int n) => Console.WriteLine($"    {label} {n} 片");
         return fail;
     }
+
+    /// <summary>
+    /// 灵敏度的三种入口必须一致：外部改了 → 下拉跟着变；用户在下拉里选 → 回调发出去。
+    /// 这个窗口平时只能靠手点，所以把「项数、选中项与数值的映射、回调次数」都用代码验一遍。
+    /// WinForms 控件必须在 STA 线程上建，这里单开一个线程跑完再 join。
+    /// </summary>
+    private static int ThresholdCheck(ClipLibrary lib)
+    {
+        int fail = 0;
+        var t = new Thread(() =>
+        {
+            try
+            {
+                using var form = new LibraryForm(lib, new QuotaPolicy());
+                var combo = (ToolStripComboBox)Field(form, "_thCombo")!;
+                var label = (ToolStripLabel)Field(form, "_thLabel")!;
+                _ = form.Handle;            // 建句柄，子控件才会真的初始化（不用 Show 出来闪一下）
+
+                int want = DetectPolicy.Presets.Length + 1;
+                if (combo.Items.Count != want) { Console.WriteLine($"    BAD 下拉 {combo.Items.Count} 项，应为 {want}"); fail++; }
+                else Console.WriteLine($"    ok  下拉 {combo.Items.Count} 项（1 个「按模板自带」+ {DetectPolicy.Presets.Length} 个档位）");
+                if (combo.Items.Count > 0 && (combo.Items[0] as string) != "按模板自带")
+                { Console.WriteLine("    BAD 第一项不是「按模板自带」"); fail++; }
+
+                var fired = new List<float>();
+                form.OnThresholdChanged = v => fired.Add(v);
+
+                form.SetThreshold(0.75f);
+                int expectIdx = Array.FindIndex(DetectPolicy.Presets, v => Math.Abs(v - 0.75f) < 0.001f) + 1;
+                if (combo.SelectedIndex != expectIdx)
+                { Console.WriteLine($"    BAD 设 0.75 后选中 {combo.SelectedIndex}，应为 {expectIdx}"); fail++; }
+                else Console.WriteLine($"    ok  设 0.75 → 选中第 {expectIdx} 项「{combo.Items[expectIdx]}」");
+                if (!label.Text.Contains("0.75"))
+                { Console.WriteLine($"    BAD 标签没跟着变: {label.Text}"); fail++; }
+                if (fired.Count != 0)
+                { Console.WriteLine($"    BAD 外部 SetThreshold 不该回调，实际 {fired.Count} 次"); fail++; }
+                else Console.WriteLine("    ok  外部设定不触发回调（不会把配置反写一遍）");
+
+                int i60 = Array.FindIndex(DetectPolicy.Presets, v => Math.Abs(v - 0.60f) < 0.001f) + 1;
+                combo.SelectedIndex = i60;
+                if (fired.Count != 1 || Math.Abs(fired[0] - 0.60f) > 0.001f)
+                { Console.WriteLine($"    BAD 选 0.60 回调是 [{string.Join(",", fired)}]"); fail++; }
+                else Console.WriteLine($"    ok  选 0.60 → 回调发出 {fired[0]:F2}，form.Threshold={form.Threshold:F2}");
+
+                combo.SelectedIndex = 0;
+                if (fired.Count != 2 || Math.Abs(fired[1]) > 0.001f)
+                { Console.WriteLine($"    BAD 选「按模板自带」回调是 [{string.Join(",", fired)}]"); fail++; }
+                else Console.WriteLine("    ok  选「按模板自带」→ 回调发出 0.00");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"    BAD 阈值下拉抛出 {ex.GetType().Name}: {ex.Message}");
+                fail++;
+            }
+        });
+        t.SetApartmentState(ApartmentState.STA);
+        t.Start();
+        t.Join();
+        return fail;
+    }
+
+    private static object? Field(object o, string name) =>
+        o.GetType().GetField(name, System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)?.GetValue(o);
 
     private static int DeleteCheck(ClipLibrary lib, ClipInfo src)
     {

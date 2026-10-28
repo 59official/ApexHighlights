@@ -25,6 +25,26 @@ public sealed class LibraryForm : Form
     private readonly ToolStripComboBox _timeFilter = new();
     private readonly ToolStripTextBox _search = new();
     private readonly ToolStripStatusLabel _status = new();
+    private readonly ToolStripLabel _thLabel = new();
+    private readonly ToolStripComboBox _thCombo = new();
+
+    private float _threshold;
+
+    /// <summary>
+    /// 当前命中阈值，由托盘传进来；本窗口只负责显示和回调，不自己存配置。
+    /// setter 会顺手同步下拉（构造期对象初始化器赋值时下拉可能还没建，SyncThresholdCombo 里判过空）。
+    /// </summary>
+    public float Threshold
+    {
+        get => _threshold;
+        set
+        {
+            _threshold = value;
+            if (_thCombo.Items.Count > 0) SyncThresholdCombo();
+        }
+    }
+    /// <summary>用户在库里改了灵敏度后通知托盘（托盘负责落盘 + 套到运行中的采集上）。</summary>
+    public Action<float>? OnThresholdChanged { get; set; }
 
     private List<ClipInfo> _all = new();
     private List<ClipInfo> _shown = new();
@@ -49,6 +69,16 @@ public sealed class LibraryForm : Form
         bar.Items.Add(Button("打开目录", (_, _) => RevealSelected()));
         bar.Items.Add(new ToolStripSeparator());
         bar.Items.Add(Button("删除", (_, _) => DeleteSelected()));
+
+        // 灵敏度直接放工具栏：用户改完立刻看得到、也立刻生效。
+        // 放在「回顾库」里而不是只放托盘菜单，是因为用户发现漏录/乱录的时候，
+        // 十有八九正开着这个窗口在翻片段，就地能调最省事。
+        bar.Items.Add(new ToolStripSeparator());
+        _thLabel.Text = "灵敏度";
+        bar.Items.Add(_thLabel);
+        _thCombo.DropDownStyle = ComboBoxStyle.DropDownList;
+        _thCombo.Width = 200;
+        bar.Items.Add(_thCombo);
 
         bar.Items.Add(new ToolStripSeparator());
         bar.Items.Add(new ToolStripLabel("种类"));
@@ -126,7 +156,61 @@ public sealed class LibraryForm : Form
         Controls.Add(bar);
         Controls.Add(strip);
 
-        Load += (_, _) => Reload();
+        // 构造期就把档位建出来：这样外部用对象初始化器设 Threshold 时下拉已经存在，
+        // setter 里的同步才生效；Load 里再建一次是给「先 Show 后设值」的顺序兜底。
+        BuildThresholdItems();
+
+        Load += (_, _) =>
+        {
+            BuildThresholdItems();
+            Reload();
+        };
+    }
+
+    /// <summary>
+    /// 灵敏度下拉：第一项是「按模板自带」，后面是固定档位。
+    /// 用 DropDownList + 固定档位而不是滑块，是为了让用户一眼看到「0.70 推荐」这种标签，
+    /// 而不是面对一个 0.30–0.95 的无刻度滑块瞎拖。
+    /// </summary>
+    private void BuildThresholdItems()
+    {
+        _thCombo.Items.Clear();
+        _thCombo.Items.Add("按模板自带");
+        foreach (var v in DetectPolicy.Presets)
+            _thCombo.Items.Add($"{v:F2}  {DetectPolicy.HintFor(v)}");
+        SyncThresholdCombo();
+    }
+
+    /// <summary>把下拉同步到当前阈值（不触发回调，避免初始化时把配置反写一遍）。</summary>
+    private void SyncThresholdCombo()
+    {
+        var cur = Threshold;
+        int idx = 0;
+        if (cur > 0)
+        {
+            var i = Array.FindIndex(DetectPolicy.Presets, v => Math.Abs(v - cur) < 0.001f);
+            idx = i < 0 ? 0 : i + 1;
+        }
+        _thCombo.SelectedIndexChanged -= OnThresholdUiChanged;
+        _thCombo.SelectedIndex = idx;
+        _thCombo.SelectedIndexChanged += OnThresholdUiChanged;
+        _thLabel.Text = cur > 0 ? $"灵敏度 {cur:F2}" : "灵敏度";
+    }
+
+    private void OnThresholdUiChanged(object? sender, EventArgs e)
+    {
+        var idx = _thCombo.SelectedIndex;
+        var v = idx <= 0 ? 0f : DetectPolicy.Presets[idx - 1];
+        Threshold = DetectPolicy.Clamp(new DetectPolicy { Threshold = v }).Threshold;
+        _thLabel.Text = Threshold > 0 ? $"灵敏度 {Threshold:F2}" : "灵敏度";
+        OnThresholdChanged?.Invoke(Threshold);
+    }
+
+    /// <summary>外部改了阈值后刷新下拉显示。</summary>
+    public void SetThreshold(float v)
+    {
+        Threshold = v;
+        SyncThresholdCombo();
     }
 
     /// <summary>外部（托盘）改了配额策略后调用，重算状态栏。</summary>

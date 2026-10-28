@@ -14,6 +14,8 @@ internal sealed class TrayApp : ApplicationContext
 {
     private readonly GameProfile _profile;
     private readonly QuotaPolicy _policy;
+    private readonly DetectPolicy _detect;
+    private readonly string _cfgPath;
     private readonly NotifyIcon _icon;
     private readonly Form _marshal = new();      // 只用来做线程封送，从没显示过
     private readonly System.Windows.Forms.Timer _tick = new() { Interval = 5000 };
@@ -38,10 +40,12 @@ internal sealed class TrayApp : ApplicationContext
     /// <summary>连续多少次状态刷新都找不到游戏窗口。用于区分「切走了」和「真退出了」。</summary>
     private int _missingTicks;
 
-    public TrayApp(GameProfile profile, QuotaPolicy policy, string title, int fps, int bitrate, bool openUiFirst, bool audio, bool beep, int fakeHit = 0, int selfTest = 0)
+    public TrayApp(GameProfile profile, QuotaPolicy policy, DetectPolicy detect, string cfgPath, string title, int fps, int bitrate, bool openUiFirst, bool audio, bool beep, int fakeHit = 0, int selfTest = 0)
     {
         _profile = profile;
         _policy = policy;
+        _detect = detect;
+        _cfgPath = cfgPath;
         _title = title;
         _fps = fps;
         _bitrate = bitrate;
@@ -66,6 +70,7 @@ internal sealed class TrayApp : ApplicationContext
         var config = new ToolStripMenuItem("打开配置");
         config.Click += (_, _) => OpenConfig();
         menu.Items.Add(config);
+        menu.Items.Add(BuildSensitivityMenu());
         menu.Items.Add(new ToolStripSeparator());
         var quit = new ToolStripMenuItem("退出");
         quit.Click += (_, _) => Quit();
@@ -114,6 +119,20 @@ internal sealed class TrayApp : ApplicationContext
                         say($"状态行 = \"{_statusItem.Text}\"");
                         say($"tooltip = \"{_icon.Text.Replace("\n", " | ")}\"");
                         say($"菜单项 = {string.Join(" / ", _icon.ContextMenuStrip!.Items.Cast<ToolStripItem>().Select(i => i is ToolStripSeparator ? "—" : i.Text))}");
+                        break;
+                    case 3:
+                        // 检测灵敏度：直接走菜单点击那条路径，验证「改了立刻生效 + 落盘记住」
+                        say($"阈值菜单 = {FindSensitivityRoot()?.Text ?? "找不到"}");
+                        var before = EffectiveThreshold;
+                        say($"改前阈值 = {before:F2}，配置文件 {(File.Exists(_cfgPath) ? "已存在" : "还没有")}");
+                        var pick = DetectPolicy.Presets.First(v => Math.Abs(v - 0.85f) < 0.001f);
+                        ClickSensitivity(pick);
+                        say($"点了 {pick:F2} 之后 = {EffectiveThreshold:F2}");
+                        var shown = File.Exists(_cfgPath) ? string.Join(" ", File.ReadAllLines(_cfgPath)) : "(没写)";
+                        say("config.json 内容 = " + shown);
+                        var back = DetectPolicy.Presets.First(v => Math.Abs(v - 0.70f) < 0.001f);
+                        ClickSensitivity(back);
+                        say($"点回 {back:F2} 之后 = {EffectiveThreshold:F2}");
                         break;
                     case 4:
                         say($"点「暂停录制」→ {_pauseItem.Text}");
@@ -175,7 +194,10 @@ internal sealed class TrayApp : ApplicationContext
         try
         {
             Log.Write($"[tray] 找到窗口 \"{Native.TitleOf(hwnd)}\" 0x{hwnd:X}");
-            _cap = new Capture(hwnd, new BannerEngine(_profile))
+            // 引擎是新建的，得把用户自调的阈值套上去（Program 那次 Apply 是给控制台模式用的）
+            var eng = new BannerEngine(_profile);
+            eng.Apply(_detect);
+            _cap = new Capture(hwnd, eng)
             {
                 DiagPath = null,
                 TargetFps = _fps,
@@ -193,7 +215,7 @@ internal sealed class TrayApp : ApplicationContext
 
             Log.Write($"[tray] 采集已启动 {_cap.Width}x{_cap.Height} @{_fps}fps {_bitrate / 1_000_000}Mbps，" +
                       $"条带 {_profile.Band.W}x{_profile.Band.H}@{_profile.Band.X},{_profile.Band.Y}，" +
-                      $"模板 {string.Join(",", _profile.Templates.Select(t => t.Id))}，库 {_cap.ClipDir}" +
+                      $"模板 {string.Join(",", _profile.Templates.Select(t => t.Id))}，阈值 {_cap.Threshold:F2}，库 {_cap.ClipDir}" +
                       (rep is null ? "" : $"（{rep}）"));
             _statusItem.Text = $"录制中 {_cap.Width}×{_cap.Height} @{_fps}fps";
             _icon.ShowBalloonTip(3000, "ApexHighlights",
@@ -314,7 +336,7 @@ internal sealed class TrayApp : ApplicationContext
             return;
         }
         var dir = _cap?.ClipDir ?? Paths.Clips;
-        _libForm = new LibraryForm(new ClipLibrary(dir), _policy);
+        _libForm = new LibraryForm(new ClipLibrary(dir), _policy) { Threshold = EffectiveThreshold, OnThresholdChanged = v => ApplyThreshold(v) };
         _libForm.FormClosed += (_, _) => _libForm = null;
         _libForm.Show();
     }
@@ -333,13 +355,85 @@ internal sealed class TrayApp : ApplicationContext
 
     private void OpenConfig()
     {
-        var path = Paths.ConfigFile;
+        var path = _cfgPath;
         try
         {
             if (!File.Exists(path)) _policy.Save(path);
             Process.Start(new ProcessStartInfo(path) { UseShellExecute = true });
         }
         catch { }
+    }
+
+    /// <summary>
+    /// 「检测灵敏度」子菜单：把阈值做成可以直接点的档位，而不是让用户去手改 JSON。
+    /// 用户 2026-10-28 的原话是「能不能加一个我可以自己调阈值的功能」——
+    /// 就在这儿：调完立刻生效（不重启、不重开录制），并写回 config.json 记住。
+    /// </summary>
+    private ToolStripMenuItem BuildSensitivityMenu()
+    {
+        var root = new ToolStripMenuItem("检测灵敏度");
+        var items = new List<ToolStripMenuItem>();
+
+        void Refresh()
+        {
+            var cur = EffectiveThreshold;
+            foreach (var it in items)
+                it.Checked = Math.Abs((float)it.Tag! - cur) < 0.001f;
+            root.Text = cur > 0 ? $"检测灵敏度（{cur:F2}）" : "检测灵敏度（按模板）";
+        }
+
+        // 0 = 按 games/<id>.json 里模板自带的阈值，不覆盖
+        var auto = new ToolStripMenuItem("按模板自带（不覆盖）") { Tag = 0f };
+        auto.Click += (_, _) => ApplyThreshold(0f, Refresh);
+        root.DropDownItems.Add(auto);
+        items.Add(auto);
+        root.DropDownItems.Add(new ToolStripSeparator());
+
+        foreach (var v in DetectPolicy.Presets)
+        {
+            var it = new ToolStripMenuItem($"{v:F2}   {DetectPolicy.HintFor(v)}") { Tag = v };
+            var val = v;
+            it.Click += (_, _) => ApplyThreshold(val, Refresh);
+            root.DropDownItems.Add(it);
+            items.Add(it);
+        }
+
+        root.DropDownOpening += (_, _) => Refresh();
+        Refresh();
+        return root;
+    }
+
+    /// <summary>当前生效阈值：运行中优先问采集器（它握着引擎），没在录就看配置。</summary>
+    private float EffectiveThreshold =>
+        _cap?.Threshold ?? (_detect.Threshold > 0 ? _detect.Threshold : _profile.Templates[0].Threshold);
+
+    /// <summary>改阈值：写进内存配置 → 立刻套到正在跑的采集上 → 落盘记住。</summary>
+    private void ApplyThreshold(float v, Action? after = null)
+    {
+        _detect.Threshold = DetectPolicy.Clamp(new DetectPolicy { Threshold = v }).Threshold;
+        try { _cap?.SetThreshold(_detect.Threshold); }
+        catch (Exception ex) { Log.Write("[tray] 改阈值失败: " + ex.Message); }
+
+        var ok = _detect.Save(_cfgPath);
+        Log.Write($"[threshold] 阈值设为 {(_detect.Threshold <= 0 ? "按模板自带" : _detect.Threshold.ToString("F2"))}" +
+                  $"（保存到 {_cfgPath}：{(ok ? "成功" : "失败")}）");
+        after?.Invoke();
+        RefreshStatus();
+    }
+
+    /// <summary>自检用：找到「检测灵敏度」根菜单项。</summary>
+    private ToolStripMenuItem? FindSensitivityRoot() =>
+        _icon.ContextMenuStrip?.Items.OfType<ToolStripMenuItem>()
+            .FirstOrDefault(i => i.Text.StartsWith("检测灵敏度", StringComparison.Ordinal));
+
+    /// <summary>自检用：等价于点了一下某个阈值档位（走的是和真人点击完全相同的回调）。</summary>
+    private void ClickSensitivity(float v)
+    {
+        var root = FindSensitivityRoot();
+        var hit = root?.DropDownItems.OfType<ToolStripMenuItem>()
+            .FirstOrDefault(i => i.Tag is float f && Math.Abs(f - v) < 0.001f);
+        if (hit is null) { Log.Write($"[t] 找不到阈值档位 {v:F2}"); return; }
+        hit.PerformClick();
     }
 
     private void Quit()

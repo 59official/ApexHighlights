@@ -254,6 +254,30 @@ internal sealed class Capture : IDisposable
     /// <summary>累计到达的帧数。托盘用它判断采集是不是卡住了（窗口还在但不再出帧）。</summary>
     public long FrameCount => _frames;
 
+    /// <summary>实际生效的命中阈值（用户覆盖优先，否则取模板自带的）。</summary>
+    public float Threshold => _eng.EffectiveThreshold;
+
+    /// <summary>
+    /// 运行中改阈值：立刻对下一次检测生效，不需要重开录制，也不重建引擎。
+    /// 这就是用户要的「自己调阈值」——托盘菜单和回顾库里都挂了入口。
+    /// </summary>
+    public void SetThreshold(float v)
+    {
+        var p = DetectPolicy.Clamp(new DetectPolicy { Threshold = v });
+        _eng.ThresholdOverride = p.Threshold;
+        // 阈值一变就清掉「上一帧是否超阈」的状态：否则从 0.9 调到 0.55 后，
+        // 持续存在的画面会因为 _wasAbove 还是 true 而永不触发下降沿。
+        _wasAbove = false;
+        Log.Write($"[threshold] 命中阈值改为 {_eng.EffectiveThreshold:F2}（{DetectPolicy.HintFor(p.Threshold)}）");
+    }
+
+    /// <summary>
+    /// 「近失」采样阈值：留证据用的，永远低于命中阈值。
+    /// 用户把命中阈值调到 0.9 时，如果近失还按 0.45 采样，会写一堆对调参毫无用处的图；
+    /// 反过来阈值调到 0.55 时，0.45 又太低。所以按「命中阈值 - 0.15」跟着走，并夹在合理区间。
+    /// </summary>
+    private static float NearFloor(float hitThreshold) => Math.Clamp(hitThreshold - 0.15f, 0.40f, 0.80f);
+
     /// <summary>
     /// 跑一次配额/保留期清理并更新水位状态。返回报告（库没起来时返回 null）。
     /// 触发点：启动时、每片落盘后、每小时。
@@ -475,7 +499,7 @@ internal sealed class Capture : IDisposable
                         WallClock = DateTime.Now,
                         Label = det.Label,
                     });
-                }                else if (!above && det.Score >= 0.45f && now - _lastNearMs >= 2000 && _nearCount < 40)
+                }                else if (!above && det.Score >= NearFloor(det.Threshold) && now - _lastNearMs >= 2000 && _nearCount < 40)
                 {
                     _lastNearMs = now; _nearCount++;
                     Directory.CreateDirectory(OutDir);

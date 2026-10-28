@@ -101,17 +101,41 @@ internal static class Program
                 return GpuTest.Run(2560, 1440, 180, Path.Combine(Paths.Captures, "gpu_test"));
             }
 
+            // 阈值回归：拿历史 band 图重跑检测器，确认某档阈值既挡掉误判又不误杀真命中
+            if (args.Any(a => a == "--band-check"))
+            {
+                var bcProfile = GameProfile.Load(GameProfile.ResolvePath(game));
+                var bcEngine = new BannerEngine(bcProfile);
+                var bcDir = args.FirstOrDefault(a => a.StartsWith("--dir=", StringComparison.OrdinalIgnoreCase))?[6..]
+                            ?? Paths.Captures;
+                var thArg2 = args.FirstOrDefault(a => a.StartsWith("--threshold=", StringComparison.OrdinalIgnoreCase));
+                var list = new List<float>();
+                if (thArg2 is not null)
+                    foreach (var part in thArg2[12..].Split(',', StringSplitOptions.RemoveEmptyEntries))
+                        if (float.TryParse(part, System.Globalization.NumberStyles.Float,
+                                System.Globalization.CultureInfo.InvariantCulture, out var v2)) list.Add(v2);
+                return BandCheck.Run(bcEngine, bcDir, list.ToArray());
+            }
+
             var profile = GameProfile.Load(GameProfile.ResolvePath(game));
             var engine = new BannerEngine(profile);
 
-            // 配额配置：--config= 指定，否则找数据目录下的 config.json
+            // 配置：--config= 指定，否则找数据目录下的 config.json（配额 + 阈值共用这一个文件）
             var cfgPath = args.FirstOrDefault(a => a.StartsWith("--config=", StringComparison.OrdinalIgnoreCase))?[9..]
                           ?? Paths.ConfigFile;
             var quota = QuotaPolicy.Load(cfgPath);
 
+            // 检测阈值：命令行 --threshold= 优先（调试/回归用），否则读 config.json
+            var detect = DetectPolicy.Load(cfgPath);
+            var thArg = args.FirstOrDefault(a => a.StartsWith("--threshold=", StringComparison.OrdinalIgnoreCase));
+            if (thArg is not null && float.TryParse(thArg[12..], System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture, out var thv))
+                detect = DetectPolicy.Clamp(new DetectPolicy { Threshold = thv });
+            engine.Apply(detect);
+
             return offline is not null
                 ? Offline(engine, offline.Length == 0 ? Path.Combine(Paths.DataRoot, "probe", "bands.bin") : offline)
-                : Live(engine, dump, title ?? (profile.WindowTitles.Length > 0 ? profile.WindowTitles[0] : profile.Name), logPath, fps, bitrate, encode, gop, fakeHit, duration, audio, beep, quota, tray, ui, traySelfTest);
+                : Live(engine, dump, title ?? (profile.WindowTitles.Length > 0 ? profile.WindowTitles[0] : profile.Name), logPath, fps, bitrate, encode, gop, fakeHit, duration, audio, beep, quota, tray, ui, traySelfTest, detect, cfgPath);
         }
         catch (Exception ex)
         {
@@ -311,7 +335,7 @@ internal static class Program
     /// WinForms 要求 STA —— 但主线程已经被采集/COM 用掉了，所以单独起一个 STA 线程跑
     /// Application.Run，主线程 join 住。这样不用给 Main 加 [STAThread] 去动已有的 COM 路径。
     /// </summary>
-    private static int RunTray(GameProfile prof, QuotaPolicy quota, string title, int fps, int bitrate, bool ui, bool audio, bool beep, int fakeHit = 0, int selfTest = 0)
+    private static int RunTray(GameProfile prof, QuotaPolicy quota, DetectPolicy detect, string cfgPath, string title, int fps, int bitrate, bool ui, bool audio, bool beep, int fakeHit = 0, int selfTest = 0)
     {
         // 单实例：托盘常驻意味着用户完全可能双击好几次（黑框一闪就没，很容易以为没起来）。
         // 多开会各自采一份、抢同一个 captures\ring 目录，几小时后配额和分片全乱。
@@ -328,9 +352,12 @@ internal static class Program
             return 0;
         }
 
-        Console.WriteLine($"[1] 托盘常驻：目标 \"{title}\"，{fps}fps {bitrate / 1_000_000}Mbps，音轨{(audio ? "开" : "关")}，提示音{(beep ? "开" : "关")}");
-        Console.WriteLine($"[2] 配额 {quota.QuotaGb}GB / 保留 {(quota.RetainDays == 0 ? "永久" : quota.RetainDays + " 天")} / 水位 {quota.WatermarkGb}GB");
-        Console.WriteLine("[3] 右键托盘图标可以打开回顾库；关掉这个窗口也不影响录制。");
+        // 这些启动行也用 Log.Write：托盘模式控制台会被藏掉，只有写进日志才能事后核对
+        Log.Write($"[1] 托盘常驻：目标 \"{title}\"，{fps}fps {bitrate / 1_000_000}Mbps，音轨{(audio ? "开" : "关")}，提示音{(beep ? "开" : "关")}");
+        Log.Write($"[2] 配额 {quota.QuotaGb}GB / 保留 {(quota.RetainDays == 0 ? "永久" : quota.RetainDays + " 天")} / 水位 {quota.WatermarkGb}GB");
+        var thShown = detect.Threshold > 0 ? detect.Threshold : prof.Templates[0].Threshold;
+        Log.Write($"[2b] 命中阈值 {thShown:F2}（config.json 的 Threshold 字段，托盘菜单「检测灵敏度」里可调）");
+        Log.Write("[3] 右键托盘图标可以打开回顾库；关掉这个窗口也不影响录制。");
 
         // 托盘模式下把控制台藏掉：双击 exe 时那个黑窗口没必要一直开着。
         // 自检模式（--tray-test）例外 —— 那些输出就是要给人看的。
@@ -344,7 +371,7 @@ internal static class Program
                 Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
                 Application.EnableVisualStyles();
                 Application.SetCompatibleTextRenderingDefault(false);
-                using var app = new TrayApp(prof, quota, title, fps, bitrate, ui, audio, beep, fakeHit, selfTest);
+                using var app = new TrayApp(prof, quota, detect, cfgPath, title, fps, bitrate, ui, audio, beep, fakeHit, selfTest);
                 Application.Run(app);
             }
             catch (Exception ex)
@@ -362,10 +389,12 @@ internal static class Program
         return exit;
     }
 
-    private static int Live(BannerEngine engine, int dumpAtSec, string title, string? logPath, int fps, int bitrate, bool encode, int gop, int fakeHit, int durationSec, bool audio = true, bool beep = true, QuotaPolicy? quotaPolicy = null, bool tray = true, bool ui = false, int traySelfTest = 0)
+    private static int Live(BannerEngine engine, int dumpAtSec, string title, string? logPath, int fps, int bitrate, bool encode, int gop, int fakeHit, int durationSec, bool audio = true, bool beep = true, QuotaPolicy? quotaPolicy = null, bool tray = true, bool ui = false, int traySelfTest = 0, DetectPolicy? detectPolicy = null, string? cfgPath = null)
     {
         var prof = engine.Profile;
         var quota = quotaPolicy ?? new QuotaPolicy();
+        var detect = detectPolicy ?? new DetectPolicy { Threshold = 0 };
+        var cfg = cfgPath ?? Paths.ConfigFile;
 
         // 日志必须在托盘分支之前开 —— 托盘模式会把控制台藏起来，
         // 要是跟以前一样放在分支后面，托盘模式就一个字节都不写，
@@ -377,7 +406,7 @@ internal static class Program
         // 托盘模式：没有控制台窗口可看，走 ApplicationContext 常驻
         if (tray && encode && durationSec == 0)
         {
-            try { return RunTray(prof, quota, title, fps, bitrate, ui, audio, beep, fakeHit, traySelfTest); }
+            try { return RunTray(prof, quota, detect, cfg, title, fps, bitrate, ui, audio, beep, fakeHit, traySelfTest); }
             finally { Log.Close(); }
         }
 
@@ -419,7 +448,7 @@ internal static class Program
             if (rep is not null) Out($"[2d] 库 {cap.ClipDir}：{rep}");
         }
         Out($"[2] 采集已启动 {cap.Width}x{cap.Height}；条带 {prof.Band.W}x{prof.Band.H}@{prof.Band.X},{prof.Band.Y}；采集 {fps}fps / 检测 10fps");
-        Out($"[3] 模板 {string.Join(",", prof.Templates.Select(t => $"{t.Id}({t.W}x{t.H}@{t.Threshold:F2})"))}；命中存条带到 {cap.OutDir}");
+        Out($"[3] 模板 {string.Join(",", prof.Templates.Select(t => $"{t.Id}({t.W}x{t.H}@{t.Threshold:F2})"))}；实际阈值 {cap.Threshold:F2}；命中存条带到 {cap.OutDir}");
         if (cap.Width < 1200) Out("[!] 窗口小于 1200 宽，检测走的缩放路径；游戏建议 2560x1440");
 
         var tick = 0;

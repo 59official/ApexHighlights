@@ -116,6 +116,20 @@ public sealed class BannerEngine
 
     public GameProfile Profile { get; }
 
+    /// <summary>
+    /// 用户自调的命中阈值，&gt;0 时覆盖每个模板自带的 threshold；0 表示按模板。
+    /// 放在引擎上而不是改模板对象，是因为模板阈值来自 games/&lt;id&gt;.json（只读的内置配置，
+    /// 发布版里从程序内部释放出来），用户改的偏好得写到数据目录的 config.json 里，
+    /// 两者不能互相污染。运行时可随意改，下一次 Score 立刻生效。
+    /// </summary>
+    public float ThresholdOverride { get; set; }
+
+    /// <summary>当前实际生效的阈值（给日志和界面显示用）。</summary>
+    public float EffectiveThreshold => ThresholdOverride > 0 ? ThresholdOverride : Profile.Templates[0].Threshold;
+
+    /// <summary>套用一份检测策略（启动时、或用户在界面上调完之后调用）。</summary>
+    public void Apply(DetectPolicy policy) => ThresholdOverride = policy.Threshold;
+
     public BannerEngine(GameProfile profile)
     {
         Profile = profile;
@@ -177,14 +191,17 @@ public sealed class BannerEngine
         int iw = _bw + 1;
 
         var first = Profile.Templates[0];
-        var best = new Detection(first.Label, 0f, 0, 0, first.Threshold);
+        var best = new Detection(first.Label, 0f, 0, 0, Th(first));
         foreach (var t in _tpl)
         {
             var (s, x, y) = ScoreOne(hp, ii1, ii2, iw, t);
-            if (s > best.Score) best = new Detection(t.Label, s, x, y, t.Threshold);
+            if (s > best.Score) best = new Detection(t.Label, s, x, y, Th(t));
         }
         return best;
     }
+
+    /// <summary>某个模板实际生效的阈值：用户覆盖优先，否则用模板自带的。</summary>
+    private float Th(BannerTemplate t) => ThresholdOverride > 0 ? ThresholdOverride : t.Threshold;
 
     private (float Score, int X, int Y) ScoreOne(float[] hp, double[] ii1, double[] ii2, int iw, BannerTemplate t)
     {
