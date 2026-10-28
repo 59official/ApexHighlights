@@ -2,9 +2,9 @@
 
 Apex Legends 自动击倒录制器：常驻环形缓冲，检测到屏幕中间的「KNOCKED DOWN」横幅后，自动把**前 30 秒**回取出来落盘成带音频的 mp4。
 
-不注入、不读内存、不装驱动、不模拟输入、不联网。单文件、无账号、无服务器。
+不注入、不读内存、不装驱动、不模拟输入、不联网。单 exe 目录、无账号、无服务器。
 
-> 状态：采集/编码/音频/切片/配额清理/回顾库 UI/托盘常驻已跑通并实测（1440p 60fps 零丢帧，双轨成片，后摇完整），单文件自包含发布已验证。详见 [docs/apex-v1-spec.md](docs/apex-v1-spec.md)。
+> 状态：采集/编码/音频/切片/配额清理/回顾库 UI/托盘常驻已跑通并实测（1440p 60fps 零丢帧，双轨成片，后摇完整），自包含发布已验证。详见 [docs/apex-v1-spec.md](docs/apex-v1-spec.md)。
 
 ## 为什么不用 OBS
 
@@ -29,7 +29,7 @@ WASAPI loopback → AAC 160kbps → 内存音频环 ─────────�
 
 ## 下载即用
 
-从 [Releases](../../releases) 下载 `ApexHighlights.exe`，放到任意可写目录双击即可 —— 单文件、自带 .NET 运行时，不需要安装任何东西。
+从 [Releases](../../releases) 下载解压后双击 `ApexHighlights.exe`——自带 .NET 运行时，不需要安装任何东西。
 
 首次启动会在 exe 旁边建出 `captures/`、`games/`、`config.json`（内嵌的默认配置会释放出来，之后可以就地改）。想清空就删掉整个目录。
 
@@ -46,13 +46,18 @@ dotnet build -c Release
 
 依赖 `Vortice.Direct3D11` / `Vortice.MediaFoundation`（NuGet 自动拉取）。
 
-出单文件（约 70MB，自带运行时）：
+出可分发的自包含版本（约 190MB，自带运行时，不需要目标机装 .NET）：
 
 ```
-dotnet publish src/ApexHighlights/ApexHighlights.csproj -c Release -p:PublishProfile=single-file
+dotnet publish src/ApexHighlights/ApexHighlights.csproj -c Release \
+  -r win-x64 --self-contained true -p:PublishSingleFile=false -p:DebugType=none -o dist
 ```
 
-产物在 `dist/ApexHighlights.exe`。推 `v*` tag 时 GitHub Actions 会自动跑这条并建 Release（见 `.github/workflows/release.yml`）。
+产物是 `dist/ApexHighlights.exe` 加上一批 dll，整个 `dist/` 目录一起拷走即可。
+
+> **为什么不用 `PublishSingleFile`**：单文件包把原生库（Vortice / WinRT）嵌在 exe 里，每次启动要先解压到 `%TEMP%\.net\<app>\<hash>`。在部分机器上这一步会被拒（宿主返回 `error 5`，`Failed to create directory ... for extracting bundled files`），exe 直接启动不了。文件夹版没有解压步骤，实测在这台机器上正常，也就不留这个坑。`Properties/PublishProfiles/single-file.pubxml` 仍然保留，需要单文件时可以用，但不要作为默认分发形态。
+
+推 `v*` tag 时 GitHub Actions 会自动跑发布并建 Release（见 `.github/workflows/release.yml`）。
 
 ## 运行
 

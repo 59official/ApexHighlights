@@ -1,29 +1,44 @@
 @echo off
-rem ApexHighlights 双击启动。
-rem 优先用发布版单文件（dist\ApexHighlights.exe，自带运行时、可随便拷走），
-rem 没有就用本地编译出来的 exe（需要装 .NET 8 桌面运行时）。
+rem ============================================================
+rem  ApexHighlights launcher  (double-click to run)
 rem
-rem 默认行为：托盘常驻 + 找到 Apex 窗口就开始录，命中击倒横幅自动存一段。
-rem 游戏没开也没关系——托盘会每 3 秒找一次窗口，游戏起来自动开始录；
-rem 游戏退出后又回到等待状态，下次开游戏自动接上。
-rem 关掉这个黑窗口不影响录制（录制在托盘图标里），要退出请右键托盘图标 → 退出。
+rem  Data (clips, segments, config, games) always lives next to
+rem  this file -- that is what --data=%~dp0 pins down, so clips
+rem  made by the published build land in the same captures\clips
+rem  as clips made by a debug build.
+rem
+rem  What it does: sits in the tray, waits for the Apex window,
+rem  records, saves a clip + beeps when a knock banner is found.
+rem  If the game is not running it retries every 3 seconds, so
+rem  there is no need to restart this launcher.
+rem
+rem  Closing the black console window does NOT stop recording --
+rem  recording lives in the tray icon. To quit use the tray menu.
+rem
+rem  NOTE: keep this file pure ASCII with CRLF endings. cmd.exe
+rem  reads batch files as GBK; UTF-8 Chinese comments get mangled
+rem  and their trailing bytes (which can be \ or ") break quoting,
+rem  and LF-only endings break multi-line if() blocks.
+rem ============================================================
 chcp 65001 >nul
 cd /d "%~dp0"
 
-set EXE=dist\ApexHighlights.exe
-if not exist "%EXE%" set EXE=src\ApexHighlights\bin\Release\net8.0-windows10.0.19041.0\ApexHighlights.exe
-if not exist "%EXE%" (
-  echo [!] 还没编译。二选一：
-  echo     发布版：.tools\dotnet\dotnet.exe publish src\ApexHighlights\ApexHighlights.csproj -c Release -p:PublishProfile=single-file
-  echo     调试版：.tools\dotnet\dotnet.exe build -c Release src\ApexHighlights\ApexHighlights.csproj
-  pause
-  exit /b 1
-)
+rem Prefer the published self-contained folder build, then the
+rem plain build output (needs the .NET 8 desktop runtime).
+set "EXE=dist\ApexHighlights.exe"
+if not exist "%EXE%" set "EXE=src\ApexHighlights\bin\Release\net8.0-windows10.0.19041.0\ApexHighlights.exe"
+if exist "%EXE%" goto :run
 
-rem --data 指回仓库根：发布版默认把数据放在 exe 旁边（dist\），
-rem 但从这里启动时希望沿用仓库里的 captures\ 和 config.json，
-rem 不然之前录的片段会“消失”。%~dp0 是相对本文件的位置，没有硬编码盘符。
-echo [i] 启动 %EXE%
-echo [i] 托盘常驻中。要退出请右键托盘图标 → 退出。
-"%EXE%" --data="%~dp0." %*
+echo [!] Not built yet. Pick one:
+echo     publish: .tools\dotnet\dotnet.exe publish src\ApexHighlights\ApexHighlights.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=false -p:DebugType=none -o dist
+echo     build  : .tools\dotnet\dotnet.exe build -c Release src\ApexHighlights\ApexHighlights.csproj
+pause
+exit /b 1
+
+:run
+echo [i] Launching %EXE%
+echo [i] Data dir: %~dp0
+echo [i] Log file: %~dp0live.log
+echo [i] Stays in the tray. To quit: right-click the tray icon -^> Quit.
+"%EXE%" --data="%~dp0." --log="%~dp0live.log" %*
 if errorlevel 1 pause
