@@ -115,13 +115,32 @@ internal static unsafe class Native
         if (h != IntPtr.Zero) ShowWindow(h, 0);   // SW_HIDE
     }
 
+    /// <summary>
+    /// 把 CreateForWindow 的 HRESULT 翻成能直接照着做的提示。
+    /// 0x80070005 最常见的成因不是代码问题，而是 exe 所在目录带着 Low 完整性标签
+    /// （icacls 会显示 `Mandatory Label\Low Mandatory Level:(OI)(CI)(NW)`）：
+    /// 进程令牌随之降到 Low，而目标游戏窗口是 Medium，WGC 拒绝跨级别捕获。
+    /// 实测过同一个 exe 从 Medium 目录跑正常、从 Low 目录跑必然 E_ACCESSDENIED。
+    /// </summary>
+    private static string HintFor(int hr)
+    {
+        var hex = $"CreateForWindow 失败 0x{hr:X8}";
+        if (hr != unchecked((int)0x80070005)) return hex;
+        return hex + "\n" +
+               "  拒绝访问。请先检查 exe 所在目录的完整性标签：\n" +
+               "    icacls \"<目录>\" | findstr /i \"Mandatory\"\n" +
+               "  如果显示 Low Mandatory Level，把它改回 Medium 即可：\n" +
+               "    icacls \"<目录>\" /setintegritylevel Medium\n" +
+               "  （Low 目录会让进程令牌降到 Low，而游戏窗口是 Medium，WGC 不允许跨级别捕获。）";
+    }
+
     private static IntPtr CallCreateForWindow(IntPtr self, IntPtr hwnd, Guid* iid)
     {
         var vtbl = (IntPtr*)Marshal.ReadIntPtr(self);
         var fn = (delegate* unmanaged[Stdcall]<IntPtr, IntPtr, Guid*, IntPtr*, int>)vtbl[3];
         IntPtr result;
         var hr = fn(self, hwnd, iid, &result);
-        if (hr < 0) throw new COMException($"CreateForWindow 失败 0x{hr:X8}");
+        if (hr < 0) throw new COMException(HintFor(hr));
         return result;
     }
 

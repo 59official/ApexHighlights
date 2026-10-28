@@ -8,25 +8,29 @@ obj/
 # 本地工具链（dotnet 安装目录 + 各工具自建的 profile，合计约 900MB）
 .tools/
 
+# 发布产物（由 CI 重新构建，不进仓库）
+dist/
+dist2/
+dist3/
+zzz/
+
 # 录制输出与测试素材（合计约 750MB，不进仓库）
 captures/
-probe/s_*/
-probe/bands.bin
 probe/*.mp4
 probe/*.png
+probe/bands.bin
+probe/s_*/
 
 # 运行时日志
 *.log
 *.log.csv
 live-*.csv
 
+# 临时脚本
+tmp_*.ps1
+
 # 系统垃圾
 Thumbs.db
 desktop.ini
 .DS_Store
-
-# 临时脚本
-tmp_*.ps1
-
-# 单文件发布产物（70MB，由 CI 重新构建，不进仓库）
-dist/
+*.stackdump

@@ -352,40 +352,19 @@ internal static class Program
         var prof = engine.Profile;
         var quota = quotaPolicy ?? new QuotaPolicy();
 
+        // 日志必须在托盘分支之前开 —— 托盘模式会把控制台藏起来，
+        // 要是跟以前一样放在分支后面，托盘模式就一个字节都不写，
+        // 出事（比如「这一局一片都没录到」）事后完全无从查起。
+        Log.Init(logPath);
+        void Out(string s) => Log.Write(s);
+        Out($"# {DateTime.Now:yyyy-MM-dd HH:mm:ss}  game={prof.Id}  target=\"{title}\"  mode={(tray && encode && durationSec == 0 ? "tray" : "console")}");
+
         // 托盘模式：没有控制台窗口可看，走 ApplicationContext 常驻
         if (tray && encode && durationSec == 0)
-            return RunTray(prof, quota, title, fps, bitrate, ui, audio, beep, fakeHit, traySelfTest);
-
-        // 每次跑留存历史：把上一局的 log/csv 改名归档，别被覆盖
-        if (logPath is not null)
         {
-            try
-            {
-                if (File.Exists(logPath))
-                {
-                    var stamp = File.GetLastWriteTime(logPath).ToString("MMdd-HHmmss");
-                    var dir = Path.GetDirectoryName(Path.GetFullPath(logPath))!;
-                    var baseName = Path.GetFileNameWithoutExtension(logPath);
-                    File.Move(logPath, Path.Combine(dir, $"{baseName}-{stamp}.log"), true);
-                    if (File.Exists(logPath + ".csv"))
-                        File.Move(logPath + ".csv", Path.Combine(dir, $"{baseName}-{stamp}.log.csv"), true);
-                }
-            }
-            catch { }
+            try { return RunTray(prof, quota, title, fps, bitrate, ui, audio, beep, fakeHit, traySelfTest); }
+            finally { Log.Close(); }
         }
-
-        // 自己写日志：不依赖 cmd 的 tee，双击也不会「闪一下就没了」
-        StreamWriter? log = null;
-        if (logPath is not null)
-        {
-            try
-            {
-                log = new StreamWriter(logPath, append: false, System.Text.Encoding.UTF8) { AutoFlush = true };
-                log.WriteLine($"# {DateTime.Now:yyyy-MM-dd HH:mm:ss}  game={prof.Id}  target=\"{title}\"");
-            }
-            catch (Exception ex) { Console.WriteLine($"[!] 日志开不了: {ex.Message}"); }
-        }
-        void Out(string s) { Console.WriteLine(s); log?.WriteLine(s); }
 
         var hwnd = Native.ResolveWindow(title);
         if (hwnd == IntPtr.Zero)

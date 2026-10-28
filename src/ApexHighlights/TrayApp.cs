@@ -100,7 +100,7 @@ internal sealed class TrayApp : ApplicationContext
     /// </summary>
     private void ArmSelfTest()
     {
-        var say = new Action<string>(s => Console.WriteLine("[t] " + s));
+        var say = new Action<string>(s => Log.Write("[t] " + s));
         var step = 0;
         _auto = new System.Windows.Forms.Timer { Interval = 1000 };
         _auto.Tick += (_, _) =>
@@ -161,6 +161,7 @@ internal sealed class TrayApp : ApplicationContext
         {
             // 先开软件再开游戏是常见顺序，不能就此摆烂。
             // 转成「等待游戏」状态，由 _wait 定时器每 3 秒重试一次。
+            Log.Write($"[tray] 没找到「{_title}」窗口，转入等待");
             _statusItem.Text = "等待游戏启动…";
             _icon.Text = $"ApexHighlights — 等待「{_title}」窗口";
             _icon.ShowBalloonTip(4000, "ApexHighlights",
@@ -172,6 +173,7 @@ internal sealed class TrayApp : ApplicationContext
 
         try
         {
+            Log.Write($"[tray] 找到窗口 \"{Native.TitleOf(hwnd)}\" 0x{hwnd:X}");
             _cap = new Capture(hwnd, new BannerEngine(_profile))
             {
                 DiagPath = null,
@@ -186,14 +188,19 @@ internal sealed class TrayApp : ApplicationContext
             _cap.FakeHitAtSec = _fakeHit;
             _cap.Detected += OnDetected;
             _cap.EnableEncoding(90);
-            _cap.RunQuotaCheck();
+            var rep = _cap.RunQuotaCheck();
 
+            Log.Write($"[tray] 采集已启动 {_cap.Width}x{_cap.Height} @{_fps}fps {_bitrate / 1_000_000}Mbps，" +
+                      $"条带 {_profile.Band.W}x{_profile.Band.H}@{_profile.Band.X},{_profile.Band.Y}，" +
+                      $"模板 {string.Join(",", _profile.Templates.Select(t => t.Id))}，库 {_cap.ClipDir}" +
+                      (rep is null ? "" : $"（{rep}）"));
             _statusItem.Text = $"录制中 {_cap.Width}×{_cap.Height} @{_fps}fps";
             _icon.ShowBalloonTip(3000, "ApexHighlights",
                 $"开始录制 {Native.TitleOf(hwnd)}\n命中击倒横幅会自动存一段。", ToolTipIcon.Info);
         }
         catch (Exception ex)
         {
+            Log.Write($"[tray] 采集启动失败: {ex}");
             _statusItem.Text = "启动失败";
             _icon.Text = "ApexHighlights — 启动失败";
             _icon.ShowBalloonTip(6000, "ApexHighlights", "采集启动失败：" + ex.Message, ToolTipIcon.Error);
@@ -225,13 +232,15 @@ internal sealed class TrayApp : ApplicationContext
         {
             _marshal.BeginInvoke(() => Announce(d));
         }
-        catch (Exception ex) { Console.WriteLine("[tray] 封送失败: " + ex.Message); }
+        catch (Exception ex) { Log.Write("[tray] 封送失败: " + ex.Message); }
     }
 
     private void Announce(Capture.Detection d)
     {
+        Log.Write($"[HIT] {d.WallClock:HH:mm:ss} +{d.Ms / 1000.0:F1}s [{d.Label}] score={d.Score:F2} at({d.X},{d.Y})" +
+                  (d.ClipPath is null ? "  （还没产出片段）" : $"  → {Path.GetFileName(d.ClipPath)} {QuotaReport.Mb(d.Bytes)}"));
         if (d.ClipPath is null) return;
-        if (!File.Exists(d.ClipPath)) return;
+        if (!File.Exists(d.ClipPath)) { Log.Write($"[!] 片段文件不见了: {d.ClipPath}"); return; }
         _icon.ShowBalloonTip(5000, "已保存一段",
             $"{Path.GetFileName(d.ClipPath)}\n{QuotaReport.Mb(d.Bytes)}", ToolTipIcon.None);
         _libForm?.Reload();
@@ -258,6 +267,7 @@ internal sealed class TrayApp : ApplicationContext
         {
             if (++_missingTicks >= 2)   // 连续两次（约 10 秒）都找不到才判定退出
             {
+                Log.Write($"[tray] 「{_title}」窗口连续 {_missingTicks} 次找不到，判定游戏已退出，收采集");
                 StopCapture();
                 _statusItem.Text = "等待游戏启动…";
                 _icon.Text = $"ApexHighlights — 等待「{_title}」窗口";
@@ -276,6 +286,9 @@ internal sealed class TrayApp : ApplicationContext
         // NotifyIcon.Text 上限 127 字符，超了会抛异常
         var tip = "ApexHighlights\n" + s;
         _icon.Text = tip.Length <= 127 ? tip : tip[..124] + "…";
+
+        // 统计只进文件不刷控制台：5 秒一行，一天下来上千行，控制台里看着累
+        Log.FileOnly("[stat] " + s);
     }
 
     /// <summary>收掉当前的采集（游戏退出 / 退出程序时用）。失败也只记一笔，不让托盘崩。</summary>
@@ -287,7 +300,7 @@ internal sealed class TrayApp : ApplicationContext
         _pauseItem.Text = "暂停录制";
         if (cap is null) return;
         try { cap.Detected -= OnDetected; } catch { }
-        try { cap.Dispose(); } catch (Exception ex) { Console.WriteLine("[tray] 收采集失败: " + ex.Message); }
+        try { cap.Dispose(); } catch (Exception ex) { Log.Write("[tray] 收采集失败: " + ex.Message); }
     }
 
     private void ShowLibrary()

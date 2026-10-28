@@ -12,8 +12,9 @@ rem  records, saves a clip + beeps when a knock banner is found.
 rem  If the game is not running it retries every 3 seconds, so
 rem  there is no need to restart this launcher.
 rem
-rem  Closing the black console window does NOT stop recording --
-rem  recording lives in the tray icon. To quit use the tray menu.
+rem  The black console window hides itself once running. Do not
+rem  close it from the taskbar: closing the console kills the
+rem  process. To quit, right-click the tray icon and pick Quit.
 rem
 rem  NOTE: keep this file pure ASCII with CRLF endings. cmd.exe
 rem  reads batch files as GBK; UTF-8 Chinese comments get mangled
