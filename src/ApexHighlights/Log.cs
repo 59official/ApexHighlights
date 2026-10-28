@@ -40,7 +40,9 @@ internal static class Log
             {
                 Directory.CreateDirectory(System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath(path))!);
                 // append: true —— 一次会话追加一段，历史留着
-                _writer = new StreamWriter(path, append: true, new UTF8Encoding(false)) { AutoFlush = true };
+                // BOM: 加。文件是给人看的（记事本/写字板/VS Code），
+                // 不带 BOM 时这些老工具会按 GBK 解码，中文全变乱码。
+                _writer = new StreamWriter(path, append: true, new UTF8Encoding(true)) { AutoFlush = true };
                 Path = path;
                 _writer.WriteLine();
                 _writer.WriteLine($"===== {DateTime.Now:yyyy-MM-dd HH:mm:ss} 启动 =====");

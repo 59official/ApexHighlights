@@ -313,6 +313,21 @@ internal static class Program
     /// </summary>
     private static int RunTray(GameProfile prof, QuotaPolicy quota, string title, int fps, int bitrate, bool ui, bool audio, bool beep, int fakeHit = 0, int selfTest = 0)
     {
+        // 单实例：托盘常驻意味着用户完全可能双击好几次（黑框一闪就没，很容易以为没起来）。
+        // 多开会各自采一份、抢同一个 captures\ring 目录，几小时后配额和分片全乱。
+        // 用 Local\ 前缀：按登录会话隔离，同一台机器的另一个用户互不影响。
+        using var single = new Mutex(initiallyOwned: true, @"Local\ApexHighlights.Tray", out bool isFirst);
+        if (!isFirst && selfTest == 0)
+        {
+            Console.WriteLine("[!] 已经有一个 ApexHighlights 在托盘里跑着了，这次不重复启动。");
+            MessageBox.Show(
+                "ApexHighlights 已经在运行了。\n\n" +
+                "看任务栏右下角的托盘图标（可能要点开 ^ 展开）——\n" +
+                "右键它就能打开回顾库、暂停录制或退出。",
+                "ApexHighlights", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return 0;
+        }
+
         Console.WriteLine($"[1] 托盘常驻：目标 \"{title}\"，{fps}fps {bitrate / 1_000_000}Mbps，音轨{(audio ? "开" : "关")}，提示音{(beep ? "开" : "关")}");
         Console.WriteLine($"[2] 配额 {quota.QuotaGb}GB / 保留 {(quota.RetainDays == 0 ? "永久" : quota.RetainDays + " 天")} / 水位 {quota.WatermarkGb}GB");
         Console.WriteLine("[3] 右键托盘图标可以打开回顾库；关掉这个窗口也不影响录制。");

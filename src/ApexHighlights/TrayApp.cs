@@ -164,8 +164,9 @@ internal sealed class TrayApp : ApplicationContext
             Log.Write($"[tray] 没找到「{_title}」窗口，转入等待");
             _statusItem.Text = "等待游戏启动…";
             _icon.Text = $"ApexHighlights — 等待「{_title}」窗口";
-            _icon.ShowBalloonTip(4000, "ApexHighlights",
-                $"正在等待「{_title}」窗口出现。\n游戏起来后会自动开始录制，不用重开。",
+            _icon.ShowBalloonTip(6000, "ApexHighlights 已在托盘运行",
+                $"正在等待「{_title}」窗口出现，游戏起来会自动开始录制，不用重开。\n" +
+                "那个黑框是我故意藏起来的，不是崩溃；要退出请右键这个托盘图标 → 退出。",
                 ToolTipIcon.Info);
             ArmWaitForGame();
             return;
