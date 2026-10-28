@@ -65,6 +65,9 @@ internal static class Program
             if (args.Any(a => a == "--lib-ui"))
                 return LibUi(args);
 
+            if (args.Any(a => a.StartsWith("--thumb-probe=", StringComparison.OrdinalIgnoreCase)))
+                return ThumbProbe.Run(args.First(a => a.StartsWith("--thumb-probe=", StringComparison.OrdinalIgnoreCase))[14..]);
+
             if (args.Any(a => a == "--ui-test"))
             {
                 var d = args.FirstOrDefault(a => a.StartsWith("--dir=", StringComparison.OrdinalIgnoreCase))?[6..]
@@ -321,13 +324,63 @@ internal static class Program
         var cfgPath = args.FirstOrDefault(a => a.StartsWith("--config=", StringComparison.OrdinalIgnoreCase))?[9..]
                       ?? Paths.ConfigFile;
         var policy = QuotaPolicy.Load(cfgPath);
+        var shot = args.FirstOrDefault(a => a.StartsWith("--shot=", StringComparison.OrdinalIgnoreCase))?[7..];
+
+        // DPI 和视觉样式必须在第一个窗口创建之前设置，否则只有第一屏是对的。
+        Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
+        Application.EnableVisualStyles();
+        Application.SetCompatibleTextRenderingDefault(false);
 
         Console.WriteLine($"[1] 回顾库 {dir}");
         var form = new LibraryForm(new ClipLibrary(dir), policy);
-        Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
-        Application.EnableVisualStyles();
-        Application.Run(form);
-        return 0;
+
+        if (shot is null)
+        {
+            Application.Run(form);
+            return 0;
+        }
+
+        return Shot(form, shot);
+    }
+
+    /// <summary>
+    /// 把回顾库窗口抓成 PNG。自检（--ui-test）只验得出逻辑对不对，样子还得看图。
+    /// 用 PrintWindow(PW_RENDERFULLCONTENT) 而不是屏幕截图：窗口被别的窗口盖住、
+    /// 或者跑在最小化的桌面上时，屏幕截图会是黑的。
+    /// </summary>
+    private static int Shot(Form form, string file)
+    {
+        form.StartPosition = FormStartPosition.Manual;
+        form.Location = new Point(40, 40);
+        form.Show();
+
+        // 缩略图和视频元数据是异步补的，等它们画上去再抓，不然抓到的是空壳。
+        var until = DateTime.UtcNow.AddSeconds(4);
+        while (DateTime.UtcNow < until)
+        {
+            Application.DoEvents();
+            Thread.Sleep(40);
+        }
+
+        var sz = form.Size;
+        using var bmp = new Bitmap(sz.Width, sz.Height);
+        bool ok = Native.PrintWindowTo(form.Handle, bmp);
+        if (!ok)
+        {
+            form.DrawToBitmap(bmp, new Rectangle(0, 0, sz.Width, sz.Height));
+            Console.WriteLine("[2] PrintWindow 失败，退回 DrawToBitmap");
+        }
+
+        var full = Path.GetFullPath(file);
+        Directory.CreateDirectory(Path.GetDirectoryName(full)!);
+        bmp.Save(full, System.Drawing.Imaging.ImageFormat.Png);
+
+        var stat = UiTest.Stat(bmp);
+        Console.WriteLine($"[2] 截图 {full}  {bmp.Width}x{bmp.Height}  标准差 {stat.Std:F1}  色数 {stat.Unique}");
+
+        form.Close();
+        Application.DoEvents();
+        return ok ? 0 : 0;
     }
 
     /// <summary>只读元数据：验证 Mp4Probe 对已有文件的判断。</summary>

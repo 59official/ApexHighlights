@@ -77,25 +77,36 @@ internal static class UiTest
         int fail = 0;
         var now = DateTime.Now;
 
-        // 和 LibraryForm.ApplyFilter 里同一套判定，改一处要同时改
-        int Kind(ClipKind k) => all.Count(c => c.Kind == k);
-        Log("击倒", Kind(ClipKind.Knock));
-        Log("击杀", Kind(ClipKind.Kill));
-        Log("被击倒", Kind(ClipKind.Knocked));
+        // 判定只有一份（ClipQuery，窗口也用这一份）。这里不抄公式，只验下拉索引
+        // 跑出来的数字和按字段直数的一致 —— 抄一遍公式的话两边一起错就查不出来。
+        int Filtered(int kindIndex, int timeIndex, string? text)
+            => ClipQuery.Apply(all, ClipQuery.FromUi(kindIndex, timeIndex, text, now)).Count;
 
-        var today = all.Count(c => c.CreatedLocal >= now.Date);
-        var w7 = all.Count(c => c.CreatedLocal >= now.AddDays(-7));
-        var w30 = all.Count(c => c.CreatedLocal >= now.AddDays(-30));
+        foreach (var (label, ix) in new[] { ("击倒", 1), ("助攻淘汰", 5), ("击杀", 6), ("被击倒", 7) })
+        {
+            var kind = ClipQuery.KindByIndex(ix)!.Value;
+            int n = Filtered(ix, 0, null);
+            Log(label, n);
+            if (n != all.Count(c => c.Kind == kind))
+            {
+                Console.WriteLine($"    BAD 筛选「{label}」与按字段计数不一致");
+                fail++;
+            }
+        }
+
+        var today = Filtered(0, 1, null);
+        var w7 = Filtered(0, 2, null);
+        var w30 = Filtered(0, 3, null);
         Console.WriteLine($"    今天 {today} 片，最近 7 天 {w7} 片，最近 30 天 {w30} 片");
         if (!(w30 >= w7 && w7 >= today)) { Console.WriteLine("    BAD 时间筛选不单调"); fail++; }
 
         var s = "apex";
-        var byName = all.Count(c => c.Name.Contains(s, StringComparison.OrdinalIgnoreCase));
+        var byName = Filtered(0, 0, s);
         if (byName != all.Count) { Console.WriteLine($"    BAD 搜索 {s} 只命中 {byName}/{all.Count}"); fail++; }
         else Console.WriteLine($"    搜索 \"{s}\" 命中 {byName}/{all.Count}");
 
-        var noHit = all.Count(c => c.Name.Contains("zzz_nothing", StringComparison.OrdinalIgnoreCase));
-        if (noHit != 0) { Console.WriteLine("    BAD 无关搜索居然命中"); fail++; }
+        if (Filtered(0, 0, "zzz_nothing") != 0) { Console.WriteLine("    BAD 无关搜索居然命中"); fail++; }
+        if (Filtered(0, 0, "APEX") != all.Count) { Console.WriteLine("    BAD 搜索大小写不敏感没生效"); fail++; }
 
         void Log(string label, int n) => Console.WriteLine($"    {label} {n} 片");
         return fail;
@@ -114,8 +125,8 @@ internal static class UiTest
             try
             {
                 using var form = new LibraryForm(lib, new QuotaPolicy());
-                var combo = (ToolStripComboBox)Field(form, "_thCombo")!;
-                var label = (ToolStripLabel)Field(form, "_thLabel")!;
+                var combo = (ComboBox)Field(form, "_thCombo")!;
+                var label = (Label)Field(form, "_thLabel")!;
                 _ = form.Handle;            // 建句柄，子控件才会真的初始化（不用 Show 出来闪一下）
 
                 int want = DetectPolicy.Presets.Length + 1;
@@ -183,10 +194,10 @@ internal static class UiTest
         finally { try { Directory.Delete(tmpDir, true); } catch { } }
     }
 
-    private readonly record struct Px(double Mean, double Std, int Unique);
+    internal readonly record struct Px(double Mean, double Std, int Unique);
 
     /// <summary>缩略图的像素统计：全黑/全灰的图标准差接近 0，能一眼看出没取到画面。</summary>
-    private static Px Stat(Bitmap bmp)
+    internal static Px Stat(Bitmap bmp)
     {
         long sum = 0, sum2 = 0, cnt = 0;
         var uniq = new HashSet<int>();

@@ -47,6 +47,10 @@ internal static class ShellThumb
         object? item = null;
         try
         {
+            // 必须绝对路径：SHCreateItemFromParsingName 不走进程 CWD 解析，
+            // 相对路径会直接失败，而且失败得很安静（返回 null 而不是抛）。
+            // 这个坑让整个列表的缩略图空白过一次，所以在这里兜底转绝对。
+            path = Path.GetFullPath(path);
             SHCreateItemFromParsingName(path, IntPtr.Zero, IID_IShellItemImageFactory, out item);
             if (item is not IShellItemImageFactory f) return null;
             int hr = f.GetImage(new SIZE { cx = width, cy = height },

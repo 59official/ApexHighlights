@@ -113,9 +113,12 @@ public sealed class BannerOcr
         // 顺序有意义：RE-KNOCKED 也含 KNOCK，必须抢先判定。
         if (u.Contains("REKNOCK") || u.Contains("REKNO")) return BannerKind.ReKnock;
 
-        // 助攻：OCR 经常把开头的 A 和 S 吞掉，实测出现过 SSIST, / rIST, / \SSIST,
-        // 所以只匹配尾段 SIST / RIST（ASSIST 的后半），不能用 ASSIST 全词。
-        bool assist = u.Contains("SIST") || u.Contains("RIST");
+        // 助攻：OCR 经常把开头的 A 和 S 吞掉、或把中间的 S 读成 T
+        // （实测出现过 SSIST, / rIST, / \SSIST, / **ASSTST**），所以先看尾段
+        // SIST / RIST，再用「开头 6 个字母 vs ASSIST 的编辑距离」兜底。
+        // 最后这条是看真实战绩对出来的：一局 4 助攻只标出 3 条，第 4 条的横幅
+        // 被读成 ASSTST（差 2 个字符）→ 只按关键词就落到「击倒」去了。
+        bool assist = u.Contains("SIST") || u.Contains("RIST") || LeadIsAssist(u);
         if (assist && u.Contains("ELIMIN")) return BannerKind.AssistElim;
         if (assist && (u.Contains("KNOCK") || u.Contains("NOCK") || u.Contains("DOWN")))
             return BannerKind.AssistKnock;
@@ -126,6 +129,37 @@ public sealed class BannerOcr
         // "DOWN 心碎小丁 13S DAMAGED"）。带 DOWN 又没别的关键词，基本就是击倒横幅。
         if (u.Contains("DOWN")) return BannerKind.Knock;
         return BannerKind.Unknown;
+    }
+
+    /// <summary>
+    /// 横幅文字总在条带最左边，所以只看开头几个字母像不像 ASSIST。
+    /// 用编辑距离而不是全词匹配：OCR 的错法没穷尽过，容忍 2 个字符的错读
+    /// （ASSTST / SSIST / A5SIST 都能过），同时 KNOCKE… 这类开头离得很远，不会误判。
+    /// </summary>
+    private static bool LeadIsAssist(string u)
+    {
+        const string Word = "ASSIST";
+        int n = Math.Min(u.Length, Word.Length);
+        if (n < 4) return false;
+        return EditDistance(u[..n], Word[..n]) <= 2;
+    }
+
+    private static int EditDistance(string a, string b)
+    {
+        var prev = new int[b.Length + 1];
+        var cur = new int[b.Length + 1];
+        for (int j = 0; j <= b.Length; j++) prev[j] = j;
+        for (int i = 1; i <= a.Length; i++)
+        {
+            cur[0] = i;
+            for (int j = 1; j <= b.Length; j++)
+            {
+                int cost = a[i - 1] == b[j - 1] ? 0 : 1;
+                cur[j] = Math.Min(Math.Min(cur[j - 1] + 1, prev[j] + 1), prev[j - 1] + cost);
+            }
+            (prev, cur) = (cur, prev);
+        }
+        return prev[b.Length];
     }
 
     /// <summary>给人看的中文名。</summary>

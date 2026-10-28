@@ -115,7 +115,8 @@ ApexHighlights.exe --title="BenchWnd" --fps=60 --bitrate=20 --duration=30 --fake
 | `--quota-test` | 配额/保留期逻辑自检（临时目录伪造片段，不碰真实库） |
 | `--lib-list` | 列出现有片段（旧→新，含种类/分数/体积） |
 | `--quota-run` | 真跑一次配额清理 |
-| `--lib-ui` | 只开回顾库窗口，不启动录制 |
+| `--lib-ui` | 只开回顾库窗口，不启动录制（`--shot=<png>` 顺手截一张图，看外观用） |
+| `--thumb-probe=<目录>` | 缩略图取图自检：三种 COM 单元模型各跑一遍，排查「列表里全是空占位」 |
 | `--probe <mp4>` | 读片段元数据（时长/分辨率/是否有音轨），纯 box 树不开 MF |
 | `--tray-test=N` | 托盘自检：依次演练状态行/暂停/开库/改阈值/退出 |
 | `--band-check --dir=<目录>` | 阈值回归：把历史 `hit_*.bmp`/`near_*.bmp` 重跑一遍检测器，列出各阈值下命中/挡掉哪些 |

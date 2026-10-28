@@ -6,33 +6,55 @@ namespace ApexHighlights;
 /// <summary>
 /// 回顾库窗口。
 ///
-/// 形态上刻意做得很薄：列表 + 预览 + 几个按钮，**不内嵌播放器**（用户明确要的：
-/// 双击用系统默认播放器打开）。所以这个窗口的职责只有「看清单、看一帧、删除、去目录」。
+/// 职责上刻意做得很薄：看清单、看一帧、删除、去目录，**不内嵌播放器**
+/// （双击交给系统默认播放器，用户明确要的）。
 ///
-/// 缩略图和时长都是后台线程加载：录制可能正在同时跑，不能因为开个库窗口就卡住采集。
+/// 结构上分三块，各自可以单独改：
+///   · ClipListView   —— 清单控件：行怎么画、缩略图怎么取（见该文件）；
+///   · LibraryForm    —— 这里的窗口骨架：四条横带的布局 + 数据流 + 按钮行为；
+///   · UiKit          —— 一套自绘的小零件（圆角按钮/卡片/预览/键值表/滚动条）。
+///
+/// 外观上「全自绘」：WinForms 原生控件只有直角和系统灰，换主题换不掉形状，
+/// 所以列表、按钮、预览、键值区都是自己画的。
 /// </summary>
 public sealed class LibraryForm : Form
 {
     private readonly ClipLibrary _lib;
     private QuotaPolicy _policy;
 
-    private readonly ListView _list = new();
-    private readonly ImageList _thumbs = new() { ImageSize = new Size(80, 45), ColorDepth = ColorDepth.Depth32Bit };
-    private readonly PictureBox _preview = new();
-    private readonly Label _meta = new();
+    private readonly ClipListView _list = new();
+    private readonly PreviewBox _preview = new();
+    private readonly MetaList _meta = new();
     private readonly Label _note = new();
-    private readonly ToolStripComboBox _kindFilter = new();
-    private readonly ToolStripComboBox _timeFilter = new();
-    private readonly ToolStripTextBox _search = new();
-    private readonly ToolStripStatusLabel _status = new();
-    private readonly ToolStripLabel _thLabel = new();
-    private readonly ToolStripComboBox _thCombo = new();
+    private readonly Label _empty = new();
+    private readonly Label _title = new();
+    private readonly Label _count = new();
+    private readonly ComboBox _kindFilter = new();
+    private readonly ComboBox _timeFilter = new();
+    private readonly ComboBox _thCombo = new();
+    private readonly Label _thLabel = new();
+    private readonly CueTextBox _search = new();
+    private readonly Label _status = new();
+    private readonly Label _statusRight = new();
+
+    // 四条横带。位置全部由 LayoutBands 算，不参与任何自动布局。
+    private readonly Panel _head = new();
+    private readonly Panel _bar = new();
+    private readonly Panel _body = new();
+    private readonly Panel _foot = new();
+    private readonly RoundButton _btnPlay = new("播放", 104);
+    private readonly RoundButton _btnReveal = new("打开目录", 118);
+    private readonly RoundButton _btnDel = new("删除", 88);
+    private Panel? _searchPill, _thPill, _kindPill, _timePill;
+    private SurfaceCard? _listCard;
+    private Panel? _sideWrap;
+    private bool _bandsReady;
 
     private float _threshold;
 
     /// <summary>
     /// 当前命中阈值，由托盘传进来；本窗口只负责显示和回调，不自己存配置。
-    /// setter 会顺手同步下拉（构造期对象初始化器赋值时下拉可能还没建，SyncThresholdCombo 里判过空）。
+    /// setter 会顺手同步下拉（构造期对象初始化器赋值时下拉可能还没建）。
     /// </summary>
     public float Threshold
     {
@@ -48,7 +70,6 @@ public sealed class LibraryForm : Form
 
     private List<ClipInfo> _all = new();
     private List<ClipInfo> _shown = new();
-    private CancellationTokenSource? _loadCts;
 
     public LibraryForm(ClipLibrary lib, QuotaPolicy policy)
     {
@@ -57,148 +78,280 @@ public sealed class LibraryForm : Form
 
         Text = "ApexHighlights — 回顾库";
         StartPosition = FormStartPosition.CenterScreen;
-        MinimumSize = new Size(880, 520);
-        Size = new Size(1180, 700);
-        Font = new Font("Microsoft YaHei UI", 9f);
+        MinimumSize = new Size(1000, 600);
+        Size = new Size(1360, 760);
+        Font = UiKit.F95;
         Icon = AppIcon.Shared;
+        BackColor = UiKit.Bg;
+        DoubleBuffered = true;
+        KeyPreview = true;
 
-        // 统一的深色主题（和右侧预览面板、托盘图标一个色系）。
-        // 以前工具栏/列表/状态栏是系统默认的浅灰白，和深色预览拼在一起很割裂。
-        var inkBg = Color.FromArgb(40, 40, 46);     // 面板底
-        var inkDeeper = Color.FromArgb(28, 28, 32); // 列表/预览底
-        var inkText = Color.FromArgb(228, 228, 232); // 主文字
-        var inkDim = Color.FromArgb(150, 150, 158);  // 次级文字
-        var inkAccent = Color.FromArgb(80, 220, 240); // 强调青
-        BackColor = inkDeeper;
+        BuildHead();
+        BuildBar();
+        BuildBody();
+        BuildFoot();
+        MountShell();
 
-        // ---------- 工具栏 ----------
-        var bar = new ToolStrip { GripStyle = ToolStripGripStyle.Hidden, Padding = new Padding(6, 3, 6, 3) };
-        bar.BackColor = inkBg;
-        bar.ForeColor = inkText;
-        bar.RenderMode = ToolStripRenderMode.System;
-        bar.Items.Add(Button("刷新", (_, _) => Reload()));
-        bar.Items.Add(Button("播放", (_, _) => OpenSelected()));
-        bar.Items.Add(Button("打开目录", (_, _) => RevealSelected()));
-        bar.Items.Add(new ToolStripSeparator());
-        bar.Items.Add(Button("删除", (_, _) => DeleteSelected()));
-
-        // 灵敏度直接放工具栏：用户改完立刻看得到、也立刻生效。
-        // 放在「回顾库」里而不是只放托盘菜单，是因为用户发现漏录/乱录的时候，
-        // 十有八九正开着这个窗口在翻片段，就地能调最省事。
-        bar.Items.Add(new ToolStripSeparator());
-        _thLabel.Text = "灵敏度";
-        _thLabel.ForeColor = inkDim;
-        bar.Items.Add(_thLabel);
-        _thCombo.DropDownStyle = ComboBoxStyle.DropDownList;
-        _thCombo.Width = 200;
-        _thCombo.FlatStyle = FlatStyle.Flat;
-        _thCombo.BackColor = inkBg;
-        _thCombo.ForeColor = inkText;
-        bar.Items.Add(_thCombo);
-
-        bar.Items.Add(new ToolStripSeparator());
-        bar.Items.Add(MakeLabel("种类", inkDim));
-        _kindFilter.DropDownStyle = ComboBoxStyle.DropDownList;
-        _kindFilter.FlatStyle = FlatStyle.Flat;
-        _kindFilter.BackColor = inkBg;
-        _kindFilter.ForeColor = inkText;
-        _kindFilter.Items.AddRange(new object[] { "全部", "击倒", "再次击倒", "助攻击倒", "小队淘汰", "助攻淘汰", "击杀", "被击倒" });
-        _kindFilter.SelectedIndex = 0;
-        _kindFilter.SelectedIndexChanged += (_, _) => ApplyFilter();
-        bar.Items.Add(_kindFilter);
-
-        bar.Items.Add(MakeLabel("时间", inkDim));
-        _timeFilter.DropDownStyle = ComboBoxStyle.DropDownList;
-        _timeFilter.FlatStyle = FlatStyle.Flat;
-        _timeFilter.BackColor = inkBg;
-        _timeFilter.ForeColor = inkText;
-        _timeFilter.Items.AddRange(new object[] { "全部", "今天", "最近 7 天", "最近 30 天" });
-        _timeFilter.SelectedIndex = 0;
-        _timeFilter.SelectedIndexChanged += (_, _) => ApplyFilter();
-        bar.Items.Add(_timeFilter);
-
-        bar.Items.Add(MakeLabel("搜索", inkDim));
-        _search.Width = 160;
-        _search.ForeColor = inkText;
-        _search.BackColor = inkDeeper;
-        _search.BorderStyle = BorderStyle.FixedSingle;
-        _search.ToolTipText = "文件名片段，比如 1028-13";
-        _search.TextChanged += (_, _) => ApplyFilter();
-        bar.Items.Add(_search);
-
-        // ---------- 列表 ----------
-        _list.View = View.Details;
-        _list.FullRowSelect = true;
-        _list.MultiSelect = true;
-        _list.HideSelection = false;
-        _list.Dock = DockStyle.Fill;
-        _list.SmallImageList = _thumbs;
-        _list.BackColor = inkDeeper;
-        _list.ForeColor = inkText;
-        _list.BorderStyle = BorderStyle.None;
-        _list.Columns.Add("时间", 130);
-        _list.Columns.Add("种类", 70);
-        _list.Columns.Add("分数", 60, HorizontalAlignment.Right);
-        _list.Columns.Add("时长", 70, HorizontalAlignment.Right);
-        _list.Columns.Add("分辨率", 100);
-        _list.Columns.Add("音轨", 50);
-        _list.Columns.Add("体积", 80, HorizontalAlignment.Right);
-        _list.Columns.Add("文件名", 300);
-        _list.DoubleClick += (_, _) => OpenSelected();
-        _list.SelectedIndexChanged += (_, _) => ShowSelection();
-        _list.KeyDown += (_, e) =>
+        KeyDown += (_, e) =>
         {
-            if (e.KeyCode == Keys.Delete) { DeleteSelected(); e.Handled = true; }
-            else if (e.KeyCode == Keys.Enter) { OpenSelected(); e.Handled = true; }
+            if (e.KeyCode == Keys.F5) { Reload(); e.Handled = true; }
+            else if (e.Control && e.KeyCode == Keys.F) { _search.Focus(); _search.SelectAll(); e.Handled = true; }
         };
 
-        // ---------- 右侧预览 ----------
-        var side = new Panel { Dock = DockStyle.Right, Width = 380, Padding = new Padding(10) };
-        _preview.Dock = DockStyle.Top;
-        _preview.Height = 214;
-        _preview.SizeMode = PictureBoxSizeMode.Zoom;
-        _preview.BackColor = inkDeeper;
-        _preview.DoubleClick += (_, _) => OpenSelected();
-
-        _meta.Dock = DockStyle.Fill;
-        _meta.Padding = new Padding(0, 10, 0, 0);
-        _meta.ForeColor = inkText;
-        _note.Dock = DockStyle.Bottom;
-        _note.Height = 46;
-        _note.ForeColor = inkDim;
-
-        side.BackColor = inkBg;
-        // Dock 顺序：先填满的放最后加，否则 Fill 会盖住其它
-        side.Controls.Add(_meta);
-        side.Controls.Add(_note);
-        side.Controls.Add(_preview);
-
-        // ---------- 状态栏 ----------
-        var strip = new StatusStrip { BackColor = inkBg, ForeColor = inkDim, SizingGrip = false };
-        _status.Spring = true;
-        _status.TextAlign = ContentAlignment.MiddleLeft;
-        _status.ForeColor = inkDim;
-        strip.Items.Add(_status);
-
-        Controls.Add(_list);
-        Controls.Add(side);
-        Controls.Add(bar);
-        Controls.Add(strip);
-
-        // 构造期就把档位建出来：这样外部用对象初始化器设 Threshold 时下拉已经存在，
+        // 构造期就把档位建出来：外部用对象初始化器设 Threshold 时下拉已经存在，
         // setter 里的同步才生效；Load 里再建一次是给「先 Show 后设值」的顺序兜底。
         BuildThresholdItems();
 
         Load += (_, _) =>
         {
+            UiKit.ApplyWindowChrome(this);
+            UiKit.DarkScrollbars(_list);
             BuildThresholdItems();
             Reload();
         };
     }
 
+    // ------------------------------------------------------------------ 布局
+
+    // 四条横带全部手工算坐标，不用 TableLayoutPanel / FlowLayoutPanel：
+    // 自动布局在「AutoSize 列里塞自绘控件」和 DPI 缩放下会给出反直觉的结果
+    // （第一版就踩了：标题栏和工具条上下颠倒，搜索框压到列表上）。
+    // 这里一共四行，算一遍比调一遍快，也稳。
+
+    private void BuildHead()
+    {
+        _head.BackColor = UiKit.Bg;
+
+        _title.Text = "回顾库";
+        _title.Font = UiKit.F135B;
+        _title.ForeColor = UiKit.Text;
+        _title.AutoSize = true;
+        _title.BackColor = UiKit.Bg;
+        _title.Location = new Point(0, 2);
+
+        _count.Font = UiKit.F9;
+        _count.ForeColor = UiKit.Dim;
+        _count.AutoSize = true;
+        _count.BackColor = UiKit.Bg;
+        _count.Text = "还没读盘";
+        _count.Location = new Point(2, 40);
+
+        _thLabel.Font = UiKit.F9;
+        _thLabel.ForeColor = UiKit.Dim;
+        _thLabel.AutoSize = true;
+        _thLabel.TextAlign = ContentAlignment.MiddleLeft;
+
+        UiKit.ThemeCombo(_thCombo);
+        _thCombo.BackColor = UiKit.Sunken;
+        _thPill = PillHost(_thCombo, 214);
+
+        _search.Cue = "搜索文件名";
+        _searchPill = PillHost(_search, 250);
+
+        _head.Controls.Add(_title);
+        _head.Controls.Add(_count);
+        _head.Controls.Add(_thLabel);
+        _head.Controls.Add(_thPill);
+        _head.Controls.Add(_searchPill);
+    }
+
+    private void BuildBar()
+    {
+        _bar.BackColor = UiKit.Bg;
+
+        _btnPlay.Style = RoundButton.Look.Primary;
+        _btnPlay.Click += (_, _) => OpenSelected();
+        _btnReveal.Click += (_, _) => RevealSelected();
+        _btnDel.Style = RoundButton.Look.Danger;
+        _btnDel.Click += (_, _) => DeleteSelected();
+
+        UiKit.ThemeCombo(_kindFilter);
+        _kindFilter.BackColor = UiKit.Sunken;
+        _kindFilter.Items.AddRange(new object[]
+            { "全部种类", "击倒", "再次击倒", "助攻击倒", "小队淘汰", "助攻淘汰", "击杀", "被击倒" });
+        _kindFilter.SelectedIndex = 0;   // ComboBox 不像 ListBox 会自动选第一项，不设就是空白
+        _kindFilter.SelectedIndexChanged += (_, _) => ApplyFilter();
+        _kindPill = PillHost(_kindFilter, 160);
+
+        UiKit.ThemeCombo(_timeFilter);
+        _timeFilter.BackColor = UiKit.Sunken;
+        _timeFilter.Items.AddRange(new object[] { "全部时间", "今天", "最近 7 天", "最近 30 天" });
+        _timeFilter.SelectedIndex = 0;
+        _timeFilter.SelectedIndexChanged += (_, _) => ApplyFilter();
+        _timePill = PillHost(_timeFilter, 152);
+
+        _bar.Controls.Add(_btnPlay);
+        _bar.Controls.Add(_btnReveal);
+        _bar.Controls.Add(_btnDel);
+        _bar.Controls.Add(_kindPill);
+        _bar.Controls.Add(_timePill);
+    }
+
+    private void BuildBody()
+    {
+        _body.BackColor = UiKit.Bg;
+
+        // ---- 左：清单 ----
+        _listCard = new SurfaceCard();
+        var listPad = new Panel { Dock = DockStyle.Fill, Padding = new Padding(6, 4, 6, 6), BackColor = UiKit.Surface };
+
+        _list.Dock = DockStyle.Fill;
+        _list.SelectionChanged += ShowSelection;
+        _list.ClipActivated += OpenSelected;
+        _list.DeleteRequested += DeleteSelected;
+        listPad.Controls.Add(_list);
+
+        _empty.Dock = DockStyle.Fill;
+        _empty.TextAlign = ContentAlignment.MiddleCenter;
+        _empty.ForeColor = UiKit.Dim;
+        _empty.Font = UiKit.F10;
+        _empty.BackColor = UiKit.Sunken;
+        _empty.Visible = false;
+        listPad.Controls.Add(_empty);
+        _empty.BringToFront();
+        _listCard.Controls.Add(listPad);
+
+        // ---- 右：一帧大图 + 元数据 ----
+        _sideWrap = new Panel { BackColor = UiKit.Bg };
+        var sideCard = new SurfaceCard { Dock = DockStyle.Fill, Padding = new Padding(12) };
+
+        _preview.Dock = DockStyle.Top;
+        _preview.Height = 212;
+        _preview.EmptyText = "选一条看看";
+        _preview.DoubleClick += (_, _) => OpenSelected();
+
+        var metaPad = new Panel { Dock = DockStyle.Fill, Padding = new Padding(0, 10, 0, 6), BackColor = UiKit.Surface };
+        _meta.Dock = DockStyle.Fill;
+        metaPad.Controls.Add(_meta);
+
+        _note.Dock = DockStyle.Bottom;
+        _note.Height = 44;
+        _note.ForeColor = UiKit.Dim;
+        _note.Font = UiKit.F9;
+        _note.Text = "";
+        _note.TextAlign = ContentAlignment.MiddleLeft;
+
+        sideCard.Controls.Add(metaPad);
+        sideCard.Controls.Add(_note);
+        sideCard.Controls.Add(_preview);
+        _sideWrap.Controls.Add(sideCard);
+
+        _body.Controls.Add(_listCard);
+        _body.Controls.Add(_sideWrap);
+    }
+
+    private void BuildFoot()
+    {
+        _foot.BackColor = UiKit.Bg;
+        _foot.Paint += (_, e) =>
+        {
+            using var pen = new Pen(UiKit.Line);
+            e.Graphics.DrawLine(pen, 22, 0, _foot.Width - 22, 0);
+        };
+
+        _status.ForeColor = UiKit.Dim;
+        _status.Font = UiKit.F9;
+        _status.TextAlign = ContentAlignment.MiddleLeft;
+        _status.Text = "";
+
+        _statusRight.ForeColor = UiKit.Dim;
+        _statusRight.Font = UiKit.F9;
+        _statusRight.TextAlign = ContentAlignment.MiddleRight;
+        _statusRight.Text = "";
+
+        _foot.Controls.Add(_status);
+        _foot.Controls.Add(_statusRight);
+    }
+
+    /// <summary>
+    /// 把四条带挂上去。停靠顺序是**逆 z 序**的：最后 Add 的最先停靠、拿最外侧的边。
+    /// 所以这里从「最外层」往内倒着加，读起来正好等于屏幕上的顺序。
+    /// </summary>
+    private void MountShell()
+    {
+        Controls.Add(_body);
+        Controls.Add(_foot);
+        Controls.Add(_bar);
+        Controls.Add(_head);
+        _bandsReady = true;
+        LayoutBands();
+    }
+
+    protected override void OnResize(EventArgs e)
+    {
+        base.OnResize(e);
+        if (_bandsReady) LayoutBands();
+    }
+
+    private void LayoutBands()
+    {
+        const int pad = 22;
+        const int headH = 78;
+        const int barH = 56;
+        const int footH = 34;
+
+        int w = ClientSize.Width;
+        int h = ClientSize.Height;
+
+        _head.SetBounds(pad, 8, w - pad * 2, headH);
+        _bar.SetBounds(pad, 8 + headH, w - pad * 2, barH);
+        _foot.SetBounds(0, h - footH, w, footH);
+
+        int bodyTop = 8 + headH + barH;
+        _body.SetBounds(pad, bodyTop, w - pad * 2, Math.Max(120, h - bodyTop - footH - 10));
+
+        // ---- 标题栏：左标题、右「灵敏度 + 搜索」----
+        int hw = _head.Width;
+        var search = _searchPill!;
+        var thPill = _thPill!;
+        search.SetBounds(hw - search.Width, 8, search.Width, 38);
+        thPill.SetBounds(search.Left - 8 - thPill.Width, 8, thPill.Width, 38);
+        _thLabel.Text = Threshold > 0 ? $"灵敏度 {Threshold:F2}" : "灵敏度";
+        int thLabelW = TextRenderer.MeasureText(_thLabel.Text, _thLabel.Font).Width;
+        _thLabel.SetBounds(thPill.Left - 10 - thLabelW, 8 + (38 - _thLabel.Height) / 2, thLabelW, _thLabel.Height);
+
+        // ---- 工具条：左三个动作、右两个筛选 ----
+        const int btnY = (barH - 38) / 2;
+        _btnPlay.SetBounds(0, btnY, 104, 38);
+        _btnReveal.SetBounds(112, btnY, 118, 38);
+        _btnDel.SetBounds(238, btnY, 88, 38);
+        var timePill = _timePill!;
+        var kindPill = _kindPill!;
+        timePill.SetBounds(_bar.Width - timePill.Width, btnY, timePill.Width, 38);
+        kindPill.SetBounds(timePill.Left - 8 - kindPill.Width, btnY, kindPill.Width, 38);
+
+        // ---- 正文：左边清单、右边详情 ----
+        int sideW = 420;
+        _sideWrap!.SetBounds(_body.Width - sideW, 0, sideW, _body.Height);
+        _listCard!.SetBounds(0, 0, Math.Max(200, _body.Width - sideW - 16), _body.Height);
+
+        // ---- 状态栏 ----
+        _status.SetBounds(22, 0, Math.Max(120, _foot.Width - 22 - 460 - 24), footH);
+        _statusRight.SetBounds(_foot.Width - 22 - 460, 0, 460, footH);
+    }
+
+    /// <summary>把控件塞进胶囊容器里并居中，圆角是靠容器画的。</summary>
+    private static Pill PillHost(Control inner, int width, int height = 38, int padX = 15)
+    {
+        var pill = new Pill { Size = new Size(width, height), Margin = new Padding(8, 2, 0, 2) };
+        inner.Font = UiKit.F95;
+        pill.Controls.Add(inner);
+        void Place()
+        {
+            int h = inner.Height > 0 ? inner.Height : 22;
+            inner.SetBounds(padX, Math.Max(2, (pill.Height - h) / 2), Math.Max(20, pill.Width - padX * 2), h);
+        }
+        pill.Resize += (_, _) => Place();
+        pill.HandleCreated += (_, _) => Place();
+        Place();
+        return pill;
+    }
+
+    // ------------------------------------------------------------------ 数据
+
     /// <summary>
     /// 灵敏度下拉：第一项是「按模板自带」，后面是固定档位。
-    /// 用 DropDownList + 固定档位而不是滑块，是为了让用户一眼看到「0.70 推荐」这种标签，
+    /// 用固定档位而不是滑块，是为了让用户一眼看到「0.70 推荐」这种标签，
     /// 而不是面对一个 0.30–0.95 的无刻度滑块瞎拖。
     /// </summary>
     private void BuildThresholdItems()
@@ -249,147 +402,40 @@ public sealed class LibraryForm : Form
         UpdateStatus();
     }
 
-    private static ToolStripButton Button(string text, EventHandler onClick)
-    {
-        var b = new ToolStripButton(text) { DisplayStyle = ToolStripItemDisplayStyle.Text, AutoSize = false, Width = 74 };
-        b.Click += onClick;
-        return b;
-    }
-
-    private static ToolStripLabel MakeLabel(string text, Color color) => new ToolStripLabel(text) { ForeColor = color };
-
     public void Reload()
     {
-        _loadCts?.Cancel();
         _all = _lib.Scan();
         _all.Reverse();   // 新的在前，这里不是淘汰顺序
         ApplyFilter();
-        LoadThumbs();
     }
 
     private void ApplyFilter()
     {
-        IEnumerable<ClipInfo> q = _all;
+        var filter = ClipQuery.FromUi(_kindFilter.SelectedIndex, _timeFilter.SelectedIndex, _search.Text, DateTime.Now);
+        _shown = ClipQuery.Apply(_all, filter);
 
-        var kind = _kindFilter.SelectedIndex switch
-        {
-            1 => (ClipKind?)ClipKind.Knock,
-            2 => ClipKind.ReKnock,
-            3 => ClipKind.AssistKnock,
-            4 => ClipKind.Elim,
-            5 => ClipKind.AssistElim,
-            6 => ClipKind.Kill,
-            7 => ClipKind.Knocked,
-            _ => null,
-        };
-        if (kind is not null) q = q.Where(c => c.Kind == kind);
+        _list.SetClips(_shown);   // 重建行 + 重取缩略图 + 默认选中第一行（会回调 ShowSelection）
 
-        var now = DateTime.Now;
-        var cut = _timeFilter.SelectedIndex switch
-        {
-            1 => now.Date,
-            2 => now.AddDays(-7),
-            3 => now.AddDays(-30),
-            _ => DateTime.MinValue,
-        };
-        if (cut > DateTime.MinValue) q = q.Where(c => c.CreatedLocal >= cut);
+        _empty.Visible = _shown.Count == 0;
+        _empty.Text = _all.Count == 0
+            ? "库里还没有片段\r\n\r\n下一把录到击倒会自动存进来"
+            : "这个筛选下没有片段\r\n\r\n把「种类/时间」调回全部，或清空搜索";
 
-        var s = _search.Text.Trim();
-        if (s.Length > 0) q = q.Where(c => c.Name.Contains(s, StringComparison.OrdinalIgnoreCase));
-
-        _shown = q.ToList();
-
-        _list.BeginUpdate();
-        try
-        {
-            _list.Items.Clear();
-            _thumbs.Images.Clear();
-            foreach (var c in _shown)
-            {
-                var meta = Mp4Probe.Read(c.Path);   // 只读 box 头，微秒级
-                var it = new ListViewItem(c.CreatedLocal.ToString("MM-dd HH:mm:ss")) { Tag = c };
-                it.SubItems.Add(KindName(c.Kind));
-                it.SubItems.Add(c.Score.ToString("F2", CultureInfo.InvariantCulture));
-                it.SubItems.Add(Mp4Probe.Fmt(meta.Seconds));
-                it.SubItems.Add(meta.Valid ? $"{meta.Width}x{meta.Height}" : "—");
-                it.SubItems.Add(meta.HasAudio ? "有" : "无");
-                it.SubItems.Add(QuotaReport.Mb(c.Bytes));
-                it.SubItems.Add(c.Name);
-                it.ImageIndex = -1;
-                _list.Items.Add(it);
-            }
-        }
-        finally { _list.EndUpdate(); }
-
-        if (_list.Items.Count > 0) _list.Items[0].Selected = true;
-        else ShowSelection();
+        if (_list.RowCount == 0) ShowSelection();
         UpdateStatus();
-    }
-
-    private static string KindName(ClipKind k) => k switch
-    {
-        ClipKind.Kill => "击杀",
-        ClipKind.Knocked => "被击倒",
-        ClipKind.ReKnock => "再次击倒",
-        ClipKind.AssistKnock => "助攻击倒",
-        ClipKind.Elim => "小队淘汰",
-        ClipKind.AssistElim => "助攻淘汰",
-        _ => "击倒",
-    };
-
-    /// <summary>后台把缩略图一张张塞进 ImageList，不阻塞 UI 也不阻塞录制。</summary>
-    private async void LoadThumbs()
-    {
-        var cts = new CancellationTokenSource();
-        _loadCts = cts;
-        var token = cts.Token;
-
-        // 先占位，保证 ImageIndex 与行号对应，后面直接换图
-        var placeholder = new Bitmap(80, 45);
-        using (var g = Graphics.FromImage(placeholder))
-            g.Clear(Color.FromArgb(52, 52, 58));
-        _thumbs.Images.Add(placeholder);
-
-        var items = _list.Items.Cast<ListViewItem>().ToList();
-        for (int i = 0; i < items.Count; i++)
-        {
-            items[i].ImageIndex = 0;
-            items[i].ImageKey = "";
-        }
-
-        foreach (var it in items)
-        {
-            if (token.IsCancellationRequested || IsDisposed) return;
-            var clip = (ClipInfo)it.Tag!;
-            Bitmap? bmp = null;
-            try { bmp = await Task.Run(() => ShellThumb.Get(clip.Path, 160, 90), token); }
-            catch (OperationCanceledException) { return; }
-            catch { }
-            if (IsDisposed || token.IsCancellationRequested) { bmp?.Dispose(); return; }
-            if (bmp is null) continue;
-
-            // ImageList.Images 不能随便重排（索引就是行绑定），所以追加再改 ImageIndex
-            int idx;
-            _thumbs.Images.Add(bmp);
-            idx = _thumbs.Images.Count - 1;
-            it.ImageIndex = idx;
-        }
-    }
-
-    private ClipInfo? Selected()
-    {
-        if (_list.SelectedItems.Count == 0) return null;
-        return _list.SelectedItems[0].Tag as ClipInfo;
     }
 
     private void ShowSelection()
     {
-        var c = Selected();
+        var c = _list.SelectedClip;
         if (c is null)
         {
+            _preview.Image?.Dispose();
             _preview.Image = null;
-            _meta.Text = _shown.Count == 0 ? "这个筛选下没有片段。\r\n\r\n录一段之后回来按「刷新」。" : "选一条看看。";
-            _note.Text = "";
+            _meta.Set(("提示", _shown.Count == 0 ? "这个筛选下没有片段" : "在左边选一条"));
+            _note.Text = _shown.Count == 0
+                ? "录一段之后回来按 F5 刷新"
+                : "双击或 Enter 用系统播放器打开 · Delete 删除";
             return;
         }
 
@@ -397,15 +443,16 @@ public sealed class LibraryForm : Form
         _preview.Image?.Dispose();
         _preview.Image = ShellThumb.Get(c.Path, 720, 405);
 
-        var sb = new System.Text.StringBuilder();
-        sb.AppendLine(c.CreatedLocal.ToString("yyyy-MM-dd HH:mm:ss"));
-        sb.AppendLine($"种类 {KindName(c.Kind)}    分数 {c.Score:F2}");
-        sb.AppendLine($"时长 {Mp4Probe.Fmt(meta.Seconds)}    分辨率 {(meta.Valid ? $"{meta.Width}x{meta.Height}" : "—")}");
-        sb.AppendLine($"音轨 {(meta.HasAudio ? "有" : "无")}    编码 {meta.Codec}");
-        sb.AppendLine($"体积 {QuotaReport.Mb(c.Bytes)}");
-        _meta.Text = sb.ToString();
+        _meta.Set(
+            ("时间", c.CreatedLocal.ToString("yyyy-MM-dd HH:mm:ss")),
+            ("种类", ClipKinds.Label(c.Kind)),
+            ("分数", c.Score.ToString("F3", CultureInfo.InvariantCulture)),
+            ("时长", Mp4Probe.Fmt(meta.Seconds)),
+            ("分辨率", meta.Valid ? $"{meta.Width} × {meta.Height}" : "—"),
+            ("音轨", meta.HasAudio ? $"有 · {meta.Codec}" : "无"),
+            ("体积", QuotaReport.Mb(c.Bytes)));
 
-        _note.Text = "双击或按 Enter 用系统播放器打开\r\nDelete 删除";
+        _note.Text = "双击或 Enter 用系统播放器打开 · Delete 删除";
     }
 
     private void UpdateStatus()
@@ -415,13 +462,16 @@ public sealed class LibraryForm : Form
         var q = _policy.QuotaGb <= 0 ? "不限" : $"{_policy.QuotaGb}GB";
         var r = _policy.RetainDays <= 0 ? "永久" : $"{_policy.RetainDays} 天";
         var free = QuotaReport.Mb(QuotaEnforcer.FreeBytes(_lib.Dir));
-        _status.Text = $"{_shown.Count}/{_all.Count} 片（{QuotaReport.Mb(shownTotal)} / 合计 {QuotaReport.Mb(total)}）   " +
-                       $"配额 {q}，保留 {r}   磁盘可用 {free}";
+        _status.Text = $"{_shown.Count} / {_all.Count} 片　·　{QuotaReport.Mb(shownTotal)}（共 {QuotaReport.Mb(total)}）";
+        _statusRight.Text = $"配额 {q}　·　保留 {r}　·　磁盘可用 {free}";
+        _count.Text = _all.Count == 0
+            ? "还没有片段"
+            : $"{_all.Count} 片 · 合计 {QuotaReport.Mb(total)}";
     }
 
     private void OpenSelected()
     {
-        var c = Selected();
+        var c = _list.SelectedClip;
         if (c is null) return;
         try { Process.Start(new ProcessStartInfo(c.Path) { UseShellExecute = true }); }
         catch (Exception ex) { MessageBox.Show(this, "打不开：" + ex.Message, "ApexHighlights"); }
@@ -429,7 +479,7 @@ public sealed class LibraryForm : Form
 
     private void RevealSelected()
     {
-        var c = Selected();
+        var c = _list.SelectedClip;
         try
         {
             if (c is null) Process.Start(new ProcessStartInfo(_lib.Dir) { UseShellExecute = true });
@@ -457,13 +507,7 @@ public sealed class LibraryForm : Form
 
     protected override void Dispose(bool disposing)
     {
-        if (disposing)
-        {
-            _loadCts?.Cancel();
-            _loadCts?.Dispose();
-            _preview.Image?.Dispose();
-            _thumbs.Dispose();
-        }
+        if (disposing) _preview.Image?.Dispose();
         base.Dispose(disposing);
     }
 }

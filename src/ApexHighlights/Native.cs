@@ -189,6 +189,27 @@ internal static unsafe class Native
     [DllImport("d3d11.dll", ExactSpelling = true)]
     private static extern int CreateDirect3D11DeviceFromDXGIDevice(IntPtr dxgiDevice, out IntPtr graphicsDevice);
 
+    [StructLayout(LayoutKind.Sequential)]
+    private struct RECT { public int Left, Top, Right, Bottom; }
+
+    [DllImport("user32.dll")] private static extern bool PrintWindow(IntPtr h, IntPtr hdc, uint flags);
+    [DllImport("user32.dll")] private static extern bool GetWindowRect(IntPtr h, out RECT r);
+
+    /// <summary>
+    /// 把窗口画进位图。PW_RENDERFULLCONTENT(2) 让 DWM 合成一份完整内容，
+    /// 所以窗口被遮挡、或者控件自己不支持 WM_PRINTCLIENT 也能抓到。
+    /// </summary>
+    public static bool PrintWindowTo(IntPtr hwnd, Bitmap bmp)
+    {
+        if (!GetWindowRect(hwnd, out var r)) return false;
+        int w = Math.Min(bmp.Width, r.Right - r.Left), h = Math.Min(bmp.Height, r.Bottom - r.Top);
+        if (w <= 0 || h <= 0) return false;
+        using var g = Graphics.FromImage(bmp);
+        var hdc = g.GetHdc();
+        try { return PrintWindow(hwnd, hdc, 2); }
+        finally { g.ReleaseHdc(hdc); }
+    }
+
     private delegate bool EnumProc(IntPtr hWnd, IntPtr lParam);
     [DllImport("user32.dll")] private static extern bool EnumWindows(EnumProc cb, IntPtr lParam);
     [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr h);
