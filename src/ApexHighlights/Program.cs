@@ -145,7 +145,9 @@ internal static class Program
 
             return offline is not null
                 ? Offline(engine, offline.Length == 0 ? Path.Combine(Paths.DataRoot, "probe", "bands.bin") : offline)
-                : Live(engine, dump, title ?? (profile.WindowTitles.Length > 0 ? profile.WindowTitles[0] : profile.Name), logPath, fps, bitrate, encode, gop, fakeHit, duration, audio, beep, quota, tray, ui, traySelfTest, detect, cfgPath, ocr);
+                : Live(engine, dump, title ?? (profile.WindowTitles.Length > 0 ? profile.WindowTitles[0] : profile.Name), logPath, fps, bitrate, encode, gop, fakeHit, duration, audio, beep, quota, tray, ui, traySelfTest, detect, cfgPath, ocr,
+                       int.TryParse(args.FirstOrDefault(a => a.StartsWith("--fake-repeat=", StringComparison.OrdinalIgnoreCase))?[14..], out var fr) && fr > 0 ? fr : 1,
+                       int.TryParse(args.FirstOrDefault(a => a.StartsWith("--fake-gap=", StringComparison.OrdinalIgnoreCase))?[11..], out var fg) && fg > 0 ? fg : 700);
         }
         catch (Exception ex)
         {
@@ -367,6 +369,8 @@ internal static class Program
         Log.Write($"[2] 配额 {quota.QuotaGb}GB / 保留 {(quota.RetainDays == 0 ? "永久" : quota.RetainDays + " 天")} / 水位 {quota.WatermarkGb}GB");
         var thShown = detect.Threshold > 0 ? detect.Threshold : prof.Templates[0].Threshold;
         Log.Write($"[2b] 命中阈值 {thShown:F2}（config.json 的 Threshold 字段，托盘菜单「检测灵敏度」里可调）");
+        Log.Write($"[2c] 合并窗口 {(detect.MergeSec == 0 ? "关（每次命中各出一段）" : detect.MergeSec + "s")}" +
+                  "（config.json 的 MergeSec 字段，托盘菜单「合并窗口」里可调）");
         Log.Write("[3] 右键托盘图标可以打开回顾库；关掉这个窗口也不影响录制。");
 
         // 托盘模式下把控制台藏掉：双击 exe 时那个黑窗口没必要一直开着。
@@ -399,7 +403,7 @@ internal static class Program
         return exit;
     }
 
-    private static int Live(BannerEngine engine, int dumpAtSec, string title, string? logPath, int fps, int bitrate, bool encode, int gop, int fakeHit, int durationSec, bool audio = true, bool beep = true, QuotaPolicy? quotaPolicy = null, bool tray = true, bool ui = false, int traySelfTest = 0, DetectPolicy? detectPolicy = null, string? cfgPath = null, bool ocr = true)
+    private static int Live(BannerEngine engine, int dumpAtSec, string title, string? logPath, int fps, int bitrate, bool encode, int gop, int fakeHit, int durationSec, bool audio = true, bool beep = true, QuotaPolicy? quotaPolicy = null, bool tray = true, bool ui = false, int traySelfTest = 0, DetectPolicy? detectPolicy = null, string? cfgPath = null, bool ocr = true, int fakeRepeat = 1, int fakeGap = 700)
     {
         var prof = engine.Profile;
         var quota = quotaPolicy ?? new QuotaPolicy();
@@ -445,13 +449,16 @@ internal static class Program
         {
             cap.GopFrames = gop > 0 ? gop : fps;
             cap.FakeHitAtSec = fakeHit;
+            cap.FakeHitRepeat = fakeRepeat > 0 ? fakeRepeat : 1;
+            cap.FakeHitGapMs = fakeGap > 0 ? fakeGap : 700;
             cap.DumpAtSec = dumpAtSec;
             cap.AudioEnabled = audio;
             cap.BeepOnSave = beep;
             cap.OcrEnabled = ocr;
             cap.Quota = quota;
+            cap.MergeMs = detect.MergeSec * 1000;
             cap.EnableEncoding(90);
-            Out($"[2b] 编码 {cap.Width}x{cap.Height} @{fps}fps {bitrate / 1_000_000}Mbps，环形 90s，音轨{(audio ? "开" : "关")}，提示音{(beep ? "开" : "关")}，横幅分类{(ocr ? "开" : "关")}");
+            Out($"[2b] 编码 {cap.Width}x{cap.Height} @{fps}fps {bitrate / 1_000_000}Mbps，环形 90s，音轨{(audio ? "开" : "关")}，提示音{(beep ? "开" : "关")}，横幅分类{(ocr ? "开" : "关")}，合并窗口{(detect.MergeSec == 0 ? "关" : detect.MergeSec + "s")}");
             Out($"[2c] 配额 {quota.QuotaGb}GB / 保留 {(quota.RetainDays == 0 ? "永久" : quota.RetainDays + " 天")} / 水位 {quota.WatermarkGb}GB / 检查间隔 {quota.CheckMinutes} 分钟");
 
             // 启动时先清一次（spec §5 的清理触发点之一），顺带把水位状态摸清楚

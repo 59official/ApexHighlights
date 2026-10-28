@@ -74,6 +74,10 @@ internal sealed class Capture : IDisposable
     private long _frames, _samples, _hits, _encoded, _droppedFrames, _totalMs;
     private long _limiterDrops, _capDrops, _queueDrops, _poolCreated;
     public bool HasFiredFake { get; private set; }
+    /// <summary>假命中连发几次、间隔多少毫秒 —— 专门复现「一次击倒连出 3 段」的 bug。</summary>
+    public int FakeHitRepeat = 1;
+    public int FakeHitGapMs = 700;
+    private int _fakeFired;
     private long _lastDetectTicks, _lastHitMs = -10000, _lastNearMs = -10000;
 
     // 待切片段队列：命中时刻只登记，等环形真的录满后摇才落盘。
@@ -87,11 +91,12 @@ internal sealed class Capture : IDisposable
     private readonly BannerOcr _ocr = new();
     /// <summary>关掉横幅 OCR 分类（--no-ocr）。关掉后种类一律记为 Unknown，仍照常录制。</summary>
     public bool OcrEnabled = true;
-    /// <summary>同一目标的去重窗口：OCR 读到相同的文案后，这么多毫秒内不再重复登记。</summary>
-    public int DedupeMs = 3000;
-    /// <summary>最近一次登记的 (文案, 时刻)，用于去重。由 "clip" 线程独占。</summary>
-    private (string Text, long Ms) _lastOcr;
-    private long _deduped, _ocrMs, _ocrCount;
+    /// <summary>
+    /// 合并窗口（spec §4）：相邻两次命中间隔 ≤ 这么多毫秒，视为同一场交火，切成一段。
+    /// 0 = 关闭合并，每次命中各出一段。
+    /// </summary>
+    public int MergeMs = 8000;
+    private long _merged, _ocrMs, _ocrCount;
 
     // 配额/保留期（QuotaPolicy 默认 40GB / 30 天 / 2GB 水位）
     private ClipLibrary? _lib;
@@ -283,6 +288,16 @@ internal sealed class Capture : IDisposable
         // 持续存在的画面会因为 _wasAbove 还是 true 而永不触发下降沿。
         _wasAbove = false;
         Log.Write($"[threshold] 命中阈值改为 {_eng.EffectiveThreshold:F2}（{DetectPolicy.HintFor(p.Threshold)}）");
+    }
+
+    /// <summary>
+    /// 合并窗口：相邻命中间隔不超过这个时长就算同一场交火，只切一段。
+    /// 横幅会在屏幕上停留 2–3 秒、每 minGapMs 再触发一次，单靠「上升沿」并不够。
+    /// </summary>
+    public void SetMergeMs(int ms)
+    {
+        MergeMs = Math.Clamp(ms, 0, 60_000);
+        Log.Write($"[merge] 合并窗口改为 {(MergeMs == 0 ? "关（每次命中各出一段）" : MergeMs / 1000.0 + "s")}");
     }
 
     /// <summary>
@@ -487,10 +502,14 @@ internal sealed class Capture : IDisposable
 
                 ReadBand(tex);
 
-                if (FakeHitAtSec > 0 && now >= FakeHitAtSec * 1000L && !HasFiredFake)
+                if (FakeHitAtSec > 0 && _fakeFired < FakeHitRepeat
+                    && now >= FakeHitAtSec * 1000L + (long)_fakeFired * FakeHitGapMs)
                 {
                     HasFiredFake = true;
-                    QueueClip(new Detection(now, 0.99f, 0, 0, null) { WallClock = DateTime.Now, Label = "fake" });
+                    // 按真实时间间隔逐个触发（不是一次性排队），这样合并窗口的判据能被真实验证
+                    QueueClip(new Detection(now, 0.99f - _fakeFired * 0.01f, 0, 0, null)
+                    { WallClock = DateTime.Now, Label = "fake" });
+                    _fakeFired++;
                 }
 
                 var sw = Stopwatch.StartNew();
@@ -591,45 +610,78 @@ internal sealed class Capture : IDisposable
         }
     }
 
-    /// <summary>等「命中时刻 + 后摇」真的录进环里，再切、再落盘、再报事件。</summary>
+    /// <summary>
+    /// 等「命中时刻 + 后摇」真的录进环里，再切、再落盘、再报事件。
+    ///
+    /// 合并（spec §4「相邻击倒间隔 ≤ 8s 合并为一段」）：Apex 的横幅在屏幕上停留
+    /// 两秒多，期间每过 minGapMs 就会再命中一次 —— 结果是一次击倒连出 3 段视频
+    /// （实测 19:43:06 / 19:43:07 / 19:43:08 三条）。靠文案判重不管用：玩家名
+    /// 中英混排，OCR 每次读出来的乱码都不一样。所以改成按**时间**合并：从第一次
+    /// 命中起，MergeMs 内再来的命中都并进同一段，片段范围取「首命中 − 前摇」到
+    /// 「末命中 + 后摇」。停顿超过 MergeMs 才算下一场交火。
+    /// </summary>
     private void ClipLoop()
     {
         while (!_stop)
         {
             Thread.Sleep(100);
-            Detection[] batch;
+
+            Detection first;
             lock (_pendingGate)
             {
                 if (_pending.Count == 0) continue;
-                batch = _pending.ToArray();
-                _pending.Clear();
+                first = _pending[0];
+                _pending.RemoveAt(0);
             }
 
-            foreach (var det in batch)
+            var group = new List<Detection> { first };
+            long lastMs = first.Ms;
+            long started = _clock.ElapsedMilliseconds;
+
+            // 一边等后摇、一边继续吸纳合并窗口内的新命中
+            while (!_stop)
             {
-                // 先 OCR 分类，再等后摇。顺序很重要：后摇要等 5 秒，这点时间足够
-                // 跑完 21ms 的识别，等于 OCR 完全白拿（不占采集、不占编码、不推迟出片）。
-                var d = Classify(det);
-
-                // 同一目标重复触发要去重：实测「白奈雪子」被 RE-KNOCKED 时，
-                // 1 秒内连录了 3 段（0.61 / 0.63 + 一张 near）。横幅持续可见期间
-                // 每 0.5 秒（minGapMs）就会再命中一次，必须靠文案+时间去重。
-                if (IsDuplicate(d)) { continue; }
-
-                long wantUs = d.Ms * 1000L + _prof.PostRollSec * 1_000_000L;
-                // 最多多等 3 秒：环形已经滑过足够远（比如命中后立刻暂停）就不再干等
-                long giveUp = _clock.ElapsedMilliseconds;
-                while (!_stop && _ring is not null)
+                lock (_pendingGate)
                 {
-                    var (_, coverTo) = _ring.Coverage();
-                    if (coverTo >= wantUs) break;
-                    if (_stop || _clock.ElapsedMilliseconds - giveUp > 3000 + _prof.PostRollSec * 1000L) break;
-                    Thread.Sleep(80);
+                    for (int i = _pending.Count - 1; i >= 0; i--)
+                    {
+                        var p = _pending[i];
+                        if (p.Ms - lastMs > MergeMs) continue;   // 太远，留给下一场
+                        group.Add(p);
+                        _pending.RemoveAt(i);
+                        if (p.Ms > lastMs) lastMs = p.Ms;
+                    }
                 }
 
-                var clip = WriteClip(d);
-                Detected?.Invoke(d with { ClipPath = clip.Path, Bytes = clip.Bytes });
+                bool ringReady = false;
+                if (_ring is not null)
+                {
+                    var (_, coverTo) = _ring.Coverage();
+                    ringReady = coverTo >= lastMs * 1000L + _prof.PostRollSec * 1_000_000L;
+                }
+                long quiet = _clock.ElapsedMilliseconds - lastMs;
+
+                // 后摇录满了、并且安静够一个合并窗口，才算这一场结束
+                if (ringReady && quiet >= MergeMs) break;
+                // 兜底：环形已经滑过足够远（比如命中后立刻暂停/退出），不再干等
+                if (_clock.ElapsedMilliseconds - started > MergeMs + 3000 + _prof.PostRollSec * 1000L) break;
+
+                Thread.Sleep(80);
             }
+
+            // 种类/分数取分数最高的那一次（横幅最完整、OCR 最准）
+            var rep = group[0];
+            foreach (var g in group) if (g.Score > rep.Score) rep = g;
+            var d = Classify(rep);
+
+            if (group.Count > 1)
+            {
+                _merged += group.Count - 1;
+                Log.Write($"[merge] {group.Count} 次命中合并为一段（{group[0].Ms / 1000.0:F1}s–{lastMs / 1000.0:F1}s），种类取 {BannerOcr.Label(d.Kind)}");
+            }
+
+            var clip = WriteClip(d, group[0].Ms, lastMs);
+            Detected?.Invoke(d with { ClipPath = clip.Path, Bytes = clip.Bytes });
         }
     }
 
@@ -655,32 +707,6 @@ internal sealed class Capture : IDisposable
         }
     }
 
-    /// <summary>
-    /// 同一目标的重复触发判定。Apex 的横幅在屏幕上停留约 2–3 秒，期间每过一个
-    /// minGapMs（默认 500ms）就会再命中一次，于是同一次击倒会录出好几段。
-    /// 实测「白奈雪子」被 RE-KNOCKED 时 1 秒内连出 3 段。
-    ///
-    /// 判据用 OCR 文案而不是画面相似度：同一目标被再次击倒时，文案会从
-    /// RE-KNOCKED 变成别的东西（补掉 → 小队淘汰），那是**新事件**，必须录。
-    /// 所以只有「文案完全相同」才算重复。
-    /// </summary>
-    private bool IsDuplicate(Detection det)
-    {
-        if (DedupeMs <= 0) return false;
-        // 没读到文案就无从判断，宁可多录也不漏录 —— 漏掉一次击倒比多一个片段糟。
-        if (string.IsNullOrWhiteSpace(det.OcrText)) return false;
-
-        var key = det.OcrText;
-        if (key == _lastOcr.Text && det.Ms - _lastOcr.Ms <= DedupeMs)
-        {
-            _deduped++;
-            Log.Write($"[dedupe] {det.Ms / 1000.0:F1}s 与上次同一横幅（{key}），跳过");
-            return true;
-        }
-        _lastOcr = (key, det.Ms);
-        return false;
-    }
-
     /// <summary>退出时把队列里还没切的片段切掉（后摇可能没录满，但前摇画面不能白丢）。</summary>
     private void FlushPending()
     {
@@ -691,23 +717,31 @@ internal sealed class Capture : IDisposable
             batch = _pending.ToArray();
             _pending.Clear();
         }
-        foreach (var det in batch)
+        // 同样按合并窗口分组，避免退出瞬间把一场交火补切成好几段
+        int i = 0;
+        while (i < batch.Length)
         {
-            var clip = WriteClip(Classify(det));
-            if (clip.Path is not null) Console.WriteLine($"[CLIP] {clip.Path}（退出时补切）");
+            long firstMs = batch[i].Ms, lastMs = firstMs;
+            int j = i + 1;
+            while (j < batch.Length && batch[j].Ms - lastMs <= MergeMs) { lastMs = batch[j].Ms; j++; }
+            var rep = batch[i];
+            for (int k = i; k < j; k++) if (batch[k].Score > rep.Score) rep = batch[k];
+            var clip = WriteClip(Classify(rep), firstMs, lastMs);
+            if (clip.Path is not null) Log.Write($"[CLIP] {clip.Path}（退出时补切）");
+            i = j;
         }
     }
 
-    /// <summary>按前摇/后摇从环形里切一片出来写成 mp4。</summary>
-    private (string? Path, long Bytes) WriteClip(Detection det)
+    /// <summary>按前摇/后摇从环形里切一片出来写成 mp4。片段范围是 [首命中−前摇, 末命中+后摇]。</summary>
+    private (string? Path, long Bytes) WriteClip(Detection det, long firstMs, long lastMs)
     {
         if (_ring is null || _ring.Segments.Count == 0) return (null, 0);
         try
         {
             var (coverFrom, coverTo) = _ring.Coverage();
             long endUs = coverTo;
-            long startUs = Math.Max(coverFrom, det.Ms * 1000L - _prof.PreRollSec * 1_000_000L);
-            long stopUs = Math.Min(endUs, det.Ms * 1000L + _prof.PostRollSec * 1_000_000L);
+            long startUs = Math.Max(coverFrom, firstMs * 1000L - _prof.PreRollSec * 1_000_000L);
+            long stopUs = Math.Min(endUs, lastMs * 1000L + _prof.PostRollSec * 1_000_000L);
             if (stopUs - startUs < 500_000) return (null, 0);
 
             var bytes = _ring.BuildClip(startUs, stopUs, _aRing);
@@ -810,7 +844,7 @@ internal sealed class Capture : IDisposable
             s += $" 音频={_aRing.TotalFrames}帧/{_aRing.DiskBytes() / 1024}KB 覆盖({ac.From / 1000},{ac.To / 1000})ms";
         }
         if (OcrEnabled && _ocrCount > 0)
-            s += $" OCR={_ocrCount}次/{_ocrMs}ms 去重={_deduped}";
+            s += $" OCR={_ocrCount}次/{_ocrMs}ms 合并={_merged}次";
         if (_ocr.Err.Length > 0) s += $"  ocrErr={_ocr.Err}";
         if (_err.Length > 0) s += $"  err={_err}";
         if (_encErr.Length > 0) s += $"  encErr={_encErr}";

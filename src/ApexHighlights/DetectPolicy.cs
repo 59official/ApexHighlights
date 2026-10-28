@@ -23,6 +23,16 @@ public sealed class DetectPolicy
     /// </summary>
     public float Threshold { get; set; } = 0.70f;
 
+    /// <summary>
+    /// 合并窗口（秒）：相邻两次命中间隔 ≤ 这个值，视为同一场交火，切成一段。
+    /// 0 = 不合并，每次命中各出一段。
+    ///
+    /// 默认 8 的来历：Apex 横幅在屏幕上停留两秒多，期间每 0.5s 就会再触发一次 NCC，
+    /// 于是一次击倒会连出 3 段视频（实测 19:43:06 / :07 / :08 三条，各 80MB）。
+    /// 8 秒是 spec §4 早就定下的值 —— 一场交火里连击倒两个也只该给一段。
+    /// </summary>
+    public int MergeSec { get; set; } = 8;
+
     /// <summary>给界面/日志用的可读描述。</summary>
     public string Describe =>
         Threshold <= 0 ? "按模板自带" : $"{Threshold:F2}";
@@ -74,6 +84,7 @@ public sealed class DetectPolicy
             else root = new JsonObject();
 
             root["Threshold"] = Math.Round(Threshold, 2);
+            root["MergeSec"] = MergeSec;
 
             var dir = Path.GetDirectoryName(path);
             if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
@@ -83,9 +94,11 @@ public sealed class DetectPolicy
         catch { return false; }
     }
 
-    /// <summary>把用户输入夹到有意义的范围：0（按模板）或 0.30–0.95。</summary>
+    /// <summary>把用户输入夹到有意义的范围：0（按模板）或 0.30–0.95；合并窗口 0–60 秒。</summary>
     public static DetectPolicy Clamp(DetectPolicy p)
     {
+        if (p.MergeSec < 0) p.MergeSec = 0;
+        if (p.MergeSec > 60) p.MergeSec = 60;
         if (p.Threshold <= 0) { p.Threshold = 0; return p; }
         if (p.Threshold < 0.30f) p.Threshold = 0.30f;
         if (p.Threshold > 0.95f) p.Threshold = 0.95f;

@@ -73,6 +73,7 @@ internal sealed class TrayApp : ApplicationContext
         config.Click += (_, _) => OpenConfig();
         menu.Items.Add(config);
         menu.Items.Add(BuildSensitivityMenu());
+        menu.Items.Add(BuildMergeMenu());
         menu.Items.Add(new ToolStripSeparator());
         var quit = new ToolStripMenuItem("退出");
         quit.Click += (_, _) => Quit();
@@ -135,6 +136,15 @@ internal sealed class TrayApp : ApplicationContext
                         var back = DetectPolicy.Presets.First(v => Math.Abs(v - 0.70f) < 0.001f);
                         ClickSensitivity(back);
                         say($"点回 {back:F2} 之后 = {EffectiveThreshold:F2}");
+                        // 合并窗口：同样走菜单点击，验证「立刻生效 + 落盘记住 + 不影响阈值」
+                        say($"合并菜单 = {FindMergeRoot()?.Text ?? "找不到"}");
+                        say($"改前合并窗口 = {EffectiveMergeSec}s");
+                        ClickMerge(3);
+                        say($"点 3s 之后 = {EffectiveMergeSec}s，采集器里 MergeMs = {(_cap?.MergeMs.ToString() ?? "无采集")}");
+                        say("config.json 现在是 " +
+                            (File.Exists(_cfgPath) ? string.Join(" ", File.ReadAllLines(_cfgPath)) : "(没写)"));
+                        ClickMerge(8);
+                        say($"点回 8s 之后 = {EffectiveMergeSec}s");
                         break;
                     case 4:
                         say($"点「暂停录制」→ {_pauseItem.Text}");
@@ -211,6 +221,7 @@ internal sealed class TrayApp : ApplicationContext
             _cap.AudioEnabled = _audio;
             _cap.BeepOnSave = _beep;
             _cap.OcrEnabled = _ocr;
+            _cap.MergeMs = _detect.MergeSec * 1000;
             _cap.FakeHitAtSec = _fakeHit;
             _cap.Detected += OnDetected;
             _cap.EnableEncoding(90);
@@ -410,6 +421,68 @@ internal sealed class TrayApp : ApplicationContext
     private float EffectiveThreshold =>
         _cap?.Threshold ?? (_detect.Threshold > 0 ? _detect.Threshold : _profile.Templates[0].Threshold);
 
+    /// <summary>合并窗口的候选秒数。0 = 不合并。</summary>
+    private static readonly int[] MergePresets = { 0, 3, 5, 8, 12, 20 };
+
+    /// <summary>
+    /// 「合并窗口」子菜单：决定相邻多近的命中算同一场交火。
+    /// 横幅停留 2–3 秒会反复触发，窗口太小一次击倒就出好几条视频；太大会把两次独立击倒并成一条。
+    /// </summary>
+    private ToolStripMenuItem BuildMergeMenu()
+    {
+        var root = new ToolStripMenuItem("合并窗口");
+        var items = new List<ToolStripMenuItem>();
+
+        void Refresh()
+        {
+            var cur = EffectiveMergeSec;
+            foreach (var it in items)
+                it.Checked = (int)it.Tag! == cur;
+            root.Text = cur == 0 ? "合并窗口（关）" : $"合并窗口（{cur}s）";
+        }
+
+        foreach (var sec in MergePresets)
+        {
+            var it = new ToolStripMenuItem(sec == 0 ? "关（每次命中各出一段）" : $"{sec} 秒   {HintForMerge(sec)}")
+            { Tag = sec };
+            var v = sec;
+            it.Click += (_, _) => ApplyMerge(v, Refresh);
+            root.DropDownItems.Add(it);
+            items.Add(it);
+        }
+
+        root.DropDownOpening += (_, _) => Refresh();
+        Refresh();
+        return root;
+    }
+
+    private static string HintForMerge(int sec) => sec switch
+    {
+        0 => "一条横幅可能出好几段",
+        <= 5 => "出片快，连击倒可能拆成两段",
+        <= 12 => "推荐：一场交火一段",
+        _ => "很宽容，独立击倒也可能并在一起",
+    };
+
+    /// <summary>当前合并窗口（秒）：运行中问采集器，没在录看配置。</summary>
+    private int EffectiveMergeSec =>
+        _cap is not null ? _cap.MergeMs / 1000 : _detect.MergeSec;
+
+    /// <summary>改合并窗口：内存配置 → 套到正在跑的采集上 → 落盘。</summary>
+    private void ApplyMerge(int seconds, Action? after = null)
+    {
+        var p = DetectPolicy.Clamp(new DetectPolicy { MergeSec = seconds });
+        _detect.MergeSec = p.MergeSec;
+        try { _cap?.SetMergeMs(_detect.MergeSec * 1000); }
+        catch (Exception ex) { Log.Write("[tray] 改合并窗口失败: " + ex.Message); }
+
+        var ok = _detect.Save(_cfgPath);
+        Log.Write($"[merge] 合并窗口设为 {(_detect.MergeSec == 0 ? "关" : _detect.MergeSec + "s")}" +
+                  $"（保存到 {_cfgPath}：{(ok ? "成功" : "失败")}）");
+        after?.Invoke();
+        RefreshStatus();
+    }
+
     /// <summary>改阈值：写进内存配置 → 立刻套到正在跑的采集上 → 落盘记住。</summary>
     private void ApplyThreshold(float v, Action? after = null)
     {
@@ -436,6 +509,21 @@ internal sealed class TrayApp : ApplicationContext
         var hit = root?.DropDownItems.OfType<ToolStripMenuItem>()
             .FirstOrDefault(i => i.Tag is float f && Math.Abs(f - v) < 0.001f);
         if (hit is null) { Log.Write($"[t] 找不到阈值档位 {v:F2}"); return; }
+        hit.PerformClick();
+    }
+
+    /// <summary>自检用：找到「合并窗口」根菜单项。</summary>
+    private ToolStripMenuItem? FindMergeRoot() =>
+        _icon.ContextMenuStrip?.Items.OfType<ToolStripMenuItem>()
+            .FirstOrDefault(i => i.Text.StartsWith("合并窗口", StringComparison.Ordinal));
+
+    /// <summary>自检用：等价于点了一下某个合并窗口档位。</summary>
+    private void ClickMerge(int sec)
+    {
+        var root = FindMergeRoot();
+        var hit = root?.DropDownItems.OfType<ToolStripMenuItem>()
+            .FirstOrDefault(i => i.Tag is int s && s == sec);
+        if (hit is null) { Log.Write($"[t] 找不到合并窗口档位 {sec}s"); return; }
         hit.PerformClick();
     }
 

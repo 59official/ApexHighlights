@@ -56,25 +56,23 @@ internal static class OcrCheck
         foreach (var g in rows.GroupBy(r => r.Kind).OrderByDescending(g => g.Count()))
             Console.WriteLine($"      {BannerOcr.Label(g.Key),-5} {g.Count()} 张");
 
-        // 去重模拟：按时间顺序喂进去，看会砍掉几段（与 Capture.IsDuplicate 同一套判据）
-        var kept = new List<(string Name, BannerKind Kind, string Text)>();
-        var dropped = new List<string>();
-        (string Text, long Ms) last = ("", long.MinValue);
+        // 合并模拟：与 Capture.ClipLoop 同一套判据 —— 命中间隔 ≤ MergeMs(8s) 的并成一段。
+        // 这里用文案判重是**错的**（玩家名中英混排，OCR 每次读出的乱码都不一样），
+        // 所以只按时间合并。
+        var groups = new List<List<(string Name, BannerKind Kind, string Text)>>();
         foreach (var r in rows)
         {
             long ms = MsFromName(r.Name);
-            if (!string.IsNullOrWhiteSpace(r.Text) && r.Text == last.Text && ms - last.Ms <= 3000)
-            {
-                dropped.Add($"{r.Name}（{Trim(r.Text, 40)}）");
-                continue;
-            }
-            last = (r.Text, ms);
-            kept.Add(r);
+            if (groups.Count > 0 && ms - MsFromName(groups[^1][^1].Name) <= 8000)
+                groups[^1].Add(r);
+            else
+                groups.Add(new List<(string, BannerKind, string)> { r });
         }
         Console.WriteLine();
-        Console.WriteLine($"[6] 去重（同一文案 3 秒内视为同一次事件）：保留 {kept.Count} 段，砍掉 {dropped.Count} 段");
-        foreach (var d in dropped) Console.WriteLine($"      砍 {d}");
-        Console.WriteLine($"      → 用户实际看到的片段数从 {rows.Count} 变成 {kept.Count}");
+        Console.WriteLine($"[6] 合并（相邻命中 ≤ 8s 并成一段）：{rows.Count} 次命中 → {groups.Count} 段");
+        foreach (var g in groups.Where(g => g.Count > 1))
+            Console.WriteLine($"      并 {string.Join(" + ", g.Select(x => x.Name))}");
+        Console.WriteLine($"      → 用户实际看到的片段数从 {rows.Count} 变成 {groups.Count}");
 
         return recognized == 0 ? 5 : 0;
     }
