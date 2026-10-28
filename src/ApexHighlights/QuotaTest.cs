@@ -54,6 +54,21 @@ internal static class QuotaTest
             var kd = ClipLibrary.Parse(Path.Combine(dir, "apex_kd_0101-130100_0.80.mp4"));
             Check(kd is not null && kd.Kind == ClipKind.Knocked, "apex_kd_... 识别为被击倒");
 
+            // OCR 分类新增的四个种类后缀
+            foreach (var (tok, want, name) in new (string, ClipKind, string)[]
+                     {
+                         ("rk", ClipKind.ReKnock, "再次击倒"),
+                         ("ak", ClipKind.AssistKnock, "助攻击倒"),
+                         ("el", ClipKind.Elim, "小队淘汰"),
+                         ("ae", ClipKind.AssistElim, "助攻淘汰"),
+                     })
+            {
+                var fn = $"apex_{tok}_0101-131000_0.88.mp4";
+                Make(fn, 100);
+                var c = ClipLibrary.Parse(Path.Combine(dir, fn));
+                Check(c is not null && c.Kind == want, $"apex_{tok}_... 识别为{name}");
+            }
+
             // ② 超配淘汰：配额压到 200KB，只剩击杀/被击倒该优先被删
             Directory.Delete(dir, true);
             Directory.CreateDirectory(dir);

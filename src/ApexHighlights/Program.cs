@@ -14,6 +14,7 @@ internal static class Program
             bool encode = true;
             bool audio = true;
             bool beep = true;
+            bool ocr = true;     // 横幅 OCR 分类 + 去重；--no-ocr 关掉（没装语言包时用）
             bool tray = true;    // 默认常驻托盘（用户要的形态）；--no-tray 退回纯控制台
             bool ui = false;     // --ui：先把库窗口打开再开始录
 
@@ -35,6 +36,7 @@ internal static class Program
                 else if (a == "--no-encode") encode = false;
                 else if (a == "--no-audio") audio = false;
                 else if (a == "--no-beep") beep = false;
+                else if (a == "--no-ocr") ocr = false;
                 else if (a == "--tray") tray = true;
                 else if (a == "--no-tray") tray = false;
                 else if (a == "--ui") ui = true;
@@ -117,6 +119,14 @@ internal static class Program
                 return BandCheck.Run(bcEngine, bcDir, list.ToArray());
             }
 
+            // 横幅 OCR 回归：拿真实对局录下的 hit_*.bmp 重跑分类，确认种类判定正确、去重有效
+            if (args.Any(a => a == "--ocr-check"))
+            {
+                var ocrDir = args.FirstOrDefault(a => a.StartsWith("--dir=", StringComparison.OrdinalIgnoreCase))?[6..]
+                             ?? Paths.Captures;
+                return OcrCheck.Run(ocrDir);
+            }
+
             var profile = GameProfile.Load(GameProfile.ResolvePath(game));
             var engine = new BannerEngine(profile);
 
@@ -135,7 +145,7 @@ internal static class Program
 
             return offline is not null
                 ? Offline(engine, offline.Length == 0 ? Path.Combine(Paths.DataRoot, "probe", "bands.bin") : offline)
-                : Live(engine, dump, title ?? (profile.WindowTitles.Length > 0 ? profile.WindowTitles[0] : profile.Name), logPath, fps, bitrate, encode, gop, fakeHit, duration, audio, beep, quota, tray, ui, traySelfTest, detect, cfgPath);
+                : Live(engine, dump, title ?? (profile.WindowTitles.Length > 0 ? profile.WindowTitles[0] : profile.Name), logPath, fps, bitrate, encode, gop, fakeHit, duration, audio, beep, quota, tray, ui, traySelfTest, detect, cfgPath, ocr);
         }
         catch (Exception ex)
         {
@@ -335,7 +345,7 @@ internal static class Program
     /// WinForms 要求 STA —— 但主线程已经被采集/COM 用掉了，所以单独起一个 STA 线程跑
     /// Application.Run，主线程 join 住。这样不用给 Main 加 [STAThread] 去动已有的 COM 路径。
     /// </summary>
-    private static int RunTray(GameProfile prof, QuotaPolicy quota, DetectPolicy detect, string cfgPath, string title, int fps, int bitrate, bool ui, bool audio, bool beep, int fakeHit = 0, int selfTest = 0)
+    private static int RunTray(GameProfile prof, QuotaPolicy quota, DetectPolicy detect, string cfgPath, string title, int fps, int bitrate, bool ui, bool audio, bool beep, int fakeHit = 0, int selfTest = 0, bool ocr = true)
     {
         // 单实例：托盘常驻意味着用户完全可能双击好几次（黑框一闪就没，很容易以为没起来）。
         // 多开会各自采一份、抢同一个 captures\ring 目录，几小时后配额和分片全乱。
@@ -353,7 +363,7 @@ internal static class Program
         }
 
         // 这些启动行也用 Log.Write：托盘模式控制台会被藏掉，只有写进日志才能事后核对
-        Log.Write($"[1] 托盘常驻：目标 \"{title}\"，{fps}fps {bitrate / 1_000_000}Mbps，音轨{(audio ? "开" : "关")}，提示音{(beep ? "开" : "关")}");
+        Log.Write($"[1] 托盘常驻：目标 \"{title}\"，{fps}fps {bitrate / 1_000_000}Mbps，音轨{(audio ? "开" : "关")}，提示音{(beep ? "开" : "关")}，横幅分类{(ocr ? "开" : "关")}");
         Log.Write($"[2] 配额 {quota.QuotaGb}GB / 保留 {(quota.RetainDays == 0 ? "永久" : quota.RetainDays + " 天")} / 水位 {quota.WatermarkGb}GB");
         var thShown = detect.Threshold > 0 ? detect.Threshold : prof.Templates[0].Threshold;
         Log.Write($"[2b] 命中阈值 {thShown:F2}（config.json 的 Threshold 字段，托盘菜单「检测灵敏度」里可调）");
@@ -371,7 +381,7 @@ internal static class Program
                 Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
                 Application.EnableVisualStyles();
                 Application.SetCompatibleTextRenderingDefault(false);
-                using var app = new TrayApp(prof, quota, detect, cfgPath, title, fps, bitrate, ui, audio, beep, fakeHit, selfTest);
+                using var app = new TrayApp(prof, quota, detect, cfgPath, title, fps, bitrate, ui, audio, beep, fakeHit, selfTest, ocr);
                 Application.Run(app);
             }
             catch (Exception ex)
@@ -389,7 +399,7 @@ internal static class Program
         return exit;
     }
 
-    private static int Live(BannerEngine engine, int dumpAtSec, string title, string? logPath, int fps, int bitrate, bool encode, int gop, int fakeHit, int durationSec, bool audio = true, bool beep = true, QuotaPolicy? quotaPolicy = null, bool tray = true, bool ui = false, int traySelfTest = 0, DetectPolicy? detectPolicy = null, string? cfgPath = null)
+    private static int Live(BannerEngine engine, int dumpAtSec, string title, string? logPath, int fps, int bitrate, bool encode, int gop, int fakeHit, int durationSec, bool audio = true, bool beep = true, QuotaPolicy? quotaPolicy = null, bool tray = true, bool ui = false, int traySelfTest = 0, DetectPolicy? detectPolicy = null, string? cfgPath = null, bool ocr = true)
     {
         var prof = engine.Profile;
         var quota = quotaPolicy ?? new QuotaPolicy();
@@ -406,7 +416,7 @@ internal static class Program
         // 托盘模式：没有控制台窗口可看，走 ApplicationContext 常驻
         if (tray && encode && durationSec == 0)
         {
-            try { return RunTray(prof, quota, detect, cfg, title, fps, bitrate, ui, audio, beep, fakeHit, traySelfTest); }
+            try { return RunTray(prof, quota, detect, cfg, title, fps, bitrate, ui, audio, beep, fakeHit, traySelfTest, ocr); }
             finally { Log.Close(); }
         }
 
@@ -438,9 +448,10 @@ internal static class Program
             cap.DumpAtSec = dumpAtSec;
             cap.AudioEnabled = audio;
             cap.BeepOnSave = beep;
+            cap.OcrEnabled = ocr;
             cap.Quota = quota;
             cap.EnableEncoding(90);
-            Out($"[2b] 编码 {cap.Width}x{cap.Height} @{fps}fps {bitrate / 1_000_000}Mbps，环形 90s，音轨{(audio ? "开" : "关")}，提示音{(beep ? "开" : "关")}");
+            Out($"[2b] 编码 {cap.Width}x{cap.Height} @{fps}fps {bitrate / 1_000_000}Mbps，环形 90s，音轨{(audio ? "开" : "关")}，提示音{(beep ? "开" : "关")}，横幅分类{(ocr ? "开" : "关")}");
             Out($"[2c] 配额 {quota.QuotaGb}GB / 保留 {(quota.RetainDays == 0 ? "永久" : quota.RetainDays + " 天")} / 水位 {quota.WatermarkGb}GB / 检查间隔 {quota.CheckMinutes} 分钟");
 
             // 启动时先清一次（spec §5 的清理触发点之一），顺带把水位状态摸清楚

@@ -32,6 +32,7 @@ internal sealed class TrayApp : ApplicationContext
     private readonly bool _openUiFirst;
     private readonly bool _audio;
     private readonly bool _beep;
+    private readonly bool _ocr;
     private readonly int _fakeHit;
     private readonly int _selfTest;
     private System.Windows.Forms.Timer? _auto;
@@ -40,7 +41,7 @@ internal sealed class TrayApp : ApplicationContext
     /// <summary>连续多少次状态刷新都找不到游戏窗口。用于区分「切走了」和「真退出了」。</summary>
     private int _missingTicks;
 
-    public TrayApp(GameProfile profile, QuotaPolicy policy, DetectPolicy detect, string cfgPath, string title, int fps, int bitrate, bool openUiFirst, bool audio, bool beep, int fakeHit = 0, int selfTest = 0)
+    public TrayApp(GameProfile profile, QuotaPolicy policy, DetectPolicy detect, string cfgPath, string title, int fps, int bitrate, bool openUiFirst, bool audio, bool beep, int fakeHit = 0, int selfTest = 0, bool ocr = true)
     {
         _profile = profile;
         _policy = policy;
@@ -52,6 +53,7 @@ internal sealed class TrayApp : ApplicationContext
         _openUiFirst = openUiFirst;
         _audio = audio;
         _beep = beep;
+        _ocr = ocr;
         _fakeHit = fakeHit;
         _selfTest = selfTest;
 
@@ -208,6 +210,7 @@ internal sealed class TrayApp : ApplicationContext
             _cap.Quota = _policy;
             _cap.AudioEnabled = _audio;
             _cap.BeepOnSave = _beep;
+            _cap.OcrEnabled = _ocr;
             _cap.FakeHitAtSec = _fakeHit;
             _cap.Detected += OnDetected;
             _cap.EnableEncoding(90);

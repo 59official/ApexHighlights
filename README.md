@@ -119,6 +119,7 @@ ApexHighlights.exe --title="BenchWnd" --fps=60 --bitrate=20 --duration=30 --fake
 | `--probe <mp4>` | 读片段元数据（时长/分辨率/是否有音轨），纯 box 树不开 MF |
 | `--tray-test=N` | 托盘自检：依次演练状态行/暂停/开库/改阈值/退出 |
 | `--band-check --dir=<目录>` | 阈值回归：把历史 `hit_*.bmp`/`near_*.bmp` 重跑一遍检测器，列出各阈值下命中/挡掉哪些 |
+| `--ocr-check --dir=<目录>` | 横幅分类回归：把历史 `hit_*.bmp` 重跑 OCR，列出识别出的种类与去重结果 |
 | `--offline <bands.bin>` | 离线回放预导出的条带，验证检测器与 Python 探针一致 |
 
 ## 已知限制
@@ -127,7 +128,9 @@ ApexHighlights.exe --title="BenchWnd" --fps=60 --bitrate=20 --duration=30 --fake
 - Apex 的击倒横幅在 1440p 下位置固定；换分辨率需重新标定 `games/apex.json` 的 `band`。
 - 只做「我击倒别人」，不做被击倒（计划 v2）。
 - 后摇需要等环形录满 5s 才落盘，所以命中后约 5s 才出现画面文件（提示音也在那一刻响）。
-- 只配了「击倒」一种横幅模板，击杀/助攻横幅不会触发录制（规划中）。
+- **击杀（KILL）不会触发录制**：Apex 的击杀不弹中间横幅，只在右上角击杀栏小字显示，横幅检测覆盖不到。
+- 横幅分类依赖系统 OCR 语言包；没装的机器自动降级（种类记为「未识别」，仍照常录制），或用 `--no-ocr` 关掉。
+- 同一文案 3 秒内视为同一次事件；若某次交火同一目标在 3 秒内被连续 `RE-KNOCKED`，第二次会被去重掉。
 
 ## 配置
 
@@ -143,6 +146,19 @@ ApexHighlights.exe --title="BenchWnd" --fps=60 --bitrate=20 --duration=30 --fake
 - 改完立刻生效（不用重启、不用重开录制），并写进数据目录的 `config.json`
 
 调完想知道有没有调坏，跑 `--band-check --dir=<录过像的目录>`：它把录制时存下的 `hit_*.bmp`/`near_*.bmp` 重跑一遍，列出每个阈值下命中/挡掉哪些图。
+
+**横幅分类** 命中之后会用 Windows 自带 OCR 读横幅文案，区分五种事件并写进文件名后缀，回顾库可按种类筛选：
+
+| 横幅 | 含义 | 后缀 |
+|---|---|---|
+| `KNOCKED DOWN` | 击倒 | 无 |
+| `RE-KNOCKED` | 再次击倒同一目标 | `_rk` |
+| `ASSIST, KNOCKED DOWN` | 助攻击倒 | `_ak` |
+| `ENEMY SQUAD ELIMINATED` | 敌方小队全灭 | `_el` |
+| `ASSIST, ELIMINATION` | 助攻淘汰 | `_ae` |
+
+开销：单张 18–22ms、+37MB 内存、零显存，一局 6 次 ≈ 0.13 秒 CPU。识别发生在**等后摇那 5 秒里**，不占采集也不推迟出片。
+想验证分类没坏，跑 `--ocr-check --dir=<录过像的目录>`。
 
 ## 许可
 

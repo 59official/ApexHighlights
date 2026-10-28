@@ -83,6 +83,16 @@ internal sealed class Capture : IDisposable
     private readonly List<Detection> _pending = new();
     private Thread? _clipThread;
 
+    // OCR 分类：只在 NCC 命中后才跑，且由 "clip" 线程独占（OcrEngine 非线程安全）
+    private readonly BannerOcr _ocr = new();
+    /// <summary>关掉横幅 OCR 分类（--no-ocr）。关掉后种类一律记为 Unknown，仍照常录制。</summary>
+    public bool OcrEnabled = true;
+    /// <summary>同一目标的去重窗口：OCR 读到相同的文案后，这么多毫秒内不再重复登记。</summary>
+    public int DedupeMs = 3000;
+    /// <summary>最近一次登记的 (文案, 时刻)，用于去重。由 "clip" 线程独占。</summary>
+    private (string Text, long Ms) _lastOcr;
+    private long _deduped, _ocrMs, _ocrCount;
+
     // 配额/保留期（QuotaPolicy 默认 40GB / 30 天 / 2GB 水位）
     private ClipLibrary? _lib;
     private QuotaPolicy _policy = new();
@@ -115,12 +125,16 @@ internal sealed class Capture : IDisposable
 
     public event Action<Detection>? Detected;
 
-    public readonly record struct Detection(long Ms, float Score, int X, int Y, string BandPath)
+    public readonly record struct Detection(long Ms, float Score, int X, int Y, string? BandPath)
     {
         public DateTime WallClock { get; init; }
         public string Label { get; init; }
         public string? ClipPath { get; init; }
         public long Bytes { get; init; }
+        /// <summary>OCR 读出的横幅种类（NCC 命中后才识别；识别失败时为 Unknown）。</summary>
+        public BannerKind Kind { get; init; }
+        /// <summary>OCR 读出的原始文案，仅供日志诊断。</summary>
+        public string OcrText { get; init; }
     }
 
     public string OutDir { get; set; } = Paths.Captures;
@@ -593,7 +607,16 @@ internal sealed class Capture : IDisposable
 
             foreach (var det in batch)
             {
-                long wantUs = det.Ms * 1000L + _prof.PostRollSec * 1_000_000L;
+                // 先 OCR 分类，再等后摇。顺序很重要：后摇要等 5 秒，这点时间足够
+                // 跑完 21ms 的识别，等于 OCR 完全白拿（不占采集、不占编码、不推迟出片）。
+                var d = Classify(det);
+
+                // 同一目标重复触发要去重：实测「白奈雪子」被 RE-KNOCKED 时，
+                // 1 秒内连录了 3 段（0.61 / 0.63 + 一张 near）。横幅持续可见期间
+                // 每 0.5 秒（minGapMs）就会再命中一次，必须靠文案+时间去重。
+                if (IsDuplicate(d)) { continue; }
+
+                long wantUs = d.Ms * 1000L + _prof.PostRollSec * 1_000_000L;
                 // 最多多等 3 秒：环形已经滑过足够远（比如命中后立刻暂停）就不再干等
                 long giveUp = _clock.ElapsedMilliseconds;
                 while (!_stop && _ring is not null)
@@ -604,10 +627,58 @@ internal sealed class Capture : IDisposable
                     Thread.Sleep(80);
                 }
 
-                var clip = WriteClip(det.Ms, det.Score);
-                Detected?.Invoke(det with { ClipPath = clip.Path, Bytes = clip.Bytes });
+                var clip = WriteClip(d);
+                Detected?.Invoke(d with { ClipPath = clip.Path, Bytes = clip.Bytes });
             }
         }
+    }
+
+    /// <summary>
+    /// 读条带图上的横幅文案，判断这是击倒/再次击倒/助攻击倒/小队淘汰/助攻淘汰中的哪一种。
+    /// 只由 "clip" 线程调用（OcrEngine 非线程安全）。
+    /// OCR 失败不是错误：返回 Unknown，照样录，只是文件名不带种类后缀。
+    /// </summary>
+    private Detection Classify(Detection det)
+    {
+        if (!OcrEnabled || det.BandPath is null) return det;
+        try
+        {
+            var (kind, text) = _ocr.Classify(det.BandPath);
+            _ocrCount = _ocr.Count;
+            _ocrMs = _ocr.TotalMs;
+            return det with { Kind = kind, OcrText = text };
+        }
+        catch (Exception ex)
+        {
+            if (_err.Length == 0) _err = "ocr: " + ex.Message;
+            return det;
+        }
+    }
+
+    /// <summary>
+    /// 同一目标的重复触发判定。Apex 的横幅在屏幕上停留约 2–3 秒，期间每过一个
+    /// minGapMs（默认 500ms）就会再命中一次，于是同一次击倒会录出好几段。
+    /// 实测「白奈雪子」被 RE-KNOCKED 时 1 秒内连出 3 段。
+    ///
+    /// 判据用 OCR 文案而不是画面相似度：同一目标被再次击倒时，文案会从
+    /// RE-KNOCKED 变成别的东西（补掉 → 小队淘汰），那是**新事件**，必须录。
+    /// 所以只有「文案完全相同」才算重复。
+    /// </summary>
+    private bool IsDuplicate(Detection det)
+    {
+        if (DedupeMs <= 0) return false;
+        // 没读到文案就无从判断，宁可多录也不漏录 —— 漏掉一次击倒比多一个片段糟。
+        if (string.IsNullOrWhiteSpace(det.OcrText)) return false;
+
+        var key = det.OcrText;
+        if (key == _lastOcr.Text && det.Ms - _lastOcr.Ms <= DedupeMs)
+        {
+            _deduped++;
+            Log.Write($"[dedupe] {det.Ms / 1000.0:F1}s 与上次同一横幅（{key}），跳过");
+            return true;
+        }
+        _lastOcr = (key, det.Ms);
+        return false;
     }
 
     /// <summary>退出时把队列里还没切的片段切掉（后摇可能没录满，但前摇画面不能白丢）。</summary>
@@ -622,26 +693,26 @@ internal sealed class Capture : IDisposable
         }
         foreach (var det in batch)
         {
-            var clip = WriteClip(det.Ms, det.Score);
+            var clip = WriteClip(Classify(det));
             if (clip.Path is not null) Console.WriteLine($"[CLIP] {clip.Path}（退出时补切）");
         }
     }
 
     /// <summary>按前摇/后摇从环形里切一片出来写成 mp4。</summary>
-    private (string? Path, long Bytes) WriteClip(long hitMs, float score)
+    private (string? Path, long Bytes) WriteClip(Detection det)
     {
         if (_ring is null || _ring.Segments.Count == 0) return (null, 0);
         try
         {
             var (coverFrom, coverTo) = _ring.Coverage();
             long endUs = coverTo;
-            long startUs = Math.Max(coverFrom, hitMs * 1000L - _prof.PreRollSec * 1_000_000L);
-            long stopUs = Math.Min(endUs, hitMs * 1000L + _prof.PostRollSec * 1_000_000L);
+            long startUs = Math.Max(coverFrom, det.Ms * 1000L - _prof.PreRollSec * 1_000_000L);
+            long stopUs = Math.Min(endUs, det.Ms * 1000L + _prof.PostRollSec * 1_000_000L);
             if (stopUs - startUs < 500_000) return (null, 0);
 
             var bytes = _ring.BuildClip(startUs, stopUs, _aRing);
             Directory.CreateDirectory(ClipDir);
-            var name = $"{_prof.Id}_{DateTime.Now:MMdd-HHmmss}_{score:F2}.mp4";
+            var name = $"{_prof.Id}{KindToken(det.Kind)}_{DateTime.Now:MMdd-HHmmss}_{det.Score:F2}.mp4";
             var path = Path.Combine(ClipDir, name);
             File.WriteAllBytes(path, bytes);
             if (BeepOnSave) Beep.Saved();
@@ -651,6 +722,20 @@ internal sealed class Capture : IDisposable
         }
         catch (Exception ex) { if (_encErr.Length == 0) _encErr = "clip: " + ex.Message; return (null, 0); }
     }
+
+    /// <summary>
+    /// 种类 → 文件名后缀。文件名是回顾库的唯一索引源（见 ClipLibrary 的注释），
+    /// 所以种类必须落在名字里，不能只存在内存中。
+    /// 刻意用短记号而不是中文：这个库要能跨语言环境、跨系统工具打开。
+    /// </summary>
+    private static string KindToken(BannerKind k) => k switch
+    {
+        BannerKind.ReKnock => "_rk",
+        BannerKind.AssistKnock => "_ak",
+        BannerKind.Elim => "_el",
+        BannerKind.AssistElim => "_ae",
+        _ => "",   // 击倒（默认种类）与未识别都不加后缀，保持 v1 的老命名
+    };
 
     private unsafe void ExtractBand(byte* src, int pitch, int bw, int bh)
     {
@@ -724,6 +809,9 @@ internal sealed class Capture : IDisposable
             var ac = _aRing.Coverage();
             s += $" 音频={_aRing.TotalFrames}帧/{_aRing.DiskBytes() / 1024}KB 覆盖({ac.From / 1000},{ac.To / 1000})ms";
         }
+        if (OcrEnabled && _ocrCount > 0)
+            s += $" OCR={_ocrCount}次/{_ocrMs}ms 去重={_deduped}";
+        if (_ocr.Err.Length > 0) s += $"  ocrErr={_ocr.Err}";
         if (_err.Length > 0) s += $"  err={_err}";
         if (_encErr.Length > 0) s += $"  encErr={_encErr}";
         if (_audioErr.Length > 0) s += $"  audioErr={_audioErr}";

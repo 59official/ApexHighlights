@@ -83,7 +83,7 @@ public sealed class LibraryForm : Form
         bar.Items.Add(new ToolStripSeparator());
         bar.Items.Add(new ToolStripLabel("种类"));
         _kindFilter.DropDownStyle = ComboBoxStyle.DropDownList;
-        _kindFilter.Items.AddRange(new object[] { "全部", "击倒", "击杀", "被击倒" });
+        _kindFilter.Items.AddRange(new object[] { "全部", "击倒", "再次击倒", "助攻击倒", "小队淘汰", "助攻淘汰", "击杀", "被击倒" });
         _kindFilter.SelectedIndex = 0;
         _kindFilter.SelectedIndexChanged += (_, _) => ApplyFilter();
         bar.Items.Add(_kindFilter);
@@ -243,8 +243,12 @@ public sealed class LibraryForm : Form
         var kind = _kindFilter.SelectedIndex switch
         {
             1 => (ClipKind?)ClipKind.Knock,
-            2 => ClipKind.Kill,
-            3 => ClipKind.Knocked,
+            2 => ClipKind.ReKnock,
+            3 => ClipKind.AssistKnock,
+            4 => ClipKind.Elim,
+            5 => ClipKind.AssistElim,
+            6 => ClipKind.Kill,
+            7 => ClipKind.Knocked,
             _ => null,
         };
         if (kind is not null) q = q.Where(c => c.Kind == kind);
@@ -295,6 +299,10 @@ public sealed class LibraryForm : Form
     {
         ClipKind.Kill => "击杀",
         ClipKind.Knocked => "被击倒",
+        ClipKind.ReKnock => "再次击倒",
+        ClipKind.AssistKnock => "助攻击倒",
+        ClipKind.Elim => "小队淘汰",
+        ClipKind.AssistElim => "助攻淘汰",
         _ => "击倒",
     };
 

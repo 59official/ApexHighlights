@@ -3,15 +3,26 @@ using System.Text.Json.Serialization;
 
 namespace ApexHighlights;
 
-/// <summary>片段种类。v1 只产出 Knock，另外两种是给淘汰优先级和未来 v2 留的位。</summary>
+/// <summary>
+/// 片段种类。前三个是 v1 的，后四个由 OCR 读横幅文案区分出来
+/// （Apex 的击倒/助攻/群灭用的是同一套字体同一字号，NCC 分不开，只有 OCR 能分）。
+/// </summary>
 public enum ClipKind
 {
-    /// <summary>我击倒别人</summary>
+    /// <summary>我击倒别人（KNOCKED DOWN）</summary>
     Knock = 0,
     /// <summary>我击杀别人（含击倒后补刀）</summary>
     Kill = 1,
-    /// <summary>我被击倒</summary>
+    /// <summary>我被击倒（v2 用）</summary>
     Knocked = 2,
+    /// <summary>同一目标被再次击倒（RE-KNOCKED）</summary>
+    ReKnock = 3,
+    /// <summary>我助攻队友击倒（ASSIST, KNOCKED DOWN）</summary>
+    AssistKnock = 4,
+    /// <summary>敌方小队全灭（ENEMY SQUAD ELIMINATED）</summary>
+    Elim = 5,
+    /// <summary>我助攻淘汰（ASSIST, ELIMINATION）</summary>
+    AssistElim = 6,
 }
 
 /// <summary>回顾库里的一条片段。文件名是唯一索引源，不额外维护数据库。</summary>
@@ -76,6 +87,10 @@ public sealed class ClipLibrary
         {
             "k" => ClipKind.Kill,
             "kd" => ClipKind.Knocked,
+            "rk" => ClipKind.ReKnock,
+            "ak" => ClipKind.AssistKnock,
+            "el" => ClipKind.Elim,
+            "ae" => ClipKind.AssistElim,
             _ => ClipKind.Knock,
         };
         // gameId = 种类记号之前的全部（可能本身含下划线）
@@ -192,12 +207,19 @@ public sealed record QuotaReport(
 /// </summary>
 public static class QuotaEnforcer
 {
-    /// <summary>被删得越早，值越高。</summary>
+    /// <summary>
+    /// 被删得越早，值越高。淘汰顺序：小队淘汰/助攻淘汰最不值钱 —— 那不是「我一个人打下来的」，
+    /// 然后是队友击倒、自己被击倒，最后才是自己亲手击倒/击杀。
+    /// </summary>
     private static int Priority(ClipKind k) => k switch
     {
-        ClipKind.Knocked => 0,
-        ClipKind.Knock => 1,
-        _ => 2,
+        ClipKind.AssistElim => 0,
+        ClipKind.Elim => 1,
+        ClipKind.AssistKnock => 2,
+        ClipKind.Knocked => 3,
+        ClipKind.ReKnock => 4,
+        ClipKind.Knock => 5,
+        _ => 6,   // Kill
     };
 
     public static QuotaReport Run(ClipLibrary lib, QuotaPolicy p, DateTime? nowLocal = null)
