@@ -10,10 +10,12 @@ internal static class Program
         {
             string game = "apex";
             string? logPath = null, title = null, offline = null;
-            int fps = 60, gop = 0, fakeHit = 0, bitrate = 20_000_000, dump = 0, duration = 0;
+            int fps = 60, gop = 0, fakeHit = 0, bitrate = 20_000_000, dump = 0, duration = 0, traySelfTest = 0;
             bool encode = true;
             bool audio = true;
             bool beep = true;
+            bool tray = true;    // 默认常驻托盘（用户要的形态）；--no-tray 退回纯控制台
+            bool ui = false;     // --ui：先把库窗口打开再开始录
 
             for (int i = 0; i < args.Length; i++)
             {
@@ -27,10 +29,14 @@ internal static class Program
                 else if (a == "--no-encode") encode = false;
                 else if (a == "--no-audio") audio = false;
                 else if (a == "--no-beep") beep = false;
+                else if (a == "--tray") tray = true;
+                else if (a == "--no-tray") tray = false;
+                else if (a == "--ui") ui = true;
                 else if (a.StartsWith("--gop=", StringComparison.OrdinalIgnoreCase)) gop = int.Parse(a[6..]);
                 else if (a.StartsWith("--fake-hit=", StringComparison.OrdinalIgnoreCase)) fakeHit = int.Parse(a[11..]);
                 else if (a.StartsWith("--dump=", StringComparison.OrdinalIgnoreCase)) dump = int.Parse(a[7..]);
                 else if (a.StartsWith("--duration=", StringComparison.OrdinalIgnoreCase)) duration = int.Parse(a[11..]);
+                else if (a.StartsWith("--tray-test=", StringComparison.OrdinalIgnoreCase)) traySelfTest = int.Parse(a[12..]);
                 else if (!a.StartsWith("--")) title = a;
             }
 
@@ -42,6 +48,25 @@ internal static class Program
 
             if (args.Length >= 2 && args[0] == "--beep-test")
                 return Beep.Dump(args[1]);
+
+            if (args.Any(a => a == "--quota-test")) return QuotaTest.Run();
+
+            if (args.Any(a => a == "--lib-list" || a == "--quota-run"))
+                return LibCli(args);
+
+            if (args.Any(a => a == "--lib-ui"))
+                return LibUi(args);
+
+            if (args.Any(a => a == "--ui-test"))
+            {
+                var d = args.FirstOrDefault(a => a.StartsWith("--dir=", StringComparison.OrdinalIgnoreCase))?[6..]
+                        ?? @"D:\played\captures\clips";
+                var n = args.FirstOrDefault(a => a.StartsWith("--samples=", StringComparison.OrdinalIgnoreCase));
+                return UiTest.Run(d, n is not null ? int.Parse(n[10..]) : 3);
+            }
+
+            if (args.Length >= 2 && args[0] == "--probe")
+                return Probe(args[1]);
 
             if (args.Any(a => a == "--nv12-test")) return Nv12Test();
 
@@ -72,9 +97,15 @@ internal static class Program
 
             var profile = GameProfile.Load(GameProfile.ResolvePath(game));
             var engine = new BannerEngine(profile);
+
+            // 配额配置：--config= 指定，否则找 cwd 下的 config.json
+            var cfgPath = args.FirstOrDefault(a => a.StartsWith("--config=", StringComparison.OrdinalIgnoreCase))?[9..]
+                          ?? Path.Combine(Directory.GetCurrentDirectory(), "config.json");
+            var quota = QuotaPolicy.Load(cfgPath);
+
             return offline is not null
                 ? Offline(engine, offline.Length == 0 ? @"D:\played\probe\bands.bin" : offline)
-                : Live(engine, dump, title ?? (profile.WindowTitles.Length > 0 ? profile.WindowTitles[0] : profile.Name), logPath, fps, bitrate, encode, gop, fakeHit, duration, audio, beep);
+                : Live(engine, dump, title ?? (profile.WindowTitles.Length > 0 ? profile.WindowTitles[0] : profile.Name), logPath, fps, bitrate, encode, gop, fakeHit, duration, audio, beep, quota, tray, ui, traySelfTest);
         }
         catch (Exception ex)
         {
@@ -147,6 +178,51 @@ internal static class Program
     private static double Pct(float[] sorted, double p)
         => sorted.Length == 0 ? 0 : sorted[Math.Clamp((int)(sorted.Length * p / 100.0), 0, sorted.Length - 1)];
 
+    /// <summary>
+    /// 库的命令行入口：`--lib-list` 打印现状，`--quota-run` 真跑一次清理。
+    /// 默认库目录是 captures/clips，可用 `--dir=` 改；`--config=` 指定配额配置。
+    /// </summary>
+    private static int LibCli(string[] args)
+    {
+        bool doRun = args.Any(a => a == "--quota-run");
+        var dir = args.FirstOrDefault(a => a.StartsWith("--dir=", StringComparison.OrdinalIgnoreCase))?[6..]
+                  ?? @"D:\played\captures\clips";
+        var cfgPath = args.FirstOrDefault(a => a.StartsWith("--config=", StringComparison.OrdinalIgnoreCase))?[9..]
+                      ?? Path.Combine(Directory.GetCurrentDirectory(), "config.json");
+        var policy = QuotaPolicy.Load(cfgPath);
+        var lib = new ClipLibrary(dir);
+
+        var clips = lib.Scan();
+        long total = clips.Sum(c => c.Bytes);
+        Console.WriteLine($"[1] 库 {dir}");
+        Console.WriteLine($"    {clips.Count} 片，合计 {QuotaReport.Mb(total)}；" +
+                          $"配额 {policy.QuotaGb}GB，保留 {(policy.RetainDays == 0 ? "永久" : policy.RetainDays + " 天")}，" +
+                          $"水位 {policy.WatermarkGb}GB");
+        Console.WriteLine($"    所在盘可用 {QuotaReport.Mb(QuotaEnforcer.FreeBytes(dir))}");
+
+        if (clips.Count > 0)
+        {
+            Console.WriteLine("[2] 列表（旧→新）");
+            foreach (var c in clips)
+            {
+                var kind = c.Kind switch { ClipKind.Kill => "击杀", ClipKind.Knocked => "被击倒", _ => "击倒" };
+                Console.WriteLine($"    {c.CreatedLocal:MM-dd HH:mm:ss}  {QuotaReport.Mb(c.Bytes),8}  {kind,-6}  {c.Score:F2}  {c.Name}");
+            }
+        }
+
+        if (QuotaEnforcer.BelowWatermark(dir, policy))
+            Console.WriteLine($"[!] 可用空间已低于水位 {policy.WatermarkGb}GB —— 真跑会暂停录制");
+
+        if (doRun)
+        {
+            var rep = QuotaEnforcer.Run(lib, policy);
+            Console.WriteLine($"[3] 清理: {rep}");
+            foreach (var n in rep.DeletedByAge) Console.WriteLine($"    过期删除 {n}");
+            foreach (var n in rep.DeletedByQuota) Console.WriteLine($"    超配删除 {n}");
+        }
+        return 0;
+    }
+
     private static List<(int start, int end, float peak, int count)> Merge(List<(int ts, float score)> hits, int gapMs)
     {
         var ev = new List<(int start, int end, float peak, int count)>();
@@ -193,9 +269,82 @@ internal static class Program
         return 0;
     }
 
-    private static int Live(BannerEngine engine, int dumpAtSec, string title, string? logPath, int fps, int bitrate, bool encode, int gop, int fakeHit, int durationSec, bool audio = true, bool beep = true)
+    /// <summary>
+    /// 单独打开回顾库窗口（不启动录制）。调试 UI 用，也算一个给用户的正经入口。
+    /// </summary>
+    private static int LibUi(string[] args)
+    {
+        var dir = args.FirstOrDefault(a => a.StartsWith("--dir=", StringComparison.OrdinalIgnoreCase))?[6..]
+                  ?? @"D:\played\captures\clips";
+        var cfgPath = args.FirstOrDefault(a => a.StartsWith("--config=", StringComparison.OrdinalIgnoreCase))?[9..]
+                      ?? Path.Combine(Directory.GetCurrentDirectory(), "config.json");
+        var policy = QuotaPolicy.Load(cfgPath);
+
+        Console.WriteLine($"[1] 回顾库 {dir}");
+        var form = new LibraryForm(new ClipLibrary(dir), policy);
+        Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
+        Application.EnableVisualStyles();
+        Application.Run(form);
+        return 0;
+    }
+
+    /// <summary>只读元数据：验证 Mp4Probe 对已有文件的判断。</summary>
+    private static int Probe(string path)
+    {
+        var m = Mp4Probe.Read(path);
+        Console.WriteLine($"[1] {path}");
+        Console.WriteLine($"    时长 {Mp4Probe.Fmt(m.Seconds)}（{m.Seconds:F3}s）  分辨率 {(m.Valid ? $"{m.Width}x{m.Height}" : "—")}  " +
+                          $"音轨 {(m.HasAudio ? "有" : "无")}  编码 {m.Codec}");
+        return m.Valid ? 0 : 5;
+    }
+
+    /// <summary>
+    /// 托盘常驻模式：没有结束时间就一直录，退出靠托盘菜单。
+    /// 双击 exe 时的默认路径就是这里。
+    ///
+    /// WinForms 要求 STA —— 但主线程已经被采集/COM 用掉了，所以单独起一个 STA 线程跑
+    /// Application.Run，主线程 join 住。这样不用给 Main 加 [STAThread] 去动已有的 COM 路径。
+    /// </summary>
+    private static int RunTray(GameProfile prof, QuotaPolicy quota, string title, int fps, int bitrate, bool ui, bool audio, bool beep, int fakeHit = 0, int selfTest = 0)
+    {
+        Console.WriteLine($"[1] 托盘常驻：目标 \"{title}\"，{fps}fps {bitrate / 1_000_000}Mbps，音轨{(audio ? "开" : "关")}，提示音{(beep ? "开" : "关")}");
+        Console.WriteLine($"[2] 配额 {quota.QuotaGb}GB / 保留 {(quota.RetainDays == 0 ? "永久" : quota.RetainDays + " 天")} / 水位 {quota.WatermarkGb}GB");
+        Console.WriteLine("[3] 右键托盘图标可以打开回顾库；关掉这个窗口也不影响录制。");
+
+        int exit = 0;
+        var t = new Thread(() =>
+        {
+            try
+            {
+                Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
+                Application.EnableVisualStyles();
+                Application.SetCompatibleTextRenderingDefault(false);
+                using var app = new TrayApp(prof, quota, title, fps, bitrate, ui, audio, beep, fakeHit, selfTest);
+                Application.Run(app);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("[X] 托盘启动失败: " + ex.Message);
+                exit = 1;
+            }
+        })
+        { IsBackground = false, Name = "ui" };
+        t.SetApartmentState(ApartmentState.STA);
+        t.Start();
+        t.Join();
+
+        Console.WriteLine("[end] 已退出。");
+        return exit;
+    }
+
+    private static int Live(BannerEngine engine, int dumpAtSec, string title, string? logPath, int fps, int bitrate, bool encode, int gop, int fakeHit, int durationSec, bool audio = true, bool beep = true, QuotaPolicy? quotaPolicy = null, bool tray = true, bool ui = false, int traySelfTest = 0)
     {
         var prof = engine.Profile;
+        var quota = quotaPolicy ?? new QuotaPolicy();
+
+        // 托盘模式：没有控制台窗口可看，走 ApplicationContext 常驻
+        if (tray && encode && durationSec == 0)
+            return RunTray(prof, quota, title, fps, bitrate, ui, audio, beep, fakeHit, traySelfTest);
 
         // 每次跑留存历史：把上一局的 log/csv 改名归档，别被覆盖
         if (logPath is not null)
@@ -256,8 +405,14 @@ internal static class Program
             cap.DumpAtSec = dumpAtSec;
             cap.AudioEnabled = audio;
             cap.BeepOnSave = beep;
+            cap.Quota = quota;
             cap.EnableEncoding(90);
             Out($"[2b] 编码 {cap.Width}x{cap.Height} @{fps}fps {bitrate / 1_000_000}Mbps，环形 90s，音轨{(audio ? "开" : "关")}，提示音{(beep ? "开" : "关")}");
+            Out($"[2c] 配额 {quota.QuotaGb}GB / 保留 {(quota.RetainDays == 0 ? "永久" : quota.RetainDays + " 天")} / 水位 {quota.WatermarkGb}GB / 检查间隔 {quota.CheckMinutes} 分钟");
+
+            // 启动时先清一次（spec §5 的清理触发点之一），顺带把水位状态摸清楚
+            var rep = cap.RunQuotaCheck();
+            if (rep is not null) Out($"[2d] 库 {cap.ClipDir}：{rep}");
         }
         Out($"[2] 采集已启动 {cap.Width}x{cap.Height}；条带 {prof.Band.W}x{prof.Band.H}@{prof.Band.X},{prof.Band.Y}；采集 {fps}fps / 检测 10fps");
         Out($"[3] 模板 {string.Join(",", prof.Templates.Select(t => $"{t.Id}({t.W}x{t.H}@{t.Threshold:F2})"))}；命中存条带到 {cap.OutDir}");

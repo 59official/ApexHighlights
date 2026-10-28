@@ -184,6 +184,10 @@ public sealed class AacEncoder : IDisposable
     // 第一帧的时间基准（Feed 第一次调用时记下来）
     private long firstPtsOfBlock = long.MinValue;
 
+    /// <summary>已经喂进编码器的样点数。时间轴就是这个数推出来的，补静音线程靠它算缺口。</summary>
+    public long SamplesFed => _samplesFed;
+
+
     /// <summary>把编码器里已经就绪的输出全部取走。</summary>
     public void Drain(Action<byte[], long> onFrame)
     {

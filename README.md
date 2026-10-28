@@ -4,7 +4,7 @@ Apex Legends 自动击倒录制器：常驻环形缓冲，检测到屏幕中间�
 
 不注入、不读内存、不装驱动、不模拟输入、不联网。单文件、无账号、无服务器。
 
-> 状态：采集/编码/音频/切片链路已跑通并实测（1440p 60fps 零丢帧，双轨成片）；回顾库 UI、配额清理、托盘尚未实现。详见 [docs/apex-v1-spec.md](docs/apex-v1-spec.md)。
+> 状态：采集/编码/音频/切片/配额清理/回顾库 UI/托盘常驻已跑通并实测（1440p 60fps 零丢帧，双轨成片，后摇完整）。详见 [docs/apex-v1-spec.md](docs/apex-v1-spec.md)。
 
 ## 为什么不用 OBS
 
@@ -57,7 +57,23 @@ ApexHighlights.exe --title="BenchWnd" --fps=60 --bitrate=20 --duration=30 --fake
 | `--duration=<n>` | 跑 n 秒后退出（不填则一直跑） |
 | `--fake-hit=<n>` | 第 n 秒伪造一次命中，用于端到端验证 |
 | `--no-audio` / `--no-beep` | 关闭音轨 / 关闭落盘提示音 |
+| `--config=<路径>` | 配额配置文件，默认当前目录 `config.json` |
 | `--log=<路径>` | 诊断日志（会归档上一份） |
+
+## 配额与保留期
+
+默认 **40GB 配额 / 保留 30 天 / 2GB 磁盘水位**，写在 `config.json`：
+
+```json
+{ "QuotaGb": 40, "RetainDays": 30, "WatermarkGb": 2, "CheckMinutes": 60 }
+```
+
+- `QuotaGb: 0` = 不限体积；`RetainDays: 0` = 永久保留；`WatermarkGb: 0` = 不检查磁盘。
+- 超过保留期的直接删；还超配额时按**被击倒 > 击倒 > 击杀**淘汰，同优先级内从旧到新。
+- 磁盘跌破水位时暂停往环形写新数据，但已录好的片段照常落盘——不丢已有的。
+- 检查时机：启动时、每片落盘后、每小时。
+
+片段就是文件名本身，没有数据库：`apex_1028-130333_0.99.mp4`。想手动归档直接挪文件即可。
 
 ## 自检命令
 
@@ -72,6 +88,12 @@ ApexHighlights.exe --title="BenchWnd" --fps=60 --bitrate=20 --duration=30 --fake
 | `--mp4-check <mp4>` | MF 分别回读视频/音频样本数与末时间戳（看音画是否对齐） |
 | `--aac-probe` | 枚举系统可用的 AAC 编码器及输出类型 |
 | `--beep-test <wav>` | 落盘提示音波形自检 |
+| `--quota-test` | 配额/保留期逻辑自检（临时目录伪造片段，不碰真实库） |
+| `--lib-list` | 列出现有片段（旧→新，含种类/分数/体积） |
+| `--quota-run` | 真跑一次配额清理 |
+| `--lib-ui` | 只开回顾库窗口，不启动录制 |
+| `--probe <mp4>` | 读片段元数据（时长/分辨率/是否有音轨），纯 box 树不开 MF |
+| `--tray-test=N` | 托盘自检：依次演练状态行/暂停/开库/退出 |
 | `--offline <bands.bin>` | 离线回放预导出的条带，验证检测器与 Python 探针一致 |
 
 ## 已知限制
@@ -79,7 +101,7 @@ ApexHighlights.exe --title="BenchWnd" --fps=60 --bitrate=20 --duration=30 --fake
 - 独占全屏下的黑屏风险（WGC 依赖 DWM 合成，未覆盖测试）。
 - Apex 的击倒横幅在 1440p 下位置固定；换分辨率需重新标定 `games/apex.json` 的 `band`。
 - 只做「我击倒别人」，不做被击倒（计划 v2）。
-- 回顾库 UI、配额/保留期清理、托盘常驻尚未实现。
+- 后摇需要等环形录满 5s 才落盘，所以命中后约 5s 才出现画面文件（提示音也在那一刻响）。
 
 ## 配置
 

@@ -12,11 +12,49 @@ internal static class AudioCheck
 {
     public static int Run(string path)
     {
+        var r = Decode(path, out var profile);
+        if (r < 0) return 6;
+
+        Console.WriteLine($"解码样本 {_samples}，时长 {_secs:F2}s，PCM {_bytes} 字节");
+        Console.WriteLine($"峰值 {_peak}（{_peakDb:F1} dBFS）  RMS {_rms:F0}（{_rmsDb:F1} dBFS）  有声样点数 {_nonzero}");
+        Console.WriteLine($"末时间戳 {_lastTs}（{_lastTs / 1e7:F2}s）");
+
+        if (profile is { Count: > 0 })
+        {
+            // 每秒一格：`#` 越满越响。用来确认声音在片段里出现在**该出现的位置**
+            // ——静音补齐如果写错了时间轴，声音会整体平移或前半段被吃掉，一眼就能看出来。
+            Console.WriteLine("每秒 RMS（1 格 = 1 秒，从片头开始）：");
+            foreach (var (sec, db) in profile)
+            {
+                int bars = db <= -60 ? 0 : Math.Clamp((int)((db + 60) / 3), 1, 20);
+                Console.WriteLine($"  {sec,3}s {db,6:F1} dBFS {new string('#', bars)}{new string('.', 20 - bars)}");
+            }
+        }
+
+        if (_peak < 500) { Console.WriteLine("[X] 音轨基本是静音"); return 8; }
+        Console.WriteLine("[ok] 音轨有真实波形");
+        return 0;
+    }
+
+    private static long _samples, _bytes, _lastTs, _nonzero;
+    private static int _peak;
+    private static double _rms, _peakDb, _rmsDb, _secs;
+
+    /// <summary>解码整条音轨，返回每秒 RMS 曲线；失败返回 -1。</summary>
+    private static int Decode(string path, out List<(int Sec, double Db)> profile)
+    {
+        profile = new List<(int, double)>();
         MediaFactory.MFStartup(false);
         var reader = MediaFactory.MFCreateSourceReaderFromURL(path, null!);
 
         reader.SetStreamSelection((int)SourceReaderIndex.AllStreams, false);
-        reader.SetStreamSelection((int)SourceReaderIndex.FirstAudioStream, true);
+        try { reader.SetStreamSelection((int)SourceReaderIndex.FirstAudioStream, true); }
+        catch
+        {
+            Console.WriteLine("[!] 这个文件没有音轨（--no-audio 录的？）");
+            reader.Dispose();
+            return -1;
+        }
 
         // 让 source reader 把 AAC 解成 PCM，这样读出来的就是波形
         IMFMediaType? pcmOut = null;
@@ -36,16 +74,16 @@ internal static class AudioCheck
             Console.WriteLine($"[!] 设置 PCM 输出失败: {e.Message}");
             pcmOut?.Dispose();
             reader.Dispose();
-            return 6;
+            return -1;
         }
         finally { pcmOut?.Dispose(); }
 
-        long samples = 0, bytes = 0;
-        int peak = 0;
+        // 逐秒累加能量
+        var sumSqPerSec = new List<double>();
+        var cntPerSec = new List<long>();
         double sumSq = 0;
-        long nSamples = 0;
-        long lastTs = -1;
-        int nonzero = 0;
+        long nSamplesGlobal = 0;
+        long posInSec = 0;
 
         while (true)
         {
@@ -53,13 +91,13 @@ internal static class AudioCheck
                 out _, out var flags, out var ts);
             if (flags.HasFlag(SourceReaderFlag.EndOfStream)) { s?.Dispose(); break; }
             if (s is null) continue;
-            samples++;
-            lastTs = ts;
+            _samples++;
+            _lastTs = ts;
             try
             {
                 var buf = s.ConvertToContiguousBuffer();
                 buf.Lock(out IntPtr p, out _, out int cur);
-                bytes += cur;
+                _bytes += cur;
                 unsafe
                 {
                     short* sp = (short*)p;
@@ -68,10 +106,15 @@ internal static class AudioCheck
                     {
                         int v = sp[i];
                         int a = v < 0 ? -v : v;
-                        if (a > peak) peak = a;
-                        if (a > 150) nonzero++;
-                        sumSq += (double)v * v;
-                        nSamples++;
+                        if (a > _peak) _peak = a;
+                        if (a > 150) _nonzero++;
+                        double sq = (double)v * v;
+                        sumSq += sq; nSamplesGlobal += 1;
+                        int sec = (int)(posInSec / 2 / 48000);
+                        while (sumSqPerSec.Count <= sec) { sumSqPerSec.Add(0); cntPerSec.Add(0); }
+                        sumSqPerSec[sec] += sq;
+                        cntPerSec[sec]++;
+                        posInSec++;
                     }
                 }
                 buf.Unlock();
@@ -82,18 +125,16 @@ internal static class AudioCheck
         }
         reader.Dispose();
 
-        double rms = nSamples > 0 ? Math.Sqrt(sumSq / nSamples) : 0;
-        double peakDb = peak > 0 ? 20 * Math.Log10(peak / 32768.0) : -999;
-        double rmsDb = rms > 0 ? 20 * Math.Log10(rms / 32768.0) : -999;
-        double secs = nSamples / 2.0 / 48000.0;
+        _rms = nSamplesGlobal > 0 ? Math.Sqrt(sumSq / nSamplesGlobal) : 0;
+        _peakDb = _peak > 0 ? 20 * Math.Log10(_peak / 32768.0) : -999;
+        _rmsDb = _rms > 0 ? 20 * Math.Log10(_rms / 32768.0) : -999;
+        _secs = nSamplesGlobal / 2.0 / 48000.0;
 
-        Console.WriteLine($"解码样本 {samples}，时长 {secs:F2}s，PCM {bytes} 字节");
-        Console.WriteLine($"峰值 {peak}（{peakDb:F1} dBFS）  RMS {rms:F0}（{rmsDb:F1} dBFS）  有声样点数 {nonzero}");
-        if (lastTs < 0) lastTs = 0;
-        Console.WriteLine($"末时间戳 {lastTs}（{lastTs / 1e7:F2}s）");
-
-        if (peak < 500) { Console.WriteLine("[X] 音轨基本是静音"); return 8; }
-        Console.WriteLine("[ok] 音轨有真实波形");
+        for (int i = 0; i < sumSqPerSec.Count; i++)
+        {
+            double r = cntPerSec[i] > 0 ? Math.Sqrt(sumSqPerSec[i] / cntPerSec[i]) : 0;
+            profile.Add((i, r > 0.5 ? 20 * Math.Log10(r / 32768.0) : -999));
+        }
         return 0;
     }
 }

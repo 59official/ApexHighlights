@@ -54,6 +54,13 @@ internal sealed class Capture : IDisposable
     private AacEncoder? _aac;
     private AudioRing? _aRing;
     private LoopbackCapture? _wcap;
+    private Thread? _audioFill;
+    /// <summary>音频喂数据的串行化：真声音来自 wasapi 线程，补的静音来自 fill 线程，编码器不是线程安全的。</summary>
+    private readonly object _audioFeedGate = new();
+    private long _audioFedFrames;          // 已喂给编码器的样点数（累计）
+    private long _audioStart100 = long.MinValue;
+    private long _silenceFilled;           // 补了多少样点的静音（诊断用）
+    private byte[]? _zeroBuf;              // 静音补齐用的全零 PCM
     private string _audioName = "";
     private string _audioErr = "";
     private long _audioBytes;
@@ -68,6 +75,25 @@ internal sealed class Capture : IDisposable
     private long _limiterDrops, _capDrops, _queueDrops, _poolCreated;
     public bool HasFiredFake { get; private set; }
     private long _lastDetectTicks, _lastHitMs = -10000, _lastNearMs = -10000;
+
+    // 待切片段队列：命中时刻只登记，等环形真的录满后摇才落盘。
+    // 为什么不能命中即切：命中那一瞬间环形只写到命中时刻，coverTo == hitMs，
+    // 于是 stopUs 被夹成 hitMs，后摇 5 秒整段丢失（v1 实测 24s 命中出片只有 23.5s）。
+    private readonly object _pendingGate = new();
+    private readonly List<Detection> _pending = new();
+    private Thread? _clipThread;
+
+    // 配额/保留期（QuotaPolicy 默认 40GB / 30 天 / 2GB 水位）
+    private ClipLibrary? _lib;
+    private QuotaPolicy _policy = new();
+    private long _lastQuotaMs = -1, _lastQuotaClipCount;
+    private string _quotaMsg = "";
+    /// <summary>磁盘跌破水位后置位：已完成的片段照常落盘，但不再往环形里堆新数据。</summary>
+    public bool RecordingPaused { get; private set; }
+    /// <summary>用户从托盘手动暂停（和磁盘水位那条互不干扰）。</summary>
+    public bool UserPaused { get; set; }
+    /// <summary>真的不往环形里写了吗（两条暂停原因合一，给 Stats/UI 用）。</summary>
+    private bool Halted => RecordingPaused || UserPaused;
     private bool _wasAbove;
     private int _nearCount;
     private string _err = "";
@@ -182,6 +208,7 @@ internal sealed class Capture : IDisposable
         _converter = new GpuConverter(_dev!, _ctx!, Width, Height, EncodedFps);
         _enc = new EncoderChain(Width, Height, Bitrate, GopFrames, EncodedFps, _dev);
         _ring = new SegmentRing(dir, Width, Height, capacitySec);
+        _lib = new ClipLibrary(ClipDir);
 
         // 音轨：顺手起了系统回环采集；麦克风不碰（用户只要游戏声）。
         // 编码器构造失败不该让视频也停掉，所以整段兜住。
@@ -205,22 +232,135 @@ internal sealed class Capture : IDisposable
 
         _encThread = new Thread(EncodeLoop) { IsBackground = true, Name = "encode", Priority = ThreadPriority.AboveNormal };
         _encThread.Start();
+
+        // 静音补齐：WASAPI 在完全安静时不送包，靠这个线程按壁钟把音频时间轴推上去
+        if (_aac is not null)
+        {
+            _audioFill = new Thread(AudioFillLoop) { IsBackground = true, Name = "audiofill" };
+            _audioFill.Start();
+        }
+    }
+
+    /// <summary>配额策略（外部可改，线程安全地换引用即可）。</summary>
+    public QuotaPolicy Quota
+    {
+        get => _policy;
+        set { _policy = value; _lastQuotaMs = -1; }
+    }
+
+    /// <summary>最近一次配额检查的说明，给日志/UI 用。</summary>
+    public string QuotaMessage => _quotaMsg;
+
+    /// <summary>
+    /// 跑一次配额/保留期清理并更新水位状态。返回报告（库没起来时返回 null）。
+    /// 触发点：启动时、每片落盘后、每小时。
+    /// </summary>
+    public QuotaReport? RunQuotaCheck()
+    {
+        var lib = _lib;
+        if (lib is null) return null;
+        try
+        {
+            var rep = QuotaEnforcer.Run(lib, _policy);
+            _lastQuotaMs = _clock.ElapsedMilliseconds;
+            _lastQuotaClipCount = rep.Kept;
+            _quotaMsg = rep.ToString();
+            if (rep.DeletedTotal > 0)
+                Console.WriteLine($"[quota] {rep}");
+
+            // 水位：跌破就暂停环形写入（已完成的片段照常落盘，不丢已录好的）
+            bool low = QuotaEnforcer.BelowWatermark(ClipDir, _policy);
+            if (low && !RecordingPaused)
+            {
+                RecordingPaused = true;
+                _quotaMsg += "  磁盘低于水位，已暂停录制";
+                Console.WriteLine($"[quota] 可用 {QuotaReport.Mb(QuotaEnforcer.FreeBytes(ClipDir))} 低于水位 " +
+                                  $"{_policy.WatermarkGb}GB —— 暂停录制");
+            }
+            else if (!low && RecordingPaused)
+            {
+                RecordingPaused = false;
+                Console.WriteLine("[quota] 磁盘水位恢复，继续录制");
+            }
+            return rep;
+        }
+        catch (Exception ex) { _quotaMsg = "配额检查失败: " + ex.Message; return null; }
+    }
+
+    /// <summary>每小时（以及每片落盘后）检查一次，别在主循环里频繁扫目录。</summary>
+    private void MaybeQuotaCheck(bool force)
+    {
+        if (_lib is null) return;
+        long now = _clock.ElapsedMilliseconds;
+        if (!force && _lastQuotaMs >= 0 && now - _lastQuotaMs < _policy.CheckMinutes * 60_000L) return;
+        RunQuotaCheck();
     }
 
     /// <summary>WASAPI 回调（在 "wasapi" 线程上）。时间戳直接取采集用的同一个 Stopwatch，和视频同轴。</summary>
     private void OnPcm(byte[] pcm, int bytes)
     {
+        if (bytes <= 0) return;
+        Interlocked.Add(ref _audioBytes, bytes);
+        Pump(pcm, bytes, _clock.ElapsedMilliseconds * 10_000L);
+    }
+
+    /// <summary>
+    /// 往音频编码器喂数据，顺便补齐静音。
+    ///
+    /// 为什么需要补：这台机器的 WASAPI 回环在**完全安静**时一个 packet 都不送（`--audio-test` 静音时 0 包）。
+    /// 于是安静时段 AAC 一帧都不出，音频环只覆盖零星几百毫秒，片段里就干脆没有音轨
+    /// （`BuildClip` 见音频帧为空会退回无音轨封装）。补静音让音频时间轴始终连续覆盖整段录制。
+    ///
+    /// 时间轴由 AacEncoder 按累计样点数推算，所以这里只要保证「喂进去的样本数 ≈ 壁钟走过的样本数」。
+    /// </summary>
+    private void Pump(byte[]? pcm, int bytes, long now100)
+    {
         var aac = _aac;
         var ring = _aRing;
-        if (aac is null || ring is null || bytes <= 0) return;
-        long now100 = _clock.ElapsedMilliseconds * 10_000L;
-        // 音频回调比视频频繁得多，单独兜异常，绝不让它把进程带走
+        if (aac is null || ring is null) return;
+
         try
         {
-            Interlocked.Add(ref _audioBytes, bytes);
-            aac.Feed(pcm.AsSpan(0, bytes), now100, (data, pts100) => ring.Append(pts100 / 10, data));
+            lock (_audioFeedGate)
+            {
+                if (_audioStart100 == long.MinValue) _audioStart100 = now100;
+
+                // 静音补齐：只补到「壁钟应有的样本数」，不留未来
+                long expected = (now100 - _audioStart100) * aac.SampleRate / 10_000_000L;
+                long shortfall = expected - _audioFedFrames;
+                if (shortfall >= 1024)
+                {
+                    long fill = shortfall / 1024 * 1024;      // 整帧补，避免制造半个 AAC 帧
+                    _zeroBuf ??= new byte[1024 * 4 * 8];
+                    int per = _zeroBuf.Length / 4;            // 每次喂多少样点
+                    while (fill > 0)
+                    {
+                        int take = (int)Math.Min(per, fill);
+                        aac.Feed(_zeroBuf.AsSpan(0, take * 4), now100, (d, p) => ring.Append(p / 10, d));
+                        _audioFedFrames += take;
+                        _silenceFilled += take;
+                        fill -= take;
+                    }
+                }
+
+                if (pcm is not null && bytes > 0)
+                {
+                    aac.Feed(pcm.AsSpan(0, bytes), now100, (d, p) => ring.Append(p / 10, d));
+                    _audioFedFrames += bytes / 4;
+                }
+            }
         }
         catch (Exception ex) { if (_audioErr.Length == 0) _audioErr = ex.Message; }
+    }
+
+    /// <summary>静音补齐线程：WASAPI 不送包的时候也得让音频时间轴往前走。</summary>
+    private void AudioFillLoop()
+    {
+        while (!_stop)
+        {
+            Thread.Sleep(20);
+            Pump(null, 0, _clock.ElapsedMilliseconds * 10_000L);
+        }
     }
 
     private void EncodeLoop()
@@ -262,7 +402,7 @@ internal sealed class Capture : IDisposable
                 // 背压只靠纹理池上限（GPU 端）和队列容量（编码端）；检测仍单独 10fps 限流。
 
                 // 编码：GPU 直通（BGRA → NV12 全在 GPU，整帧不落 CPU）
-                if (_enc is not null)
+                if (_enc is not null && !Halted)
                 {
                     if (Interlocked.Increment(ref _texInFlight) > MaxInFlight)
                     {
@@ -302,13 +442,14 @@ internal sealed class Capture : IDisposable
                 if (now - _lastDetectTicks < 100) return;
                 _lastDetectTicks = now;
 
+                MaybeQuotaCheck(false);
+
                 ReadBand(tex);
 
                 if (FakeHitAtSec > 0 && now >= FakeHitAtSec * 1000L && !HasFiredFake)
                 {
                     HasFiredFake = true;
-                    var clip = TrySaveClip(now, 0.99f);
-                    Detected?.Invoke(new Detection(now, 0.99f, 0, 0, null) { WallClock = DateTime.Now, Label = "fake", ClipPath = clip.Path, Bytes = clip.Bytes });
+                    QueueClip(new Detection(now, 0.99f, 0, 0, null) { WallClock = DateTime.Now, Label = "fake" });
                 }
 
                 var sw = Stopwatch.StartNew();
@@ -325,16 +466,13 @@ internal sealed class Capture : IDisposable
                     Directory.CreateDirectory(OutDir);
                     var path = Path.Combine(OutDir, $"hit_{now / 1000:00000}_{det.Score:F2}.bmp");
                     BandBmp.Write(path, _band, _prof.Band.W, _prof.Band.H);
-                    var clip = TrySaveClip(now, det.Score);
-                    Detected?.Invoke(new Detection(now, det.Score, det.X, det.Y, path)
+                    // 只登记，不在这里切：切片段线程会等后摇录满再落盘
+                    QueueClip(new Detection(now, det.Score, det.X, det.Y, path)
                     {
                         WallClock = DateTime.Now,
                         Label = det.Label,
-                        ClipPath = clip.Path,
-                        Bytes = clip.Bytes,
                     });
-                }
-                else if (!above && det.Score >= 0.45f && now - _lastNearMs >= 2000 && _nearCount < 40)
+                }                else if (!above && det.Score >= 0.45f && now - _lastNearMs >= 2000 && _nearCount < 40)
                 {
                     _lastNearMs = now; _nearCount++;
                     Directory.CreateDirectory(OutDir);
@@ -398,8 +536,72 @@ internal sealed class Capture : IDisposable
         catch (Exception ex) { if (_err.Length == 0) _err = "dump: " + ex.Message; }
     }
 
+    /// <summary>
+    /// 命中：先登记，交给切片段线程等后摇录满再落盘。
+    /// 立刻切的话 coverTo 只到命中时刻，后摇会整段丢掉。
+    /// </summary>
+    private void QueueClip(Detection det)
+    {
+        lock (_pendingGate) _pending.Add(det);
+        if (_clipThread is null)
+        {
+            _clipThread = new Thread(ClipLoop) { IsBackground = true, Name = "clip" };
+            _clipThread.Start();
+        }
+    }
+
+    /// <summary>等「命中时刻 + 后摇」真的录进环里，再切、再落盘、再报事件。</summary>
+    private void ClipLoop()
+    {
+        while (!_stop)
+        {
+            Thread.Sleep(100);
+            Detection[] batch;
+            lock (_pendingGate)
+            {
+                if (_pending.Count == 0) continue;
+                batch = _pending.ToArray();
+                _pending.Clear();
+            }
+
+            foreach (var det in batch)
+            {
+                long wantUs = det.Ms * 1000L + _prof.PostRollSec * 1_000_000L;
+                // 最多多等 3 秒：环形已经滑过足够远（比如命中后立刻暂停）就不再干等
+                long giveUp = _clock.ElapsedMilliseconds;
+                while (!_stop && _ring is not null)
+                {
+                    var (_, coverTo) = _ring.Coverage();
+                    if (coverTo >= wantUs) break;
+                    if (_stop || _clock.ElapsedMilliseconds - giveUp > 3000 + _prof.PostRollSec * 1000L) break;
+                    Thread.Sleep(80);
+                }
+
+                var clip = WriteClip(det.Ms, det.Score);
+                Detected?.Invoke(det with { ClipPath = clip.Path, Bytes = clip.Bytes });
+            }
+        }
+    }
+
+    /// <summary>退出时把队列里还没切的片段切掉（后摇可能没录满，但前摇画面不能白丢）。</summary>
+    private void FlushPending()
+    {
+        Detection[] batch;
+        lock (_pendingGate)
+        {
+            if (_pending.Count == 0) return;
+            batch = _pending.ToArray();
+            _pending.Clear();
+        }
+        foreach (var det in batch)
+        {
+            var clip = WriteClip(det.Ms, det.Score);
+            if (clip.Path is not null) Console.WriteLine($"[CLIP] {clip.Path}（退出时补切）");
+        }
+    }
+
     /// <summary>按前摇/后摇从环形里切一片出来写成 mp4。</summary>
-    private (string? Path, long Bytes) TrySaveClip(long hitMs, float score)
+    private (string? Path, long Bytes) WriteClip(long hitMs, float score)
     {
         if (_ring is null || _ring.Segments.Count == 0) return (null, 0);
         try
@@ -416,6 +618,8 @@ internal sealed class Capture : IDisposable
             var path = Path.Combine(ClipDir, name);
             File.WriteAllBytes(path, bytes);
             if (BeepOnSave) Beep.Saved();
+            // 新片落盘后立即查一次配额（spec §5 的清理触发点之一）
+            MaybeQuotaCheck(true);
             return (path, bytes.Length);
         }
         catch (Exception ex) { if (_encErr.Length == 0) _encErr = "clip: " + ex.Message; return (null, 0); }
@@ -496,6 +700,8 @@ internal sealed class Capture : IDisposable
         if (_err.Length > 0) s += $"  err={_err}";
         if (_encErr.Length > 0) s += $"  encErr={_encErr}";
         if (_audioErr.Length > 0) s += $"  audioErr={_audioErr}";
+        if (_lib is not null) s += $" 库={_lastQuotaClipCount}片 配额{_policy.QuotaGb}GB/{_policy.RetainDays}天" +
+            $"{(RecordingPaused ? " [已暂停:磁盘水位]" : UserPaused ? " [已暂停:手动]" : "")}";
         return s;
     }
 
@@ -503,6 +709,8 @@ internal sealed class Capture : IDisposable
     {
         _stop = true;
         try { _queue.CompleteAdding(); } catch { }
+        // 退出前把还没切完的片段切掉（后摇可能没录满，但前摇画面不能浪费）
+        try { FlushPending(); } catch { }
         try { _session?.Dispose(); } catch { }
         try { _pool?.Dispose(); } catch { }
         try { _diag?.Flush(); _diag?.Dispose(); } catch { }
@@ -511,6 +719,7 @@ internal sealed class Capture : IDisposable
         try { _enc?.Dispose(); } catch { }
         try { _aac?.Dispose(); } catch { }
         try { _encThread?.Join(2000); } catch { }
+        try { _clipThread?.Join(2000); } catch { }
         _converter?.Dispose();
         foreach (var t in _texPool) try { t.Dispose(); } catch { }
         _bandStaging?.Dispose();

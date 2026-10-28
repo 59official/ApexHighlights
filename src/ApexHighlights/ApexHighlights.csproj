@@ -13,6 +13,8 @@
     <AssemblyName>ApexHighlights</AssemblyName>
     <RootNamespace>ApexHighlights</RootNamespace>
     <InvariantGlobalization>true</InvariantGlobalization>
+    <!-- 回顾库窗口与托盘：WinForms 是唯一能做出「单 exe、无额外依赖、双击即用」的选择 -->
+    <UseWindowsForms>true</UseWindowsForms>
   </PropertyGroup>
 
   <ItemGroup>
