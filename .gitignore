@@ -34,3 +34,6 @@ Thumbs.db
 desktop.ini
 .DS_Store
 *.stackdump
+
+# 运行时配置（阈值/配额），用户机器上各不相同，不入库
+config.json
