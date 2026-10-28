@@ -309,12 +309,13 @@ OBS 给不了或代价太大：
 | `Mp4.cs` / `Mp4Writer.cs` | 自己写的 MP4 封装（`ftyp` 主品牌必须是 `isom`，否则 MF 拒收）；单文件双轨 `avc1` + `mp4a` |
 | `Beep.cs` | 落盘提示音（现场合成 WAV + `winmm.PlaySound`，不弹窗） |
 | `ClipLibrary.cs` | 片段索引（文件名即索引）+ 配额/保留期清理 + 水位判定 |
+| `DetectPolicy.cs` / `BandCheck.cs` | 用户可调的命中阈值（存 `config.json`，只覆写 `Threshold` 一个字段）+ 阈值回归工具（重跑历史 band 图，看各阈值挡掉谁） |
 | `Mp4Probe.cs` / `ShellThumb.cs` | 列表用的轻量元数据读取（纯 box 树，不开 MF）+ Explorer 缩略图 |
 | `LibraryForm.cs` / `TrayApp.cs` / `AppIcon.cs` | 回顾库窗口（筛选/搜索/预览/删除/打开目录）+ 托盘常驻（状态/暂停/开库/退出） |
 | `Paths.cs` | 可写路径的唯一来源（`--data=` → exe 同目录 → `%LOCALAPPDATA%`），并负责释放内嵌游戏配置 |
 | `Program.cs` | `--offline` 离线回放 / 实时模式 / `--fps=` `--bitrate=` `--gop=` `--fake-hit=` `--no-audio` `--no-beep` `--no-tray` `--ui` `--data=` `--config=` |
 
-自检命令：`--gpu-test`（GPU 直通编码自检）、`--av-test`（双轨封装自检）、`--audio-test`（loopback 采音自检）、`--audio-check <mp4>`（音轨解码自检）、`--mp4-check <mp4>`（双轨样本数自检）、`--aac-probe`（可用 AAC 编码器枚举）、`--beep-test <wav>`、`--quota-test`（配额/保留期逻辑自检）、`--ui-test`（回顾库非交互自检）、`--tray-test=N`（托盘菜单自检）、`--probe <mp4>`（纯 box 树读元数据）。
+自检命令：`--gpu-test`（GPU 直通编码自检）、`--av-test`（双轨封装自检）、`--audio-test`（loopback 采音自检）、`--audio-check <mp4>`（音轨解码自检）、`--mp4-check <mp4>`（双轨样本数自检）、`--aac-probe`（可用 AAC 编码器枚举）、`--beep-test <wav>`、`--quota-test`（配额/保留期逻辑自检）、`--ui-test`（回顾库非交互自检）、`--tray-test=N`（托盘菜单自检）、`--probe <mp4>`（纯 box 树读元数据）、`--band-check --dir=<目录>`（阈值回归：历史 band 图重跑检测器）。
 库操作：`--lib-list`（列出现状）、`--quota-run`（真跑一次清理）、`--lib-ui`（只开窗口）。
 
 离线验证：715 帧 4 事件（174.0 / 202.6 / 272.8 / 345.2s），分数 0.86 / 1.00 / 0.82 / 0.83，事件外最高 0.33 —— 与 Python 探针完全一致。
