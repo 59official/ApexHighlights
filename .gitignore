@@ -1,0 +1,26 @@
+# 构建产物
+bin/
+obj/
+*.user
+*.suo
+.vs/
+
+# 本地工具链（dotnet 安装目录 + 各工具自建的 profile，合计约 900MB）
+.tools/
+
+# 录制输出与测试素材（合计约 750MB，不进仓库）
+captures/
+probe/s_*/
+probe/bands.bin
+probe/*.mp4
+probe/*.png
+
+# 运行时日志
+*.log
+*.log.csv
+live-*.csv
+
+# 系统垃圾
+Thumbs.db
+desktop.ini
+.DS_Store

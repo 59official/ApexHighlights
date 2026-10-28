@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>BenchWnd</title>
+<style>html,body{margin:0;height:100%;background:#000}</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+const c = document.getElementById('c');
+const ctx = c.getContext('2d');
+function resize(){ c.width = innerWidth; c.height = innerHeight; }
+resize(); addEventListener('resize', resize);
+let t = 0;
+function draw(){
+  t++;
+  const w = c.width, h = c.height;
+  // 渐变背景
+  const g = ctx.createLinearGradient(0,0,0,h);
+  g.addColorStop(0, 'rgb(40,20,60)'); g.addColorStop(1, 'rgb(10,40,80)');
+  ctx.fillStyle = g; ctx.fillRect(0,0,w,h);
+  // 200 个运动色块
+  for (let i=0;i<200;i++){
+    const x = (i*37 + t*3) % w;
+    const y = (i*53 + t*2) % h;
+    ctx.fillStyle = `hsl(${(i*7+t)%360},80%,55%)`;
+    ctx.fillRect(x, y, 40, 40);
+  }
+  // 大字时间戳，方便核对内容
+  ctx.fillStyle = '#fff'; ctx.font = '48px monospace';
+  ctx.fillText('T=' + Math.floor(t/60) + '.' + (t%60), 40, 80);
+  requestAnimationFrame(draw);
+}
+draw();
+</script>
+</body>
+</html>

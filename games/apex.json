@@ -1,0 +1,26 @@
+{
+  "id": "apex",
+  "name": "Apex Legends",
+  "windowTitles": [
+    "Apex Legends"
+  ],
+  "refWidth": 2560,
+  "refHeight": 1440,
+  "band": {
+    "x": 640,
+    "y": 1000,
+    "w": 1280,
+    "h": 120
+  },
+  "minGapMs": 500,
+  "preRollSec": 30,
+  "postRollSec": 5,
+  "templates": [
+    {
+      "id": "knock",
+      "label": "击倒",
+      "file": "apex/knock.png",
+      "threshold": 0.6
+    }
+  ]
+}

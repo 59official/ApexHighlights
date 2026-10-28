@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>BenchWnd</title>
+<style>html,body{margin:0;height:100%;background:#000;overflow:hidden}</style></head>
+<body><canvas id="c"></canvas>
+<script>
+const c=document.getElementById('c'),ctx=c.getContext('2d');
+function resize(){c.width=innerWidth;c.height=innerHeight;}
+resize();addEventListener('resize',resize);
+const fpsEl=document.createElement('div');
+let t=0,last=performance.now(),fps=0,acc=0,frames=0;
+function draw(){
+ t++;const w=c.width,h=c.height;
+ const g=ctx.createLinearGradient(0,0,0,h);
+ g.addColorStop(0,'rgb(40,20,60)');g.addColorStop(1,'rgb(10,40,80)');
+ ctx.fillStyle=g;ctx.fillRect(0,0,w,h);
+ for(let i=0;i<300;i++){const x=(i*37+t*3)%w,y=(i*53+t*2)%h;
+  ctx.fillStyle=`hsl(${(i*7+t)%360},80%,55%)`;ctx.fillRect(x,y,40,40);}
+ ctx.fillStyle='#fff';ctx.font='64px monospace';
+ ctx.fillText(w+'x'+h+'  T='+Math.floor(t/60)+'.'+(t%60),40,100);
+ const now=performance.now();acc+=now-last;last=now;frames++;
+ if(acc>500){fps=Math.round(frames*1000/acc);frames=0;acc=0;}
+ ctx.font='72px monospace';ctx.fillStyle='#0f0';
+ ctx.fillText('FPS '+fps,40,200);
+ requestAnimationFrame(draw);
+}
+draw();
+</script></body></html>
