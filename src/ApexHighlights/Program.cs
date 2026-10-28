@@ -341,7 +341,10 @@ internal static class Program
         }
 
         var menuField = args.FirstOrDefault(a => a.StartsWith("--shot-menu=", StringComparison.OrdinalIgnoreCase))?[12..];
-        return Shot(form, shot, menuField);
+        // 菜单有 112ms 的滑出动画：想抓中间帧就传 --shot-menu-delay=45
+        var delayArg = args.FirstOrDefault(a => a.StartsWith("--shot-menu-delay=", StringComparison.OrdinalIgnoreCase))?[18..];
+        var menuDelay = int.TryParse(delayArg, out var d) ? d : 250;
+        return Shot(form, shot, menuField, menuDelay);
     }
 
     /// <summary>
@@ -349,7 +352,7 @@ internal static class Program
     /// 用 PrintWindow(PW_RENDERFULLCONTENT) 而不是屏幕截图：窗口被别的窗口盖住、
     /// 或者跑在最小化的桌面上时，屏幕截图会是黑的。
     /// </summary>
-    private static int Shot(Form form, string file, string? menuField = null)
+    private static int Shot(Form form, string file, string? menuField = null, int menuDelay = 250)
     {
         form.StartPosition = FormStartPosition.Manual;
         form.Location = new Point(40, 40);
@@ -367,8 +370,22 @@ internal static class Program
         if (menuField is not null && UiTest.Field(form, menuField) is PillSelect sel && sel.ShowMenu() is { } menu)
         {
             Application.DoEvents();
-            Thread.Sleep(250);
+            Thread.Sleep(menuDelay);
             Application.DoEvents();
+
+            // 调试用：APEX_SHOT_SCREEN=路径 时顺带截一块真实屏幕，
+            // PrintWindow 只拿得到窗口内容，拿不到窗口在屏幕上的位置。
+            var screenPath = Environment.GetEnvironmentVariable("APEX_SHOT_SCREEN");
+            if (!string.IsNullOrEmpty(screenPath))
+            {
+                var r = Rectangle.Union(menu.Bounds, form.Bounds);
+                r.Intersect(Screen.PrimaryScreen!.Bounds);
+                using var snap = new Bitmap(r.Width, r.Height);
+                using (var g = Graphics.FromImage(snap))
+                    g.CopyFromScreen(r.Left, r.Top, 0, 0, r.Size);
+                snap.Save(screenPath, System.Drawing.Imaging.ImageFormat.Png);
+                Console.WriteLine($"[4] 屏幕截图 {screenPath}  {r}");
+            }
             using (var mb = new Bitmap(Math.Max(1, menu.Width), Math.Max(1, menu.Height)))
             {
                 Native.PrintWindowTo(menu.Handle, mb);

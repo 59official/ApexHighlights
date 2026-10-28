@@ -133,7 +133,52 @@ internal sealed class PillSelect : Control
         menu.Show(this, new Point(0, Height + 4));
         using (var rp = UiKit.RoundRect(new Rectangle(0, 0, menu.Width, menu.Height), DarkMenu.Radius))
             menu.Region = new Region(rp);
+        SlideIn(menu);
         return menu;
+    }
+
+    private System.Windows.Forms.Timer? _slide;
+
+    /// <summary>
+    /// 菜单从胶囊底边滑出来：先出现在终点上方 16px，再逐帧（12ms × 7 帧 ≈ 84ms）
+    /// 用 ease-out 落回终点。原生 ToolStripDropDown 是一次性弹出来的，很硬。
+    /// 只动位置不做透明度：不加分层窗口，省掉一类渲染风险。
+    /// </summary>
+    private void SlideIn(ContextMenuStrip menu)
+    {
+        _slide?.Stop();
+        _slide?.Dispose();
+        _slide = null;
+
+        var target = menu.Location;
+        const int dist = 16;
+        const int steps = 7;
+        var step = 0;
+
+        menu.Location = new Point(target.X, target.Y - dist);
+
+        var t = new System.Windows.Forms.Timer { Interval = 12 };
+        t.Tick += (_, _) =>
+        {
+            if (menu.IsDisposed)
+            {
+                t.Stop();
+                t.Dispose();
+                return;
+            }
+
+            step++;
+            var p = step / (double)steps;
+            var e = 1 - Math.Pow(1 - p, 3);                       // ease-out cubic
+            menu.Location = new Point(target.X, target.Y - (int)Math.Round(dist * (1 - e)));
+
+            if (step < steps) return;
+            menu.Location = target;
+            t.Stop();
+            t.Dispose();
+        };
+        _slide = t;
+        t.Start();
     }
 }
 

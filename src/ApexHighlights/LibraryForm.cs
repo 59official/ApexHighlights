@@ -384,7 +384,8 @@ public sealed class LibraryForm : Form
         _thCombo.SelectedIndexChanged -= OnThresholdUiChanged;
         _thCombo.SelectedIndex = idx;
         _thCombo.SelectedIndexChanged += OnThresholdUiChanged;
-        _thLabel.Text = cur > 0 ? $"灵敏度 {cur:F2}" : "灵敏度";
+        // 值已经写在胶囊里（「0.70 · 默认推荐」），标签再挂一遍就重了
+        _thLabel.Text = "灵敏度";
     }
 
     private void OnThresholdUiChanged(object? sender, EventArgs e)
