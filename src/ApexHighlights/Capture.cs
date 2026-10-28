@@ -40,6 +40,7 @@ internal sealed class Capture : IDisposable
     // NV12 输出纹理池：GPU 转换结果，编码线程用完归还。
     // 8 个 in-flight 给 NVENC 的异步读取留足缓冲（避免它还没读完就被下一帧覆盖），
     // 也吸收编码线程的瞬时抖动（之前 3 个 → 30s 丢 39 帧）。
+    // 池的容量上限 = MaxInFlight：归还时满了就 Dispose，否则空闲纹理会越攒越多。
     private readonly ConcurrentBag<ID3D11Texture2D> _texPool = new();
     private int _texInFlight;
     private const int MaxInFlight = 8;
@@ -419,6 +420,13 @@ internal sealed class Capture : IDisposable
         }
     }
 
+    /// <summary>把 NV12 纹理归还池。空闲槽满就直接释放，避免纹理越攒越多。</summary>
+    private void ReturnNv12(ID3D11Texture2D tex)
+    {
+        if (_texPool.Count < MaxInFlight) _texPool.Add(tex);
+        else tex.Dispose();
+    }
+
     private void EncodeLoop()
     {
         while (!_stop && !_queue.IsCompleted)
@@ -435,7 +443,7 @@ internal sealed class Capture : IDisposable
             finally
             {
                 Interlocked.Decrement(ref _texInFlight);
-                _texPool.Add(item.tex);
+                ReturnNv12(item.tex);
             }
         }
     }
@@ -467,8 +475,9 @@ internal sealed class Capture : IDisposable
                     }
                     else
                     {
-                        var nv12Tex = _texPool.TryTake(out var t) ? t : CreateNv12();
-                        if (_texPool.Count == 0) _poolCreated++;
+                        ID3D11Texture2D nv12Tex;
+                        if (_texPool.TryTake(out var t)) nv12Tex = t;
+                        else { nv12Tex = CreateNv12(); _poolCreated++; }   // 没从池里拿到 = 新建
                         try
                         {
                             _converter!.Convert(tex, nv12Tex);
@@ -744,15 +753,33 @@ internal sealed class Capture : IDisposable
             long stopUs = Math.Min(endUs, lastMs * 1000L + _prof.PostRollSec * 1_000_000L);
             if (stopUs - startUs < 500_000) return (null, 0);
 
-            var bytes = _ring.BuildClip(startUs, stopUs, _aRing);
             Directory.CreateDirectory(ClipDir);
             var name = $"{_prof.Id}{KindToken(det.Kind)}_{DateTime.Now:MMdd-HHmmss}_{det.Score:F2}.mp4";
             var path = Path.Combine(ClipDir, name);
-            File.WriteAllBytes(path, bytes);
+
+            // 流式写：先写 .tmp 再改名。
+            // 原来是把整个片段拼成一个 byte[] 再 WriteAllBytes —— 30 秒 20Mbps 就是
+            // 内存里同时存在「样本字节 + 同样大的输出数组」，峰值直接翻倍。
+            // 先写 tmp 的意义是：中途失败或进程被杀，库里不会留一个能播一半的残片。
+            var tmp = path + ".tmp";
+            long written;
+            try
+            {
+                using (var fs = new FileStream(tmp, FileMode.Create, FileAccess.Write, FileShare.None, 1 << 20))
+                    written = _ring.WriteClip(fs, startUs, stopUs, _aRing);
+                if (written == 0) { try { File.Delete(tmp); } catch { } return (null, 0); }
+                File.Move(tmp, path, overwrite: true);
+            }
+            catch
+            {
+                try { File.Delete(tmp); } catch { }
+                throw;
+            }
+
             if (BeepOnSave) Beep.Saved();
             // 新片落盘后立即查一次配额（spec §5 的清理触发点之一）
             MaybeQuotaCheck(true);
-            return (path, bytes.Length);
+            return (path, written);
         }
         catch (Exception ex) { if (_encErr.Length == 0) _encErr = "clip: " + ex.Message; return (null, 0); }
     }

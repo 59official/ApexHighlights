@@ -114,16 +114,48 @@ public sealed class SegmentRing
     /// <summary>
     /// 带音轨的版本。视频会回退到关键帧，所以音轨也必须对齐到同一个起点：
     /// 先算出第一帧视频的绝对时间，再把音频帧的相对时间戳减掉它。
+    /// 这个重载把结果拼进 byte[]（自检工具用）；真正落盘走 <see cref="WriteClip(Stream,long,long,AudioRing?)"/>。
     /// </summary>
     public byte[] BuildClip(long startUs, long endUs, AudioRing? audio)
     {
+        var p = Prepare(startUs, endUs, audio);
+        if (p is null) return Array.Empty<byte>();
+        using var ms = new MemoryStream();
+        Mp4Writer.Write(ms, Sps!, Pps!, _w, _h, p.Value.Video, p.Value.Audio,
+            p.Value.AudioRate, p.Value.Asc, p.Value.Channels);
+        return ms.ToArray();
+    }
+
+    /// <summary>
+    /// 直接写进目标流（通常是 FileStream）。
+    /// 为什么要加这个：原来 BuildClip 返回 byte[] 再 File.WriteAllBytes，
+    /// 切片瞬间内存里同时存在「全部样本字节」和「同样大的输出数组」，
+    /// 30 秒 20Mbps 的片段就是两个 80MB —— 那是工作集峰值的主要来源。
+    /// </summary>
+    /// <returns>写出的字节数；没有可用分段时返回 0。</returns>
+    public long WriteClip(Stream dst, long startUs, long endUs, AudioRing? audio)
+    {
+        var p = Prepare(startUs, endUs, audio);
+        if (p is null) return 0;
+        return Mp4Writer.Write(dst, Sps!, Pps!, _w, _h, p.Value.Video, p.Value.Audio,
+            p.Value.AudioRate, p.Value.Asc, p.Value.Channels);
+    }
+
+    private readonly record struct Prepared(
+        List<Mp4Writer.ClipSample> Video,
+        List<Mp4Writer.ClipSample>? Audio,
+        int AudioRate, byte[]? Asc, int Channels);
+
+    /// <summary>选段、回退到关键帧、对齐音轨时间戳。BuildClip 与 WriteClip 共用。</summary>
+    private Prepared? Prepare(long startUs, long endUs, AudioRing? audio)
+    {
         if (Sps is null || Pps is null) throw new InvalidOperationException("还没拿到 SPS/PPS");
         var chosen = _segs.Where(s => s.EndUs >= startUs && s.StartUs <= endUs).ToList();
-        if (chosen.Count == 0) return Array.Empty<byte>();
+        if (chosen.Count == 0) return null;
 
         var all = new List<Mp4Writer.ClipSample>();
         foreach (var s in chosen) all.AddRange(Mp4Writer.ReadSegment(File.ReadAllBytes(s.Path)));
-        if (all.Count == 0) return Array.Empty<byte>();
+        if (all.Count == 0) return null;
 
         long startTicks = startUs <= 0 ? 0 : startUs * Mp4.Timescale / 1_000_000;
         int first = 0;
@@ -145,7 +177,7 @@ public sealed class SegmentRing
         var video = all.GetRange(first, last - first + 1);
 
         if (audio is null || audio.TotalFrames == 0)
-            return Mp4Writer.Build(Sps, Pps, _w, _h, video);
+            return new Prepared(video, null, 0, null, 0);
 
         // 视频第一帧的绝对微秒时间，作为两条轨共同的 0 点
         long firstUs = all[first].DtsTicks * 1_000_000L / Mp4.Timescale;
@@ -158,10 +190,9 @@ public sealed class SegmentRing
             aSamples.Add(new Mp4Writer.ClipSample(dts, 1024, true, f.Aac));
         }
         if (aSamples.Count == 0)
-            return Mp4Writer.Build(Sps, Pps, _w, _h, video);
+            return new Prepared(video, null, 0, null, 0);
 
-        return Mp4Writer.Build(Sps, Pps, _w, _h, video,
-            aSamples, audio.SampleRate, audio.Asc, audio.Channels);
+        return new Prepared(video, aSamples, audio.SampleRate, audio.Asc, audio.Channels);
     }
 
     /// <summary>整段覆盖时间范围（用于报告）</summary>

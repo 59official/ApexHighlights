@@ -41,6 +41,22 @@ internal sealed class TrayApp : ApplicationContext
     /// <summary>连续多少次状态刷新都找不到游戏窗口。用于区分「切走了」和「真退出了」。</summary>
     private int _missingTicks;
 
+    // 控制台窗口的延迟隐藏。
+    // 用户要的是「启动并捕获到 Apex 后长亮 5 秒再藏」——不是立刻藏。
+    // 立刻藏（以前的做法）的后果是双击后黑框一闪就没，看着像崩溃；
+    // 而完全不藏又会让一个黑窗口一直杵在任务栏里。折中：起了采集再等 5 秒。
+    // 另外还有个兜底：25 秒内一直没捕获到游戏也藏掉，否则用户没开游戏时黑窗口永远留着。
+    private readonly Stopwatch _sinceStart = Stopwatch.StartNew();
+    private long _captureStartMs = -1;
+    private bool _consoleHidden;
+    private System.Windows.Forms.Timer? _hideTick;
+
+    /// <summary>启动后多久还没捕获到游戏就无条件藏控制台（毫秒）。</summary>
+    private const int HideAnywayMs = 25_000;
+
+    /// <summary>捕获成功后控制台再保持可见多久（毫秒）。</summary>
+    private const int KeepVisibleAfterCaptureMs = 5_000;
+
     public TrayApp(GameProfile profile, QuotaPolicy policy, DetectPolicy detect, string cfgPath, string title, int fps, int bitrate, bool openUiFirst, bool audio, bool beep, int fakeHit = 0, int selfTest = 0, bool ocr = true)
     {
         _profile = profile;
@@ -97,6 +113,7 @@ internal sealed class TrayApp : ApplicationContext
         _tick.Start();
 
         StartCapture();
+        ArmConsoleHide();
         RefreshStatus();
         if (_openUiFirst) ShowLibrary();
         if (_selfTest > 0) ArmSelfTest();
@@ -231,6 +248,8 @@ internal sealed class TrayApp : ApplicationContext
                       $"条带 {_profile.Band.W}x{_profile.Band.H}@{_profile.Band.X},{_profile.Band.Y}，" +
                       $"模板 {string.Join(",", _profile.Templates.Select(t => t.Id))}，阈值 {_cap.Threshold:F2}，库 {_cap.ClipDir}" +
                       (rep is null ? "" : $"（{rep}）"));
+            // 捕获成功 = 控制台可以从这一刻起算 5 秒后藏掉（用户要的「长亮 5 秒」）
+            if (_captureStartMs < 0) _captureStartMs = _sinceStart.ElapsedMilliseconds;
             _statusItem.Text = $"录制中 {_cap.Width}×{_cap.Height} @{_fps}fps";
             _icon.ShowBalloonTip(3000, "ApexHighlights",
                 $"开始录制 {Native.TitleOf(hwnd)}\n命中击倒横幅会自动存一段。", ToolTipIcon.Info);
@@ -259,6 +278,34 @@ internal sealed class TrayApp : ApplicationContext
             RefreshStatus();
         };
         _wait.Start();
+    }
+
+    /// <summary>
+    /// 启动后盯住控制台窗口，到点就藏：
+    /// 捕获成功后再等 <see cref="KeepVisibleAfterCaptureMs"/>，或者一直没捕获到则等
+    /// <see cref="HideAnywayMs"/>。停在这里之前不碰窗口，用户能看见启动那几行输出。
+    /// </summary>
+    private void ArmConsoleHide()
+    {
+        if (_selfTest > 0) return;                 // 自检要读 stdout，不能藏
+        if (_consoleHidden || _hideTick is not null) return;
+        _hideTick = new System.Windows.Forms.Timer { Interval = 500 };
+        _hideTick.Tick += (_, _) =>
+        {
+            var now = _sinceStart.ElapsedMilliseconds;
+            var target = _captureStartMs >= 0
+                ? _captureStartMs + KeepVisibleAfterCaptureMs
+                : HideAnywayMs;
+            if (now < target) return;
+            _hideTick!.Stop();
+            _hideTick.Dispose();
+            _hideTick = null;
+            Native.SetConsoleVisible(false);
+            _consoleHidden = true;
+            Log.FileOnly($"[console] 启动 {now}ms 后隐藏控制台" +
+                         (_captureStartMs >= 0 ? $"（捕获于 {_captureStartMs}ms）" : "（始终没捕获到游戏）"));
+        };
+        _hideTick.Start();
     }
 
     /// <summary>命中回调（非 UI 线程）：报一声，然后把片段路径塞给库窗口刷新。</summary>

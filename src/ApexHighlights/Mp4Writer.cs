@@ -101,8 +101,30 @@ internal static class Mp4Writer
     /// <summary>
     /// 写普通 mp4。audio 非空时额外写一条 mp4a 音轨（track_id = 2）。
     /// mdat 里先放全部视频样本、再放全部音频样本，两条轨的 stco 各自指向自己的那一段。
+    ///
+    /// 注意：这个重载会把整个文件拼进一个 byte[]，30 秒 20Mbps 的片段就是 80MB 现分配。
+    /// 真正的落盘路径用 <see cref="Write(Stream, byte[], byte[], int, int, IReadOnlyList{ClipSample}, IReadOnlyList{ClipSample}, int, byte[], int)"/>，
+    /// 这里是给自检工具（--av-test / --enc-test / --gpu-test）用的便利版本。
     /// </summary>
     public static byte[] Build(byte[] sps, byte[] pps, int width, int height,
+        IReadOnlyList<ClipSample> samples,
+        IReadOnlyList<ClipSample>? audio, int audioTimescale, byte[]? asc, int audioChannels)
+    {
+        using var ms = new MemoryStream();
+        Write(ms, sps, pps, width, height, samples, audio, audioTimescale, asc, audioChannels);
+        return ms.ToArray();
+    }
+
+    /// <summary>
+    /// 流式写普通 mp4：算好 stco 偏移后依次把 ftyp、moov、mdat 头、各样本字节写进目标流。
+    ///
+    /// 为什么要流式：原来先 `new byte[]` 拼整个文件再 `File.WriteAllBytes`，
+    /// 意味着切片那一瞬间内存里同时存在「全部样本字节」+「同样大小的输出数组」，
+    /// 30 秒 20Mbps 的片段光这一下就 160MB 峰值 —— 这是工作集峰值的主要来源。
+    /// 改成直接写文件后，只有样本字节本身还占内存。
+    /// </summary>
+    /// <returns>写出的总字节数。</returns>
+    public static long Write(Stream dst, byte[] sps, byte[] pps, int width, int height,
         IReadOnlyList<ClipSample> samples,
         IReadOnlyList<ClipSample>? audio, int audioTimescale, byte[]? asc, int audioChannels)
     {
@@ -129,16 +151,18 @@ internal static class Mp4Writer
             audio, aOffsets, audioTimescale, asc, audioChannels, audioTicks);
         if (moov.Length != moovProbe.Length) throw new InvalidOperationException("moov 长度不一致");
 
-        var res = new byte[ftyp.Length + moov.Length + 8 + totalBytes];
-        int o = 0;
-        ftyp.CopyTo(res, o); o += ftyp.Length;
-        moov.CopyTo(res, o); o += moov.Length;
-        BinaryPrimitives.WriteInt32BigEndian(res.AsSpan(o, 4), (int)(8 + totalBytes));
-        System.Text.Encoding.ASCII.GetBytes("mdat").CopyTo(res, o + 4);
-        o += 8;
-        foreach (var s in samples) { s.Avcc.CopyTo(res, o); o += s.Avcc.Length; }
-        for (int i = 0; i < m; i++) { audio![i].Avcc.CopyTo(res, o); o += audio[i].Avcc.Length; }
-        return res;
+        long written = 0;
+        dst.Write(ftyp, 0, ftyp.Length); written += ftyp.Length;
+        dst.Write(moov, 0, moov.Length); written += moov.Length;
+
+        Span<byte> mdatHeader = stackalloc byte[8];
+        BinaryPrimitives.WriteInt32BigEndian(mdatHeader, (int)(8 + totalBytes));
+        System.Text.Encoding.ASCII.GetBytes("mdat", mdatHeader[4..]);
+        dst.Write(mdatHeader); written += 8;
+
+        foreach (var s in samples) { dst.Write(s.Avcc, 0, s.Avcc.Length); written += s.Avcc.Length; }
+        for (int i = 0; i < m; i++) { dst.Write(audio![i].Avcc, 0, audio[i].Avcc.Length); written += audio[i].Avcc.Length; }
+        return written;
     }
 
     private static byte[] Ftyp() => Box("ftyp",

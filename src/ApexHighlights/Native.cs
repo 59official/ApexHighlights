@@ -109,10 +109,28 @@ internal static unsafe class Native
     /// 但整个程序是 Console 类型（--lib-list 等自检命令要靠 stdout），
     /// 所以不能改成 WinExe，只能运行时藏窗口 —— 输出流不受影响，日志照写。
     /// </summary>
-    public static void HideConsole()
+    public static void HideConsole() => SetConsoleVisible(false);
+
+    /// <summary>
+    /// 显示/隐藏控制台窗口。
+    /// 注意：只有用经典 conhost 托管时这个句柄才是那个看得见的黑框
+    /// （双击 .bat 就是这种）；如果是从 Windows Terminal 里的 cmd 启动，
+    /// 可见的是 WT 自己的窗口，GetConsoleWindow() 拿到的是隐藏的伪窗口，这里就无效。
+    /// </summary>
+    public static void SetConsoleVisible(bool visible)
     {
         var h = GetConsoleWindow();
-        if (h != IntPtr.Zero) ShowWindow(h, 0);   // SW_HIDE
+        if (h != IntPtr.Zero) ShowWindow(h, visible ? 5 : 0);   // SW_SHOW / SW_HIDE
+    }
+
+    /// <summary>控制台现在是不是可见（没有控制台时为 false）。</summary>
+    public static bool ConsoleVisible
+    {
+        get
+        {
+            var h = GetConsoleWindow();
+            return h != IntPtr.Zero && IsWindowVisible(h);
+        }
     }
 
     /// <summary>

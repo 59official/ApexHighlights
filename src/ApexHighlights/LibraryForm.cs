@@ -62,8 +62,20 @@ public sealed class LibraryForm : Form
         Font = new Font("Microsoft YaHei UI", 9f);
         Icon = AppIcon.Shared;
 
+        // 统一的深色主题（和右侧预览面板、托盘图标一个色系）。
+        // 以前工具栏/列表/状态栏是系统默认的浅灰白，和深色预览拼在一起很割裂。
+        var inkBg = Color.FromArgb(40, 40, 46);     // 面板底
+        var inkDeeper = Color.FromArgb(28, 28, 32); // 列表/预览底
+        var inkText = Color.FromArgb(228, 228, 232); // 主文字
+        var inkDim = Color.FromArgb(150, 150, 158);  // 次级文字
+        var inkAccent = Color.FromArgb(80, 220, 240); // 强调青
+        BackColor = inkDeeper;
+
         // ---------- 工具栏 ----------
         var bar = new ToolStrip { GripStyle = ToolStripGripStyle.Hidden, Padding = new Padding(6, 3, 6, 3) };
+        bar.BackColor = inkBg;
+        bar.ForeColor = inkText;
+        bar.RenderMode = ToolStripRenderMode.System;
         bar.Items.Add(Button("刷新", (_, _) => Reload()));
         bar.Items.Add(Button("播放", (_, _) => OpenSelected()));
         bar.Items.Add(Button("打开目录", (_, _) => RevealSelected()));
@@ -75,28 +87,41 @@ public sealed class LibraryForm : Form
         // 十有八九正开着这个窗口在翻片段，就地能调最省事。
         bar.Items.Add(new ToolStripSeparator());
         _thLabel.Text = "灵敏度";
+        _thLabel.ForeColor = inkDim;
         bar.Items.Add(_thLabel);
         _thCombo.DropDownStyle = ComboBoxStyle.DropDownList;
         _thCombo.Width = 200;
+        _thCombo.FlatStyle = FlatStyle.Flat;
+        _thCombo.BackColor = inkBg;
+        _thCombo.ForeColor = inkText;
         bar.Items.Add(_thCombo);
 
         bar.Items.Add(new ToolStripSeparator());
-        bar.Items.Add(new ToolStripLabel("种类"));
+        bar.Items.Add(MakeLabel("种类", inkDim));
         _kindFilter.DropDownStyle = ComboBoxStyle.DropDownList;
+        _kindFilter.FlatStyle = FlatStyle.Flat;
+        _kindFilter.BackColor = inkBg;
+        _kindFilter.ForeColor = inkText;
         _kindFilter.Items.AddRange(new object[] { "全部", "击倒", "再次击倒", "助攻击倒", "小队淘汰", "助攻淘汰", "击杀", "被击倒" });
         _kindFilter.SelectedIndex = 0;
         _kindFilter.SelectedIndexChanged += (_, _) => ApplyFilter();
         bar.Items.Add(_kindFilter);
 
-        bar.Items.Add(new ToolStripLabel("时间"));
+        bar.Items.Add(MakeLabel("时间", inkDim));
         _timeFilter.DropDownStyle = ComboBoxStyle.DropDownList;
+        _timeFilter.FlatStyle = FlatStyle.Flat;
+        _timeFilter.BackColor = inkBg;
+        _timeFilter.ForeColor = inkText;
         _timeFilter.Items.AddRange(new object[] { "全部", "今天", "最近 7 天", "最近 30 天" });
         _timeFilter.SelectedIndex = 0;
         _timeFilter.SelectedIndexChanged += (_, _) => ApplyFilter();
         bar.Items.Add(_timeFilter);
 
-        bar.Items.Add(new ToolStripLabel("搜索"));
+        bar.Items.Add(MakeLabel("搜索", inkDim));
         _search.Width = 160;
+        _search.ForeColor = inkText;
+        _search.BackColor = inkDeeper;
+        _search.BorderStyle = BorderStyle.FixedSingle;
         _search.ToolTipText = "文件名片段，比如 1028-13";
         _search.TextChanged += (_, _) => ApplyFilter();
         bar.Items.Add(_search);
@@ -108,6 +133,9 @@ public sealed class LibraryForm : Form
         _list.HideSelection = false;
         _list.Dock = DockStyle.Fill;
         _list.SmallImageList = _thumbs;
+        _list.BackColor = inkDeeper;
+        _list.ForeColor = inkText;
+        _list.BorderStyle = BorderStyle.None;
         _list.Columns.Add("时间", 130);
         _list.Columns.Add("种类", 70);
         _list.Columns.Add("分数", 60, HorizontalAlignment.Right);
@@ -129,26 +157,27 @@ public sealed class LibraryForm : Form
         _preview.Dock = DockStyle.Top;
         _preview.Height = 214;
         _preview.SizeMode = PictureBoxSizeMode.Zoom;
-        _preview.BackColor = Color.FromArgb(28, 28, 32);
+        _preview.BackColor = inkDeeper;
         _preview.DoubleClick += (_, _) => OpenSelected();
 
         _meta.Dock = DockStyle.Fill;
         _meta.Padding = new Padding(0, 10, 0, 0);
-        _meta.ForeColor = Color.FromArgb(228, 228, 232);
+        _meta.ForeColor = inkText;
         _note.Dock = DockStyle.Bottom;
         _note.Height = 46;
-        _note.ForeColor = Color.FromArgb(150, 150, 158);
+        _note.ForeColor = inkDim;
 
-        side.BackColor = Color.FromArgb(40, 40, 46);
+        side.BackColor = inkBg;
         // Dock 顺序：先填满的放最后加，否则 Fill 会盖住其它
         side.Controls.Add(_meta);
         side.Controls.Add(_note);
         side.Controls.Add(_preview);
 
         // ---------- 状态栏 ----------
-        var strip = new StatusStrip();
+        var strip = new StatusStrip { BackColor = inkBg, ForeColor = inkDim, SizingGrip = false };
         _status.Spring = true;
         _status.TextAlign = ContentAlignment.MiddleLeft;
+        _status.ForeColor = inkDim;
         strip.Items.Add(_status);
 
         Controls.Add(_list);
@@ -226,6 +255,8 @@ public sealed class LibraryForm : Form
         b.Click += onClick;
         return b;
     }
+
+    private static ToolStripLabel MakeLabel(string text, Color color) => new ToolStripLabel(text) { ForeColor = color };
 
     public void Reload()
     {
