@@ -317,6 +317,10 @@ internal static class Program
         Console.WriteLine($"[2] 配额 {quota.QuotaGb}GB / 保留 {(quota.RetainDays == 0 ? "永久" : quota.RetainDays + " 天")} / 水位 {quota.WatermarkGb}GB");
         Console.WriteLine("[3] 右键托盘图标可以打开回顾库；关掉这个窗口也不影响录制。");
 
+        // 托盘模式下把控制台藏掉：双击 exe 时那个黑窗口没必要一直开着。
+        // 自检模式（--tray-test）例外 —— 那些输出就是要给人看的。
+        if (selfTest == 0) Native.HideConsole();
+
         int exit = 0;
         var t = new Thread(() =>
         {

@@ -75,11 +75,44 @@ internal static unsafe class Native
         return found;
     }
 
+    /// <summary>
+    /// 找游戏窗口，**允许窗口处于最小化**。
+    /// 与 <see cref="ResolveWindow"/> 的区别只在 <c>IsIconic</c> 这一条：采集必须用可见窗口
+    /// （WGC 对最小化窗口出不了帧），但「游戏还在不在」这个判断不能用可见性 ——
+    /// 用户 alt-tab 到别的程序、或把游戏最小化到任务栏，都不代表他退出了游戏，
+    /// 那种情况下我们要继续保持采集会话，等他切回去接着录。
+    /// </summary>
+    public static IntPtr ResolveWindowAny(string fragment)
+    {
+        if (fragment.Equals("self", StringComparison.OrdinalIgnoreCase)) return GetConsoleWindow();
+        var found = IntPtr.Zero;
+        EnumWindows((h, _) =>
+        {
+            if (!IsWindowVisible(h)) return true;
+            var t = TitleOf(h);
+            if (t.Length > 0 && t.Contains(fragment, StringComparison.OrdinalIgnoreCase)) { found = h; return false; }
+            return true;
+        }, IntPtr.Zero);
+        return found;
+    }
+
     public static string TitleOf(IntPtr h)
     {
         var sb = new StringBuilder(512);
         GetWindowTextW(h, sb, sb.Capacity);
         return sb.ToString();
+    }
+
+    /// <summary>
+    /// 托盘模式下把控制台窗口藏起来。
+    /// 双击 exe 时 Windows 会先给一个黑色控制台窗口，那东西常驻着很难看；
+    /// 但整个程序是 Console 类型（--lib-list 等自检命令要靠 stdout），
+    /// 所以不能改成 WinExe，只能运行时藏窗口 —— 输出流不受影响，日志照写。
+    /// </summary>
+    public static void HideConsole()
+    {
+        var h = GetConsoleWindow();
+        if (h != IntPtr.Zero) ShowWindow(h, 0);   // SW_HIDE
     }
 
     private static IntPtr CallCreateForWindow(IntPtr self, IntPtr hwnd, Guid* iid)
@@ -124,5 +157,6 @@ internal static unsafe class Native
     [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr h);
     [DllImport("user32.dll")] private static extern bool IsIconic(IntPtr h);
     [DllImport("kernel32.dll")] private static extern IntPtr GetConsoleWindow();
+    [DllImport("user32.dll")] private static extern bool ShowWindow(IntPtr h, int cmd);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetWindowTextW(IntPtr h, StringBuilder s, int n);
 }

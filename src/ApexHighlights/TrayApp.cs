@@ -33,7 +33,10 @@ internal sealed class TrayApp : ApplicationContext
     private readonly int _fakeHit;
     private readonly int _selfTest;
     private System.Windows.Forms.Timer? _auto;
-    private int _tickSec;
+    private System.Windows.Forms.Timer? _wait;
+
+    /// <summary>连续多少次状态刷新都找不到游戏窗口。用于区分「切走了」和「真退出了」。</summary>
+    private int _missingTicks;
 
     public TrayApp(GameProfile profile, QuotaPolicy policy, string title, int fps, int bitrate, bool openUiFirst, bool audio, bool beep, int fakeHit = 0, int selfTest = 0)
     {
@@ -130,11 +133,18 @@ internal sealed class TrayApp : ApplicationContext
                     case 10:
                         say($"录制统计 = {_cap?.Stats() ?? "cap 为空"}");
                         break;
-                    case 12:
-                        say("关库窗口后退出");
-                        _libForm?.Close();
-                        _auto!.Stop();
-                        Quit();
+                    default:
+                        // 走完固定步骤后，剩下来的时间按 _selfTest 秒数收尾。
+                        // 硬编码 12 秒就没法测「等游戏窗口出现」那种需要等一会儿的场景。
+                        if (step >= 12 && step % 2 == 0)
+                            say($"[{step}s] 状态行 = \"{_statusItem.Text}\"，cap = {(_cap is null ? "空" : _cap.Stats())}");
+                        if (step >= Math.Max(12, _selfTest))
+                        {
+                            say("关库窗口后退出");
+                            _libForm?.Close();
+                            _auto!.Stop();
+                            Quit();
+                        }
                         break;
                 }
             }
@@ -149,11 +159,14 @@ internal sealed class TrayApp : ApplicationContext
         var hwnd = Native.ResolveWindow(_title);
         if (hwnd == IntPtr.Zero)
         {
-            _statusItem.Text = "没找到游戏窗口";
-            _icon.Text = "ApexHighlights — 没找到游戏窗口（右键可退出）";
+            // 先开软件再开游戏是常见顺序，不能就此摆烂。
+            // 转成「等待游戏」状态，由 _wait 定时器每 3 秒重试一次。
+            _statusItem.Text = "等待游戏启动…";
+            _icon.Text = $"ApexHighlights — 等待「{_title}」窗口";
             _icon.ShowBalloonTip(4000, "ApexHighlights",
-                $"没找到标题含「{_title}」的窗口。\n游戏开了之后右键退出再启动，或者直接双击 exe 重新试。",
-                ToolTipIcon.Warning);
+                $"正在等待「{_title}」窗口出现。\n游戏起来后会自动开始录制，不用重开。",
+                ToolTipIcon.Info);
+            ArmWaitForGame();
             return;
         }
 
@@ -187,6 +200,23 @@ internal sealed class TrayApp : ApplicationContext
         }
     }
 
+    /// <summary>每 3 秒找一次窗口，找到就真的开始录。找到之后定时器自己停。</summary>
+    private void ArmWaitForGame()
+    {
+        if (_wait is not null) return;
+        _wait = new System.Windows.Forms.Timer { Interval = 3000 };
+        _wait.Tick += (_, _) =>
+        {
+            if (Native.ResolveWindow(_title) == IntPtr.Zero) return;
+            _wait!.Stop();
+            _wait.Dispose();
+            _wait = null;
+            StartCapture();
+            RefreshStatus();
+        };
+        _wait.Start();
+    }
+
     /// <summary>命中回调（非 UI 线程）：报一声，然后把片段路径塞给库窗口刷新。</summary>
     private void OnDetected(Capture.Detection d)
     {
@@ -218,6 +248,25 @@ internal sealed class TrayApp : ApplicationContext
 
     private void RefreshStatus()
     {
+        // 游戏退出后 WGC 会话就成了死会话：环形不再前进、也不再有命中。
+        // 重开一局是很常见的动作，所以这里发现窗口真的没了就收摊、回到「等待游戏」，
+        // 而不是一直挂着一个假的「录制中」。
+        //
+        // 注意用 ResolveWindowAny（包含最小化的窗口）：单纯 alt-tab 到最小化不等于退出，
+        // 那种情况下要继续保持采集，用户切回去就接着录。
+        if (_cap is not null && Native.ResolveWindowAny(_title) == IntPtr.Zero)
+        {
+            if (++_missingTicks >= 2)   // 连续两次（约 10 秒）都找不到才判定退出
+            {
+                StopCapture();
+                _statusItem.Text = "等待游戏启动…";
+                _icon.Text = $"ApexHighlights — 等待「{_title}」窗口";
+                ArmWaitForGame();
+                return;
+            }
+        }
+        else _missingTicks = 0;
+
         if (_cap is null) return;
         var s = _cap.Stats();
         _statusItem.Text = _cap.UserPaused ? "已暂停" :
@@ -227,6 +276,18 @@ internal sealed class TrayApp : ApplicationContext
         // NotifyIcon.Text 上限 127 字符，超了会抛异常
         var tip = "ApexHighlights\n" + s;
         _icon.Text = tip.Length <= 127 ? tip : tip[..124] + "…";
+    }
+
+    /// <summary>收掉当前的采集（游戏退出 / 退出程序时用）。失败也只记一笔，不让托盘崩。</summary>
+    private void StopCapture()
+    {
+        var cap = _cap;
+        _cap = null;
+        _missingTicks = 0;
+        _pauseItem.Text = "暂停录制";
+        if (cap is null) return;
+        try { cap.Detected -= OnDetected; } catch { }
+        try { cap.Dispose(); } catch (Exception ex) { Console.WriteLine("[tray] 收采集失败: " + ex.Message); }
     }
 
     private void ShowLibrary()
@@ -258,7 +319,7 @@ internal sealed class TrayApp : ApplicationContext
 
     private void OpenConfig()
     {
-        var path = Path.Combine(Directory.GetCurrentDirectory(), "config.json");
+        var path = Paths.ConfigFile;
         try
         {
             if (!File.Exists(path)) _policy.Save(path);

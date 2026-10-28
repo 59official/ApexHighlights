@@ -251,6 +251,9 @@ internal sealed class Capture : IDisposable
     /// <summary>最近一次配额检查的说明，给日志/UI 用。</summary>
     public string QuotaMessage => _quotaMsg;
 
+    /// <summary>累计到达的帧数。托盘用它判断采集是不是卡住了（窗口还在但不再出帧）。</summary>
+    public long FrameCount => _frames;
+
     /// <summary>
     /// 跑一次配额/保留期清理并更新水位状态。返回报告（库没起来时返回 null）。
     /// 触发点：启动时、每片落盘后、每小时。
