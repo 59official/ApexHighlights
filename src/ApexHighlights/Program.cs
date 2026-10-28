@@ -341,7 +341,7 @@ internal static class Program
         }
 
         var menuField = args.FirstOrDefault(a => a.StartsWith("--shot-menu=", StringComparison.OrdinalIgnoreCase))?[12..];
-        // 菜单有 112ms 的滑出动画：想抓中间帧就传 --shot-menu-delay=45
+        // 菜单有 330ms 的滑出动画：想抓中间帧就传 --shot-menu-delay=120
         var delayArg = args.FirstOrDefault(a => a.StartsWith("--shot-menu-delay=", StringComparison.OrdinalIgnoreCase))?[18..];
         var menuDelay = int.TryParse(delayArg, out var d) ? d : 250;
         return Shot(form, shot, menuField, menuDelay);
@@ -395,6 +395,24 @@ internal static class Program
                 Console.WriteLine($"[3] 菜单截图 {mp}  {mb.Width}x{mb.Height}");
             }
             menu.Close();
+        }
+
+        // 调试用：APEX_SHOT_TIP=文本 时把悬停气泡单独抓一张，验证圆角和配色。
+        if (Environment.GetEnvironmentVariable("APEX_SHOT_TIP") is { Length: > 0 } tipText)
+        {
+            using var tip = new HoverTip();
+            tip.ShowFor(form, tipText);
+            Application.DoEvents();
+            Thread.Sleep(60);
+            Application.DoEvents();
+
+            using var tb = new Bitmap(Math.Max(1, tip.Width), Math.Max(1, tip.Height));
+            Native.PrintWindowTo(tip.Handle, tb);
+            var tp = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(file))!,
+                                  Path.GetFileNameWithoutExtension(file) + "_tip.png");
+            tb.Save(tp, System.Drawing.Imaging.ImageFormat.Png);
+            Console.WriteLine($"[5] 气泡截图 {tp}  {tb.Width}x{tb.Height}");
+            tip.HideTip();
         }
 
         var sz = form.Size;

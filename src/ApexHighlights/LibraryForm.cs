@@ -1,4 +1,4 @@
-﻿using System.Diagnostics;
+using System.Diagnostics;
 using System.Globalization;
 
 namespace ApexHighlights;
@@ -23,9 +23,7 @@ public sealed class LibraryForm : Form
     private QuotaPolicy _policy;
 
     private readonly ClipListView _list = new();
-    private readonly PreviewBox _preview = new();
-    private readonly MetaList _meta = new();
-    private readonly Label _note = new();
+    private readonly ClipDetailPane _detail = new();
     private readonly Label _empty = new();
     private readonly Label _title = new();
     private readonly Label _count = new();
@@ -36,6 +34,7 @@ public sealed class LibraryForm : Form
     private readonly CueTextBox _search = new();
     private readonly Label _status = new();
     private readonly Label _statusRight = new();
+    private readonly HoverTip _tip = new();
 
     // 四条横带。位置全部由 LayoutBands 算，不参与任何自动布局。
     private readonly Panel _head = new();
@@ -47,7 +46,6 @@ public sealed class LibraryForm : Form
     private readonly RoundButton _btnDel = new("删除", 88);
     private Panel? _searchPill, _thPill, _kindPill, _timePill;
     private SurfaceCard? _listCard;
-    private Panel? _sideWrap;
     private bool _bandsReady;
 
     private float _threshold;
@@ -97,6 +95,8 @@ public sealed class LibraryForm : Form
             if (e.KeyCode == Keys.F5) { Reload(); e.Handled = true; }
             else if (e.Control && e.KeyCode == Keys.F) { _search.Focus(); _search.SelectAll(); e.Handled = true; }
         };
+
+        WireTips();
 
         // 构造期就把档位建出来：外部用对象初始化器设 Threshold 时下拉已经存在，
         // setter 里的同步才生效；Load 里再建一次是给「先 Show 后设值」的顺序兜底。
@@ -207,32 +207,10 @@ public sealed class LibraryForm : Form
         _listCard.Controls.Add(listPad);
 
         // ---- 右：一帧大图 + 元数据 ----
-        _sideWrap = new Panel { BackColor = UiKit.Bg };
-        var sideCard = new SurfaceCard { Dock = DockStyle.Fill, Padding = new Padding(12) };
-
-        _preview.Dock = DockStyle.Top;
-        _preview.Height = 212;
-        _preview.EmptyText = "选一条看看";
-        _preview.DoubleClick += (_, _) => OpenSelected();
-
-        var metaPad = new Panel { Dock = DockStyle.Fill, Padding = new Padding(0, 10, 0, 6), BackColor = UiKit.Surface };
-        _meta.Dock = DockStyle.Fill;
-        metaPad.Controls.Add(_meta);
-
-        _note.Dock = DockStyle.Bottom;
-        _note.Height = 44;
-        _note.ForeColor = UiKit.Dim;
-        _note.Font = UiKit.F9;
-        _note.Text = "";
-        _note.TextAlign = ContentAlignment.MiddleLeft;
-
-        sideCard.Controls.Add(metaPad);
-        sideCard.Controls.Add(_note);
-        sideCard.Controls.Add(_preview);
-        _sideWrap.Controls.Add(sideCard);
+        _detail.OpenRequested += (_, _) => OpenSelected();
 
         _body.Controls.Add(_listCard);
-        _body.Controls.Add(_sideWrap);
+        _body.Controls.Add(_detail);
     }
 
     private void BuildFoot()
@@ -317,7 +295,7 @@ public sealed class LibraryForm : Form
 
         // ---- 正文：左边清单、右边详情 ----
         int sideW = 420;
-        _sideWrap!.SetBounds(_body.Width - sideW, 0, sideW, _body.Height);
+        _detail.SetBounds(_body.Width - sideW, 0, sideW, _body.Height);
         _listCard!.SetBounds(0, 0, Math.Max(200, _body.Width - sideW - 16), _body.Height);
 
         // ---- 状态栏 ----
@@ -354,6 +332,53 @@ public sealed class LibraryForm : Form
         Place();
         return pill;
     }
+
+    // ------------------------------------------------------------------ 提示
+
+    private const string ThresholdTip =
+        "命中阈值：横幅识别结果与模板的匹配分。\r\n" +
+        "分数 ≥ 阈值才判定为命中并自动保存片段。\r\n" +
+        "调高更严格：误报少，但模糊、被遮挡的横幅可能漏掉；\r\n" +
+        "调低更宽松：几乎不漏，但相似画面可能被当成击倒。\r\n" +
+        "默认 0.70。";
+
+    /// <summary>
+    /// 给控件挂悬停说明：延迟 400ms（扫过去不弹），移开就收。
+    /// 系统 ToolTip 是浅灰直角气泡，跟这套深色圆角界面不搭，所以用 HoverTip 自己画。
+    /// </summary>
+    private void Tip(Control c, string text)
+    {
+        System.Windows.Forms.Timer? t = null;
+        c.MouseEnter += (_, _) =>
+        {
+            t = new System.Windows.Forms.Timer { Interval = 400 };
+            t.Tick += (_, _) =>
+            {
+                t?.Stop();
+                t?.Dispose();
+                t = null;
+                _tip.ShowFor(c, text);
+            };
+            t.Start();
+        };
+        c.MouseLeave += (_, _) =>
+        {
+            if (t is not null) { t.Stop(); t.Dispose(); t = null; }
+            _tip.HideTip();
+        };
+    }
+
+    private void WireTips()
+    {
+        Tip(_thLabel, ThresholdTip);
+        if (_thPill is not null) Tip(_thPill, ThresholdTip);
+        if (_kindPill is not null) Tip(_kindPill, "按识别到的横幅类型筛选：击倒 / 助攻 / 击杀 / 被击倒。");
+        if (_timePill is not null) Tip(_timePill, "按片段保存的时间筛选，今天 / 最近 7 天 / 最近 30 天。");
+        if (_searchPill is not null) Tip(_searchPill, "按文件名搜索，支持只输一段（比如 1028-2139）。");
+    }
+
+    /// <summary>自检用：把阈值说明按到标签上，方便截图看气泡长什么样。</summary>
+    internal void ShowTestTip(string text) => _tip.ShowFor(_thLabel, text);
 
     // ------------------------------------------------------------------ 数据
 
@@ -436,32 +461,7 @@ public sealed class LibraryForm : Form
 
     private void ShowSelection()
     {
-        var c = _list.SelectedClip;
-        if (c is null)
-        {
-            _preview.Image?.Dispose();
-            _preview.Image = null;
-            _meta.Set(("提示", _shown.Count == 0 ? "这个筛选下没有片段" : "在左边选一条"));
-            _note.Text = _shown.Count == 0
-                ? "录一段之后回来按 F5 刷新"
-                : "双击或 Enter 用系统播放器打开 · Delete 删除";
-            return;
-        }
-
-        var meta = Mp4Probe.Read(c.Path);
-        _preview.Image?.Dispose();
-        _preview.Image = ShellThumb.Get(c.Path, 720, 405);
-
-        _meta.Set(
-            ("时间", c.CreatedLocal.ToString("yyyy-MM-dd HH:mm:ss")),
-            ("种类", ClipKinds.Label(c.Kind)),
-            ("分数", c.Score.ToString("F3", CultureInfo.InvariantCulture)),
-            ("时长", Mp4Probe.Fmt(meta.Seconds)),
-            ("分辨率", meta.Valid ? $"{meta.Width} × {meta.Height}" : "—"),
-            ("音轨", meta.HasAudio ? $"有 · {meta.Codec}" : "无"),
-            ("体积", QuotaReport.Mb(c.Bytes)));
-
-        _note.Text = "双击或 Enter 用系统播放器打开 · Delete 删除";
+        _detail.Bind(_list.SelectedClip, _shown.Count == 0);
     }
 
     private void UpdateStatus()
@@ -516,7 +516,10 @@ public sealed class LibraryForm : Form
 
     protected override void Dispose(bool disposing)
     {
-        if (disposing) _preview.Image?.Dispose();
+        if (disposing)
+        {
+            _tip.Dispose();
+        }
         base.Dispose(disposing);
     }
 }

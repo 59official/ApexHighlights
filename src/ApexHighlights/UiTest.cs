@@ -143,8 +143,11 @@ internal static class UiTest
                 if (combo.SelectedIndex != expectIdx)
                 { Console.WriteLine($"    BAD 设 0.75 后选中 {combo.SelectedIndex}，应为 {expectIdx}"); fail++; }
                 else Console.WriteLine($"    ok  设 0.75 → 选中第 {expectIdx} 项「{combo.Items[expectIdx]}」");
-                if (!label.Text.Contains("0.75"))
-                { Console.WriteLine($"    BAD 标签没跟着变: {label.Text}"); fail++; }
+                // 标签只说“灵敏度”，数值由胶囊自己显示（不然同一行会出现两个 0.75）
+                if (label.Text != "灵敏度")
+                { Console.WriteLine($"    BAD 标签文字不对: {label.Text}"); fail++; }
+                else if (combo.SelectedItem?.ToString() is not { } shown || !shown.Contains("0.75"))
+                { Console.WriteLine($"    BAD 胶囊没显示新值: {combo.SelectedItem}"); fail++; }
                 if (fired.Count != 0)
                 { Console.WriteLine($"    BAD 外部 SetThreshold 不该回调，实际 {fired.Count} 次"); fail++; }
                 else Console.WriteLine("    ok  外部设定不触发回调（不会把配置反写一遍）");

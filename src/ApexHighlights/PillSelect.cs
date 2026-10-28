@@ -127,37 +127,99 @@ internal sealed class PillSelect : Control
         menu.Closed += (_, _) =>
         {
             _open = false;
+            _closing = false;
+            StopWatch();
+            StopAnim();
             Invalidate();
             BeginInvoke(new Action(() => menu.Dispose()));
         };
         menu.Show(this, new Point(0, Height + 4));
         using (var rp = UiKit.RoundRect(new Rectangle(0, 0, menu.Width, menu.Height), DarkMenu.Radius))
             menu.Region = new Region(rp);
-        SlideIn(menu);
+
+        var settled = menu.Location;
+        Animate(menu, settled, -SlideDist, 0, OpenMs, null);
+        WatchLeave(menu, settled);
         return menu;
     }
 
-    private System.Windows.Forms.Timer? _slide;
+    private System.Windows.Forms.Timer? _anim;
+    private System.Windows.Forms.Timer? _watch;
+    private bool _closing;
+
+    private const int OpenMs = 330;      // 滑出总时长：原来 84ms，用户要“慢 0.25 秒”
+    private const int CloseMs = 200;     // 收起比打开快一点，像被吸回去
+    private const int SlideDist = 16;    // 行程：始终从胶囊底边往上 16px 处滑进来
+    private const int LeaveDelayMs = 1000;
+
+    /// <summary>菜单落定后盯鼠标：离开胶囊和菜单满 1 秒就滑回去收掉。</summary>
+    private void WatchLeave(ContextMenuStrip menu, Point settled)
+    {
+        StopWatch();
+        _closing = false;
+
+        int away = 0;
+        var t = new System.Windows.Forms.Timer { Interval = 80 };
+        t.Tick += (_, _) =>
+        {
+            if (menu.IsDisposed || !menu.Visible)
+            {
+                StopWatch();
+                return;
+            }
+
+            var p = Cursor.Position;
+            bool overPill = RectangleToScreen(ClientRectangle).Contains(p);
+
+            // 鼠标滑进菜单里挑选项不算“移开”，否则菜单根本用不了
+            bool overMenu = menu.Bounds.Contains(p);
+
+            if (overPill || overMenu)
+            {
+                away = 0;
+                if (_closing)      // 收到一半又挪回来：停手，回原位
+                {
+                    _closing = false;
+                    Animate(menu, settled, menu.Location.Y - settled.Y, 0, 90, null);
+                }
+                return;
+            }
+
+            away += t.Interval;
+            if (_closing || away < LeaveDelayMs) return;
+
+            _closing = true;
+            Animate(menu, settled, menu.Location.Y - settled.Y, -SlideDist, CloseMs, () =>
+            {
+                _closing = false;
+                if (!menu.IsDisposed) menu.Close();
+            });
+        };
+        _watch = t;
+        t.Start();
+    }
 
     /// <summary>
-    /// 菜单从胶囊底边滑出来：先出现在终点上方 16px，再逐帧（12ms × 7 帧 ≈ 84ms）
-    /// 用 ease-out 落回终点。原生 ToolStripDropDown 是一次性弹出来的，很硬。
-    /// 只动位置不做透明度：不加分层窗口，省掉一类渲染风险。
+    /// 把菜单从 settled + fromDy 动画到 settled + toDy（ease-out cubic，逐帧改窗口位置）。
+    /// 只动位置不做透明度：不引入分层窗口，省掉一类渲染风险。
     /// </summary>
-    private void SlideIn(ContextMenuStrip menu)
+    private void Animate(ContextMenuStrip menu, Point settled, int fromDy, int toDy, int ms, Action? done)
     {
-        _slide?.Stop();
-        _slide?.Dispose();
-        _slide = null;
+        StopAnim();
+        if (ms <= 0 || fromDy == toDy)
+        {
+            menu.Location = new Point(settled.X, settled.Y + toDy);
+            done?.Invoke();
+            return;
+        }
 
-        var target = menu.Location;
-        const int dist = 16;
-        const int steps = 7;
-        var step = 0;
+        int steps = Math.Max(2, ms / 15);
+        int interval = Math.Max(10, ms / steps);
+        int step = 0;
 
-        menu.Location = new Point(target.X, target.Y - dist);
+        menu.Location = new Point(settled.X, settled.Y + fromDy);
 
-        var t = new System.Windows.Forms.Timer { Interval = 12 };
+        var t = new System.Windows.Forms.Timer { Interval = interval };
         t.Tick += (_, _) =>
         {
             if (menu.IsDisposed)
@@ -168,17 +230,35 @@ internal sealed class PillSelect : Control
             }
 
             step++;
-            var p = step / (double)steps;
-            var e = 1 - Math.Pow(1 - p, 3);                       // ease-out cubic
-            menu.Location = new Point(target.X, target.Y - (int)Math.Round(dist * (1 - e)));
+            double p = step / (double)steps;
+            double e = 1 - Math.Pow(1 - p, 3);
+            int dy = (int)Math.Round(fromDy + (toDy - fromDy) * e);
+            menu.Location = new Point(settled.X, settled.Y + dy);
 
             if (step < steps) return;
-            menu.Location = target;
+
+            menu.Location = new Point(settled.X, settled.Y + toDy);
             t.Stop();
             t.Dispose();
+            if (ReferenceEquals(_anim, t)) _anim = null;
+            done?.Invoke();
         };
-        _slide = t;
+        _anim = t;
         t.Start();
+    }
+
+    private void StopAnim()
+    {
+        _anim?.Stop();
+        _anim?.Dispose();
+        _anim = null;
+    }
+
+    private void StopWatch()
+    {
+        _watch?.Stop();
+        _watch?.Dispose();
+        _watch = null;
     }
 }
 

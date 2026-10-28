@@ -28,6 +28,55 @@ internal sealed class ClipListView : ListView
     private CancellationTokenSource? _loadCts;
     private int _hoverRow = -1;
 
+    private readonly HoverTip _tip = new();
+    private System.Windows.Forms.Timer? _tipTimer;
+    private int _tipCol = -1;
+
+    /// <summary>
+    /// 一列的全部定义：表头文字、宽度、对齐、格子取什么文本、什么颜色、悬停说明什么。
+    /// </summary>
+    private sealed record Col(
+        string Label,
+        int Width,
+        HorizontalAlignment Align,
+        Func<ClipInfo, Mp4Probe.Info, string> Text,
+        Func<ClipInfo, Color>? Ink = null,
+        string? Tip = null);
+
+    /// <summary>
+    /// 列的单一事实来源。
+    /// 以前这些散在「构造函数里加列」和「DrawSubItem 里的 switch (ColumnIndex)」两处，
+    /// 加一列要改三个地方、index 错一位就整排串色；现在只改这张表。
+    /// </summary>
+    private static readonly Col[] Cols =
+    {
+        new("时间", 236, HorizontalAlignment.Left,
+            (c, m) => c.CreatedLocal.ToString("MM-dd HH:mm:ss"),
+            Tip: "片段保存的时间（录制结束时刻）"),
+        new("种类", 88, HorizontalAlignment.Left,
+            (c, m) => ClipKinds.Label(c.Kind),
+            c => KindInk(c.Kind),
+            Tip: "识别到的横幅类型"),
+        new("分数", 58, HorizontalAlignment.Right,
+            (c, m) => c.Score.ToString("F2", CultureInfo.InvariantCulture),
+            _ => UiKit.Accent,
+            Tip: "横幅与模板的匹配分：越高越像。低于灵敏度阈值不会入库"),
+        new("时长", 64, HorizontalAlignment.Right,
+            (c, m) => m.Valid ? Mp4Probe.Fmt(m.Seconds) : "—",
+            Tip: "片段时长（前摇 + 中段 + 后摇）"),
+        new("分辨率", 72, HorizontalAlignment.Left,
+            (c, m) => m.Valid ? $"{m.Height}p" : "—",
+            Tip: "文件本身的分辨率：录制时游戏画面多大就是多大，只读，不能改"),
+        new("音轨", 58, HorizontalAlignment.Left,
+            (c, m) => m.HasAudio ? "有" : "无",
+            Tip: "片段里有没有音轨；在托盘菜单里关掉录音就是「无」"),
+        new("体积", 66, HorizontalAlignment.Right,
+            (c, m) => QuotaReport.Mb(c.Bytes),
+            Tip: "文件大小；配额和保留天数在状态栏和托盘菜单里调"),
+        new("文件名", 200, HorizontalAlignment.Left,
+            (c, m) => c.Name),
+    };
+
     /// <summary>双击或 Enter：用户想打开这一片。</summary>
     public event Action? ClipActivated;
     /// <summary>Delete：用户要删（确认框由窗口弹，控件不做不可撤销的事）。</summary>
@@ -52,14 +101,7 @@ internal sealed class ClipListView : ListView
         OwnerDraw = true;
         HeaderStyle = ColumnHeaderStyle.Nonclickable;
 
-        Columns.Add("时间", 236);
-        Columns.Add("种类", 88);
-        Columns.Add("分数", 58, HorizontalAlignment.Right);
-        Columns.Add("时长", 64, HorizontalAlignment.Right);
-        Columns.Add("画质", 72);
-        Columns.Add("音轨", 58);
-        Columns.Add("体积", 66, HorizontalAlignment.Right);
-        Columns.Add("文件名", 200);
+        foreach (var col in Cols) Columns.Add(col.Label, col.Width, col.Align);
 
         // 文件名列吃掉剩余宽度：别的列固定，窗口拉宽就多显示文件名。
         Resize += (_, _) => FitNameColumn();
@@ -70,8 +112,12 @@ internal sealed class ClipListView : ListView
 
         DoubleClick += (_, _) => { if (SelectedClip is not null) ClipActivated?.Invoke(); };
         SelectedIndexChanged += (_, _) => SelectionChanged?.Invoke();
-        MouseMove += (_, e) => HoverTo(GetItemAt(e.X, e.Y)?.Index ?? -1);
-        MouseLeave += (_, _) => HoverTo(-1);
+        MouseMove += (_, e) =>
+        {
+            HoverTo(GetItemAt(e.X, e.Y)?.Index ?? -1);
+            TipAt(e.Location);
+        };
+        MouseLeave += (_, _) => { HoverTo(-1); HideTip(); };
         KeyDown += (_, e) =>
         {
             if (e.KeyCode == Keys.Delete) { DeleteRequested?.Invoke(); e.Handled = true; }
@@ -102,14 +148,8 @@ internal sealed class ClipListView : ListView
             foreach (var c in clips)
             {
                 var meta = Mp4Probe.Read(c.Path);   // 只读 box 头，微秒级
-                var it = new ListViewItem(c.CreatedLocal.ToString("MM-dd HH:mm:ss")) { Tag = c };
-                it.SubItems.Add(ClipKinds.Label(c.Kind));
-                it.SubItems.Add(c.Score.ToString("F2", CultureInfo.InvariantCulture));
-                it.SubItems.Add(Mp4Probe.Fmt(meta.Seconds));
-                it.SubItems.Add(meta.Valid ? $"{meta.Height}p" : "—");
-                it.SubItems.Add(meta.HasAudio ? "有" : "无");
-                it.SubItems.Add(QuotaReport.Mb(c.Bytes));
-                it.SubItems.Add(c.Name);
+                var it = new ListViewItem(Cols[0].Text(c, meta)) { Tag = c };
+                for (int i = 1; i < Cols.Length; i++) it.SubItems.Add(Cols[i].Text(c, meta));
                 it.ImageIndex = -1;
                 Items.Add(it);
             }
@@ -119,6 +159,53 @@ internal sealed class ClipListView : ListView
         FitNameColumn();   // 竖向滚动条是加完行才出现的，它一出现客户宽度就变窄
         LoadThumbs();
         if (Items.Count > 0) Items[0].Selected = true;
+    }
+
+    /// <summary>表头悬停：只对「有话说」的列弹提示，延迟 400ms，避免扫过去就一片弹窗。</summary>
+    private void TipAt(Point p)
+    {
+        int headerH = Items.Count > 0 ? GetItemRect(0).Top : 0;
+        if (headerH <= 0 || p.Y >= headerH)
+        {
+            HideTip();
+            return;
+        }
+
+        int x = Items.Count > 0 ? GetItemRect(0).Left : 0;
+        for (int i = 0; i < Columns.Count; i++)
+        {
+            int w = Columns[i].Width;
+            if (p.X >= x && p.X < x + w)
+            {
+                var tip = i < Cols.Length ? Cols[i].Tip : null;
+                if (tip is null) { HideTip(); return; }
+                if (_tipCol == i) return;
+
+                HideTip();
+                _tipCol = i;
+                var anchor = RectangleToScreen(new Rectangle(x, 0, w, headerH));
+                _tipTimer = new System.Windows.Forms.Timer { Interval = 400 };
+                _tipTimer.Tick += (_, _) =>
+                {
+                    _tipTimer?.Stop();
+                    _tipTimer?.Dispose();
+                    _tipTimer = null;
+                    _tip.ShowAt(anchor, tip);
+                };
+                _tipTimer.Start();
+                return;
+            }
+            x += w;
+        }
+
+        HideTip();
+    }
+
+    private void HideTip()
+    {
+        _tipCol = -1;
+        if (_tipTimer is not null) { _tipTimer.Stop(); _tipTimer.Dispose(); _tipTimer = null; }
+        _tip.HideTip();
     }
 
     private void HoverTo(int idx)
@@ -199,12 +286,10 @@ internal sealed class ClipListView : ListView
             cell = new Rectangle(cell.X + TextInset, cell.Y, Math.Max(0, cell.Width - TextInset), cell.Height);
         cell = new Rectangle(cell.X + 6, cell.Y, Math.Max(0, cell.Width - 12), cell.Height);
 
-        var ink = e.ColumnIndex switch
-        {
-            1 => clip is null ? UiKit.Text : KindInk(clip.Kind),
-            2 => UiKit.Accent,
-            _ => UiKit.Text,
-        };
+        var ink = clip is not null && e.ColumnIndex >= 0 && e.ColumnIndex < Cols.Length
+                  && Cols[e.ColumnIndex].Ink is { } inkOf
+            ? inkOf(clip)
+            : UiKit.Text;
         if (!e.Item.Selected && ink == UiKit.Text) ink = Color.FromArgb(224, 226, 232);
 
         var flags = TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix
@@ -306,6 +391,8 @@ internal sealed class ClipListView : ListView
             _loadCts?.Cancel();
             _loadCts?.Dispose();
             _thumbs.Dispose();
+            HideTip();
+            _tip.Dispose();
         }
         base.Dispose(disposing);
     }
