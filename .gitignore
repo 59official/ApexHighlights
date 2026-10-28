@@ -24,3 +24,6 @@ live-*.csv
 Thumbs.db
 desktop.ini
 .DS_Store
+
+# 临时脚本
+tmp_*.ps1
