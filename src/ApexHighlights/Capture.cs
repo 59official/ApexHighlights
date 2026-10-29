@@ -53,10 +53,12 @@ internal sealed class Capture : IDisposable
     private readonly BlockingCollection<(ID3D11Texture2D tex, long pts100)> _queue = new(new ConcurrentQueue<(ID3D11Texture2D, long)>(), 4);
     private volatile bool _stop;
 
-    // 音轨（系统回环 → AAC → 内存环形）
+    // 音轨（系统回环 + 可选麦克风 → 混音 → AAC → 内存环形）
     private AacEncoder? _aac;
     private AudioRing? _aRing;
     private LoopbackCapture? _wcap;
+    private LoopbackCapture? _mic;         // 麦克风采集（用户开了才有）
+    private MicMixer? _micMixer;           // 麦克风队列（由主时钟按帧取走）
     private Thread? _audioFill;
     /// <summary>音频喂数据的串行化：真声音来自 wasapi 线程，补的静音来自 fill 线程，编码器不是线程安全的。</summary>
     private readonly object _audioFeedGate = new();
@@ -71,7 +73,10 @@ internal sealed class Capture : IDisposable
     private volatile bool _audioFillRun;
     /// <summary>环形容量（秒）：运行期重开音轨时要按同样的容量重建 AudioRing。</summary>
     private int _ringCapacitySec = 90;
+    /// <summary>系统声音（游戏声）开不开。</summary>
     public bool AudioEnabled = true;
+    /// <summary>麦克风开不开。默认关，和 <see cref="CapturePolicy.Mic"/> 保持同义。</summary>
+    public bool MicEnabled;
     public int AudioRate = 48000;
     public int AudioChannels = 2;
     public int AudioBitrate = 160000;
@@ -247,16 +252,16 @@ internal sealed class Capture : IDisposable
         _ring = new SegmentRing(dir, Width, Height, capacitySec);
         _lib = new ClipLibrary(ClipDir);
 
-        // 音轨：顺手起了系统回环采集；麦克风不碰（用户只要游戏声）。
+        // 音轨：系统回环（+ 用户开了的麦克风）。
         // 编码器构造失败不该让视频也停掉，所以整段兜住（StartAudio 内部已经兜了）。
-        if (AudioEnabled) StartAudio();
+        if (AudioEnabled || MicEnabled) StartAudio();
 
         _encThread = new Thread(EncodeLoop) { IsBackground = true, Name = "encode", Priority = ThreadPriority.AboveNormal };
         _encThread.Start();
     }
 
     /// <summary>
-    /// 起音轨：AAC 编码器 + 音频环形 + WASAPI 回环 + 静音补齐线程。
+    /// 起音轨：AAC 编码器 + 音频环形 + 静音补齐线程，再按需起两个采集源（系统回环 / 麦克风）。
     /// 启动时和「用户把音轨从关拨到开」时都走这里，两条路径不能有第二份实现。
     /// </summary>
     private void StartAudio()
@@ -266,9 +271,6 @@ internal sealed class Capture : IDisposable
         {
             _aac = new AacEncoder(AudioRate, AudioChannels, AudioBitrate);
             _aRing = new AudioRing(_aac.SampleRate, _aac.Channels, _ringCapacitySec) { Asc = _aac.Asc };
-            _wcap = new LoopbackCapture();
-            _wcap.Start(OnPcm);
-            _audioName = _wcap.DeviceName;
 
             // 重开音轨必须把时间轴归零：Pump 用 _audioStart100 推算「壁钟上该有多少样本」，
             // 不重置的话第一帧就会一次性补进整场录制时长的静音（几百兆 PCM）。
@@ -283,11 +285,6 @@ internal sealed class Capture : IDisposable
             _audioFill = new Thread(AudioFillLoop) { IsBackground = true, Name = "audiofill" };
             _audioFill.Start();
             _audioErr = "";
-            // 端点 id 偶尔会退化成 "{0.0.0.00000000}" 这种没有信息量的串（虚拟声卡/驱动怪癖），
-            // 那种时候写「默认播放设备」比写一串花括号有用。
-            var dev = string.IsNullOrWhiteSpace(_audioName) || _audioName.StartsWith("{0.0.0.", StringComparison.Ordinal)
-                ? "默认播放设备" : _audioName;
-            Log.Write($"[audio] 音轨已开启（{dev}，{_aac.SampleRate}Hz/{_aac.Channels}ch）");
         }
         catch (Exception ex)
         {
@@ -295,20 +292,87 @@ internal sealed class Capture : IDisposable
             _aac = null;
             _aRing = null;
             Log.Write("[audio] " + _audioErr);
+            return;
+        }
+
+        if (AudioEnabled) StartSystemSource();
+        if (MicEnabled) StartMicSource();
+
+        Log.Write($"[audio] 音轨已开启（{(_aac!.SampleRate)}Hz/{_aac.Channels}ch，" +
+                  $"系统声={(AudioOn && SystemOn ? "开" : "关")}，" +
+                  $"麦克风={(MicOn ? "开" : "关")}{(_audioErr.Length > 0 ? "，" + _audioErr : "")}）");
+    }
+
+    /// <summary>起系统回环采集。失败只记一笔：麦克风还可能是好的。</summary>
+    private void StartSystemSource()
+    {
+        if (_wcap is not null) return;
+        try
+        {
+            var cap = new LoopbackCapture(AudioSourceKind.System);
+            cap.Start(OnPcm);
+            _wcap = cap;
+            _audioName = cap.DeviceName;
+            var dev = string.IsNullOrWhiteSpace(_audioName) || _audioName.StartsWith("{0.0.0.", StringComparison.Ordinal)
+                ? "默认播放设备" : _audioName;
+            Log.Write($"[audio] 系统声音开始采集（{dev}）");
+        }
+        catch (Exception ex)
+        {
+            _audioErr = "系统声音启动失败: " + ex.Message;
+            Log.Write("[audio] " + _audioErr);
         }
     }
 
+    private void StopSystemSource()
+    {
+        var wcap = _wcap;
+        _wcap = null;
+        try { wcap?.Dispose(); } catch { }
+    }
+
     /// <summary>
-    /// 关音轨：先停回环（Dispose 内部会 Join 采集线程并 Stop 客户端），再放编码器和环形。
+    /// 起麦克风采集。设备没有/被独占/被系统禁麦都会失败——那只记一笔，不能把系统声音也拖下水。
+    /// </summary>
+    private void StartMicSource()
+    {
+        if (_mic is not null || _aac is null) return;
+        try
+        {
+            var mixer = new MicMixer(_aac.SampleRate, _aac.Channels);
+            var cap = new LoopbackCapture(AudioSourceKind.Microphone);
+            cap.Start((pcm, bytes) => mixer.Append(pcm, bytes, cap.SampleRate, cap.Channels));
+            _micMixer = mixer;
+            _mic = cap;
+            Log.Write($"[audio] 麦克风开始采集（{cap.SampleRate}Hz/{cap.Channels}ch → 混进 {_aac.SampleRate}Hz/{_aac.Channels}ch）");
+        }
+        catch (Exception ex)
+        {
+            _mic = null;
+            _micMixer = null;
+            _audioErr = "麦克风启动失败: " + ex.Message;
+            Log.Write("[audio] " + _audioErr);
+        }
+    }
+
+    private void StopMicSource()
+    {
+        var mic = _mic;
+        _mic = null;
+        try { mic?.Dispose(); } catch { }
+        _micMixer = null;
+    }
+
+    /// <summary>
+    /// 关音轨：先停两个源（Dispose 内部会 Join 采集线程并 Stop 客户端），再放编码器和环形。
     /// 之后 WriteClip 传 null 的 AudioRing，Ring.Prepare 会自动退回「只有视频轨」的封装。
     /// </summary>
     private void StopAudio()
     {
         _audioFillRun = false;
 
-        var wcap = _wcap;
-        _wcap = null;
-        try { wcap?.Dispose(); } catch { }
+        StopSystemSource();
+        StopMicSource();
 
         lock (_audioFeedGate)
         {
@@ -323,21 +387,50 @@ internal sealed class Capture : IDisposable
     /// <summary>音轨当前是不是真的在录（关掉或启动失败都为 false）。</summary>
     public bool AudioOn => _aac is not null;
 
+    /// <summary>系统声音这个源在不在录。</summary>
+    public bool SystemOn => _wcap is not null;
+
+    /// <summary>麦克风这个源在不在录。</summary>
+    public bool MicOn => _mic is not null;
+
     /// <summary>
-    /// 运行中开关音轨：不重开录制、不重建视频链路，正在写的环形照常。
-    /// 已经在目标状态的直接返回（用户连点两下「开」不会重建编码器）。
+    /// 运行中改两个声音源：不重开录制、不重建视频链路，正在写的环形照常。
+    /// 两个都关 = 音轨整个关掉；两个都开 = 两个源混在一起进同一路 AAC。
     /// </summary>
-    public void SetAudioEnabled(bool on)
+    public void SetAudioSources(bool system, bool mic)
     {
-        AudioEnabled = on;
-        if (on == AudioOn) return;
+        AudioEnabled = system;
+        MicEnabled = mic;
         try
         {
-            if (on) StartAudio();
-            else StopAudio();
+            if (!system && !mic)
+            {
+                if (AudioOn) StopAudio();
+                return;
+            }
+
+            if (!AudioOn)
+            {
+                StartAudio();            // 内部会按 AudioEnabled/MicEnabled 起对应的源
+                return;
+            }
+
+            // 音轨已经开着：只调这两个源，别动编码器和时间轴
+            if (system && !SystemOn) StartSystemSource();
+            else if (!system && SystemOn) StopSystemSource();
+            if (mic && !MicOn) StartMicSource();
+            else if (!mic && MicOn) StopMicSource();
+
+            Log.Write($"[audio] 声音源改为：系统声={(SystemOn ? "开" : "关")}，麦克风={(MicOn ? "开" : "关")}");
         }
-        catch (Exception ex) { _audioErr = "切换音轨失败: " + ex.Message; }
+        catch (Exception ex) { _audioErr = "切换音源失败: " + ex.Message; }
     }
+
+    /// <summary>
+    /// 只拨系统声音（老入口，麦克风保持原样）。
+    /// </summary>
+    public void SetAudioEnabled(bool on) => SetAudioSources(on, MicEnabled);
+
 
     /// <summary>
     /// 运行中改码率：EncoderChain 的码率是 readonly（NVENC 的初始化参数），
@@ -519,9 +612,13 @@ internal sealed class Capture : IDisposable
                     long fill = shortfall / 1024 * 1024;      // 整帧补，避免制造半个 AAC 帧
                     _zeroBuf ??= new byte[1024 * 4 * 8];
                     int per = _zeroBuf.Length / 4;            // 每次喂多少样点
+                    var mixer = _micMixer;
                     while (fill > 0)
                     {
                         int take = (int)Math.Min(per, fill);
+                        // 补静音的位置如果麦克风有货，就用麦克风顶上：
+                        // 游戏安静、只有用户在说话时，这段不能是纯静音（否则只开麦克风等于没录）。
+                        if (mixer is not null) mixer.TakeInto(_zeroBuf, take * 4);
                         aac.Feed(_zeroBuf.AsSpan(0, take * 4), now100, (d, p) => ring.Append(p / 10, d));
                         _audioFedFrames += take;
                         _silenceFilled += take;
@@ -531,6 +628,8 @@ internal sealed class Capture : IDisposable
 
                 if (pcm is not null && bytes > 0)
                 {
+                    // 就地混：pcm 是采集线程的 _stage，本次回调用完就覆盖，不会有人再看。
+                    _micMixer?.MixInto(pcm, bytes);
                     aac.Feed(pcm.AsSpan(0, bytes), now100, (d, p) => ring.Append(p / 10, d));
                     _audioFedFrames += bytes / 4;
                 }
@@ -1023,8 +1122,10 @@ internal sealed class Capture : IDisposable
         {
             var ac = _aRing.Coverage();
             s += $" 音频={_aRing.TotalFrames}帧/{_aRing.DiskBytes() / 1024}KB 覆盖({ac.From / 1000},{ac.To / 1000})ms";
+            s += $" 源[系统={(_wcap is null ? "关" : "开")} 麦={(MicOn ? "开" : "关")}" +
+                 $"{(MicOn ? $"/{_micMixer?.Frames ?? 0}帧缓" : "")}]";
         }
-        else if (!AudioEnabled) s += " 音频=关";
+        else if (!AudioEnabled && !MicEnabled) s += " 音频=关";
         if (OcrEnabled && _ocrCount > 0)
             s += $" OCR={_ocrCount}次/{_ocrMs}ms 合并={_merged}次";
         if (_ocr.Err.Length > 0) s += $"  ocrErr={_ocr.Err}";
@@ -1047,6 +1148,7 @@ internal sealed class Capture : IDisposable
         try { _pool?.Dispose(); } catch { }
         try { _diag?.Flush(); _diag?.Dispose(); } catch { }
         try { _wcap?.Dispose(); } catch { }
+        try { _mic?.Dispose(); } catch { }
         try { _ring?.Flush(); } catch { }
         try { _enc?.Dispose(); } catch { }
         try { _aac?.Dispose(); } catch { }

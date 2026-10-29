@@ -252,6 +252,9 @@ public sealed class LibraryForm : Form
         _statusRight.Font = UiKit.F9;
         _statusRight.TextAlign = ContentAlignment.MiddleRight;
         _statusRight.Text = "";
+        // 这一行显示的就是「配额 / 保留天数」，用户最想改它——做成可点，别让人去托盘里翻。
+        _statusRight.Cursor = Cursors.Hand;
+        _statusRight.Click += (_, _) => ShowQuotaMenu();
 
         _foot.Controls.Add(_status);
         _foot.Controls.Add(_statusRight);
@@ -317,9 +320,12 @@ public sealed class LibraryForm : Form
         kindPill.SetBounds(timePill.Left - 8 - kindPill.Width, btnY, kindPill.Width, 38);
 
         // ---- 正文：左边清单、右边详情 ----
-        int sideW = 420;
+        // 336 是量出来的：再窄下来元数据「2560 × 1440」就开始折行，再宽就让清单少一列。
+        // 窗口本身很小时按比例收，别让清单被挤成一条缝。
+        int sideW = Math.Clamp(_body.Width / 4, 300, 336);
         _detail.SetBounds(_body.Width - sideW, 0, sideW, _body.Height);
         _listCard!.SetBounds(0, 0, Math.Max(200, _body.Width - sideW - 16), _body.Height);
+        _detail.FitPreview();
 
         // ---- 状态栏 ----
         _status.SetBounds(22, 0, Math.Max(120, _foot.Width - 22 - 460 - 24), footH);
@@ -459,6 +465,44 @@ public sealed class LibraryForm : Form
     {
         _policy = policy;
         UpdateStatus();
+    }
+
+    /// <summary>改配额/保留天数的出口：库窗口只负责「问」，真正落到 policy + config.json 由宿主做。</summary>
+    public Action<long, int>? OnQuotaChanged { get; set; }
+
+    /// <summary>状态栏这一行的「点开就能改」菜单：两个子项组，和托盘里那套档位一致。</summary>
+    private void ShowQuotaMenu()
+    {
+        var menu = CreateQuotaMenu();
+        menu.Closed += (_, _) => menu.Dispose();
+        menu.Show(_statusRight, new Point(_statusRight.Width, 0), ToolStripDropDownDirection.AboveLeft);
+    }
+
+    /// <summary>
+    /// 建出配额菜单但不弹出来——自检要能点它的子项，真 Show 出来会把模态焦点抢走。
+    /// </summary>
+    internal ContextMenuStrip CreateQuotaMenu()
+    {
+        var menu = new ContextMenuStrip { ShowImageMargin = false, Font = UiKit.F95 };
+        var capRoot = new ToolStripMenuItem("磁盘配额：" + QuotaPolicy.QuotaLabel(_policy.QuotaGb));
+        var keepRoot = new ToolStripMenuItem("保留天数：" + QuotaPolicy.RetainLabel(_policy.RetainDays));
+
+        foreach (var gb in QuotaPolicy.QuotaPresets)
+        {
+            var it = new ToolStripMenuItem(QuotaPolicy.QuotaLabel(gb)) { Checked = gb == _policy.QuotaGb };
+            it.Click += (_, _) => OnQuotaChanged?.Invoke(gb, _policy.RetainDays);
+            capRoot.DropDownItems.Add(it);
+        }
+        foreach (var days in QuotaPolicy.RetainPresets)
+        {
+            var it = new ToolStripMenuItem(QuotaPolicy.RetainLabel(days)) { Checked = days == _policy.RetainDays };
+            it.Click += (_, _) => OnQuotaChanged?.Invoke(_policy.QuotaGb, days);
+            keepRoot.DropDownItems.Add(it);
+        }
+
+        menu.Items.Add(capRoot);
+        menu.Items.Add(keepRoot);
+        return menu;
     }
 
     public void Reload()

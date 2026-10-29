@@ -10,7 +10,9 @@ namespace ApexHighlights;
 /// </summary>
 internal sealed class ClipDetailPane : Panel
 {
-    private const string Hint = "双击或 Enter 用系统播放器打开 · Delete 删除";
+    // 面板只有 336 宽，原来那句「双击或 Enter 用系统播放器打开 · Delete 删除」会折成两行被裁掉。
+    // 这行是提示不是说明书，两行就该砍字数——「播放」「删除」两个动词留着就够用了。
+    private const string Hint = "双击 / Enter 播放 · Delete 删除";
 
     private readonly SurfaceCard _card = new();
     private readonly PreviewBox _preview = new();
@@ -28,7 +30,7 @@ internal sealed class ClipDetailPane : Panel
         _card.Padding = new Padding(12);
 
         _preview.Dock = DockStyle.Top;
-        _preview.Height = 212;
+        _preview.Height = 186;
         _preview.EmptyText = "选一条看看";
         _preview.DoubleClick += (_, _) => OpenRequested?.Invoke(this, EventArgs.Empty);
 
@@ -37,7 +39,8 @@ internal sealed class ClipDetailPane : Panel
         metaPad.Controls.Add(_meta);
 
         _note.Dock = DockStyle.Bottom;
-        _note.Height = 44;
+        _note.Height = 40;
+        _note.AutoEllipsis = true;      // 窗口再窄下去宁可省略号，也别折行糊成一片
         _note.ForeColor = UiKit.Dim;
         _note.Font = UiKit.F9;
         _note.TextAlign = ContentAlignment.MiddleLeft;
@@ -46,6 +49,9 @@ internal sealed class ClipDetailPane : Panel
         _card.Controls.Add(_note);
         _card.Controls.Add(_preview);
         Controls.Add(_card);
+
+        // 卡片是 Dock=Fill，宽度最后落在它身上，所以听它的大小变化最准
+        _card.Resize += (_, _) => FitPreview();
     }
 
     /// <summary>
@@ -83,6 +89,25 @@ internal sealed class ClipDetailPane : Panel
         var old = _preview.Image;
         _preview.Image = img;
         if (!ReferenceEquals(old, img)) old?.Dispose();
+    }
+
+    /// <summary>
+    /// 预览按 16:9 跟着宽度走：面板收窄了还留 212 高，图上下就会空一条黑边，
+    /// 白白把元数据往下推。缩略图本身是 16:9 取的，所以这个比例也是「不变形」的那个。
+    /// </summary>
+    protected override void OnResize(EventArgs e)
+    {
+        base.OnResize(e);
+        int w = _card.ClientSize.Width - _card.Padding.Horizontal;
+        if (w <= 0) return;
+        int h = Math.Clamp((int)Math.Round(w * 9.0 / 16.0), 120, 240);
+        if (_preview.Height != h) _preview.Height = h;
+    }
+
+    /// <summary>面板的「真高」不靠外部传：布局跑完就按当前宽度校正一次预览高度。</summary>
+    public void FitPreview()
+    {
+        OnResize(EventArgs.Empty);
     }
 
     protected override void Dispose(bool disposing)

@@ -2,22 +2,48 @@ using System.Runtime.InteropServices;
 
 namespace ApexHighlights;
 
+/// <summary>抓哪一个流：系统回环（扬声器在放什么）还是麦克风（用户在说什么）。</summary>
+internal enum AudioSourceKind
+{
+    /// <summary>默认渲染设备的回环流 = 游戏声/桌面声。</summary>
+    System,
+    /// <summary>默认录音设备 = 麦克风。</summary>
+    Microphone,
+}
+
 /// <summary>
-/// WASAPI loopback 采集：抓默认渲染设备（扬声器）的回环流 = 系统/游戏声音。
-/// 不碰麦克风、不需要任何第三方库。输出统一成 **int16 交错立体声**，
-/// 采样率跟随设备混音格式（通常 48000），由 <see cref="SampleRate"/> 报告。
+/// WASAPI 采集：默认抓「默认渲染设备的回环流」（系统/游戏声音），也可以抓默认录音设备（麦克风）。
+/// 不碰麦克风除非明确选了 <see cref="AudioSourceKind.Microphone"/>、不需要任何第三方库。
+/// 输出统一成 **int16 交错立体声**，采样率跟随设备混音格式（通常 48000），由 <see cref="SampleRate"/> 报告。
 ///
 /// 线程模型：专用后台线程等事件 → 排空 packet → 转换 → 回调（回调里做 AAC 编码，零分配）。
 /// 系统没有声音在播时不会有 packet，这是正常的（等于静音），不会产生空洞时间戳。
+/// 麦克风则是「一直有包」（哪怕静音也送），因为录音设备不会因为安静就停止供流。
 /// </summary>
 internal sealed class LoopbackCapture : IDisposable
 {
     private const int DataFlowRender = 0;
+    private const int DataFlowCapture = 1;
     private const int RoleConsole = 0;
 
     private const int ShareModeShared = 0;
     private const uint FlagsLoopback = 0x00020000;
     private const uint FlagsEventCallback = 0x00040000;
+
+    private readonly AudioSourceKind _kind;
+    private readonly int _dataFlow;
+    private readonly uint _baseFlags;
+
+    public LoopbackCapture(AudioSourceKind kind = AudioSourceKind.System)
+    {
+        _kind = kind;
+        _dataFlow = kind == AudioSourceKind.Microphone ? DataFlowCapture : DataFlowRender;
+        // 麦克风不能用 LOOPBACK 标志（那是渲染端专属的），只保留事件驱动
+        _baseFlags = kind == AudioSourceKind.Microphone ? 0u : FlagsLoopback;
+    }
+
+    /// <summary>这个实例抓的是哪种流。</summary>
+    public AudioSourceKind Kind => _kind;
 
     /// <summary>设备回环流里一个 packet 缓冲：int16 交错立体声，回调期间有效。</summary>
     public delegate void PcmHandler(byte[] stereo16, int byteCount);
@@ -94,8 +120,10 @@ internal sealed class LoopbackCapture : IDisposable
     public void Start(PcmHandler onPcm)
     {
         var enumerator = (IMMDeviceEnumerator)new MMDeviceEnumeratorComObject();
-        int hr = enumerator.GetDefaultAudioEndpoint(DataFlowRender, RoleConsole, out var device);
-        if (hr < 0) throw new COMException($"GetDefaultAudioEndpoint 0x{hr:X8}（没有默认播放设备？）");
+        int hr = enumerator.GetDefaultAudioEndpoint(_dataFlow, RoleConsole, out var device);
+        if (hr < 0)
+            throw new COMException($"GetDefaultAudioEndpoint 0x{hr:X8}" +
+                $"（没有默认{(_kind == AudioSourceKind.Microphone ? "录音" : "播放")}设备？）");
         try
         {
             var iid = typeof(IAudioClient).GUID;
@@ -113,7 +141,7 @@ internal sealed class LoopbackCapture : IDisposable
             _signal = new AutoResetEvent(false);
 
             // 先试事件驱动（CPU 最省）；不行退回轮询
-            uint flags = FlagsLoopback | FlagsEventCallback;
+            uint flags = _baseFlags | FlagsEventCallback;
             long[] durations = { 1_000_000, 200_000, 2_000_000, 0 };   // 100ms / 20ms / 200ms / 引擎默认
             bool ok = false;
             string last = "";
@@ -127,8 +155,8 @@ internal sealed class LoopbackCapture : IDisposable
             {
                 foreach (var dur in durations)
                 {
-                    hr = _client.Initialize(ShareModeShared, FlagsLoopback, dur, 0, _format, IntPtr.Zero);
-                    if (hr >= 0) { ok = true; flags = FlagsLoopback; break; }
+                    hr = _client.Initialize(ShareModeShared, _baseFlags, dur, 0, _format, IntPtr.Zero);
+                    if (hr >= 0) { ok = true; flags = _baseFlags; break; }
                     last += $" | poll dur={dur} 0x{hr:X8}";
                 }
             }

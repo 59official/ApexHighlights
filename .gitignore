@@ -17,6 +17,7 @@ zzz/
 
 # 整包备份（约 185MB/份）。版本兜底靠 git tag，备份只为本机快速回滚
 backups/
+backup/
 
 # 录制输出与测试素材（合计约 750MB，不进仓库）
 captures/

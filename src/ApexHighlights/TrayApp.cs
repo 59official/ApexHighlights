@@ -94,6 +94,7 @@ internal sealed class TrayApp : ApplicationContext
         menu.Items.Add(BuildBitrateMenu());
         menu.Items.Add(BuildAudioMenu());
         menu.Items.Add(BuildKindsMenu());
+        menu.Items.Add(BuildQuotaMenu());
         menu.Items.Add(new ToolStripSeparator());
         var quit = new ToolStripMenuItem("退出");
         quit.Click += (_, _) => Quit();
@@ -171,14 +172,22 @@ internal sealed class TrayApp : ApplicationContext
                         say($"改前码率 = {EffectiveBitrateMbps}Mbps");
                         ClickBitrate(40);
                         say($"点 40Mbps 之后 = {EffectiveBitrateMbps}Mbps，采集器里 Bitrate = {(_cap?.Bitrate.ToString() ?? "无采集")}");
-                        say($"音轨菜单 = {FindAudioRoot()?.Text ?? "找不到"}，改前 = {(EffectiveAudio ? "开" : "关")}，实际在录 = {(_cap?.AudioOn.ToString() ?? "无采集")}");
-                        ClickAudio(false);
-                        say($"点「关」之后 = {(EffectiveAudio ? "开" : "关")}，实际在录 = {(_cap?.AudioOn.ToString() ?? "无采集")}");
+                        say($"音轨菜单 = {FindAudioRoot()?.Text ?? "找不到"}，改前 = 系统{(EffectiveAudio ? "开" : "关")}/麦{(EffectiveMic ? "开" : "关")}，实际在录 = {(_cap?.AudioOn.ToString() ?? "无采集")}");
+                        ClickAudio(false, false);
+                        say($"两个都关之后 = {FindAudioRoot()?.Text}，实际在录 = {(_cap?.AudioOn.ToString() ?? "无采集")}");
                         say("config.json 现在是 " +
                             (File.Exists(_cfgPath) ? string.Join(" ", File.ReadAllLines(_cfgPath)) : "(没写)"));
                         // 再开回来：验证 StopAudio/StartAudio 往返没问题（这是最容易踩坑的一条路径）
-                        ClickAudio(true);
-                        say($"点回「开」之后 = {(EffectiveAudio ? "开" : "关")}，实际在录 = {(_cap?.AudioOn.ToString() ?? "无采集")}");
+                        ClickAudio(true, false);
+                        say($"只开系统声之后 = {FindAudioRoot()?.Text}，实际在录 = {(_cap?.AudioOn.ToString() ?? "无采集")}，系统源 = {(_cap?.SystemOn.ToString() ?? "无采集")}");
+                        // 麦克风：这台机器上可能没有录音设备，所以这里验的是「菜单/配置/采集器状态一致」，
+                        // 真开机器的能力由 --audio-test / --mic-test 负责
+                        ClickAudio(true, true);
+                        say($"再开麦克风之后 = {FindAudioRoot()?.Text}，配置 Mic = {_capture.Mic}，采集器里麦克风 = {(_cap?.MicOn.ToString() ?? "无采集")}");
+                        say("config.json 现在是 " +
+                            (File.Exists(_cfgPath) ? string.Join(" ", File.ReadAllLines(_cfgPath)) : "(没写)"));
+                        ClickAudio(true, false);
+                        say($"关掉麦克风之后 = {FindAudioRoot()?.Text}，配置 Mic = {_capture.Mic}，采集器里麦克风 = {(_cap?.MicOn.ToString() ?? "无采集")}");
                         ClickBitrate(20);
                         say($"点回 20Mbps 之后 = {EffectiveBitrateMbps}Mbps");
                         // 种类开关：关掉「助攻击倒」，看闸门真的不切片，再开回来
@@ -198,6 +207,17 @@ internal sealed class TrayApp : ApplicationContext
                             (File.Exists(_cfgPath) ? string.Join(" ", File.ReadAllLines(_cfgPath)) : "(没写)"));
                         ClickClipsDefault();
                         say($"点了「恢复默认位置」之后 = {EffectiveClipsDir}，采集器 ClipDir = {(_cap?.ClipDir ?? "无采集")}，菜单 = {FindClipsRoot()?.Text}");
+                        // 容量与保留：两个档位各点一次，验证「立刻生效 + 落盘 + 不冲掉别的字段」
+                        say($"配额菜单 = {FindQuotaRoot()?.Text ?? "找不到"}");
+                        ClickQuota(20);
+                        say($"点 20GB 之后 = {FindQuotaRoot()?.Text}，policy.QuotaGb = {_policy.QuotaGb}，采集器里 Quota = {(_cap?.Quota.QuotaGb.ToString() ?? "无采集")}");
+                        ClickRetain(7);
+                        say($"点 7 天之后 = {FindQuotaRoot()?.Text}，policy.RetainDays = {_policy.RetainDays}，采集器里 = {(_cap?.Quota.RetainDays.ToString() ?? "无采集")}");
+                        say("config.json 现在是 " +
+                            (File.Exists(_cfgPath) ? string.Join(" ", File.ReadAllLines(_cfgPath)) : "(没写)"));
+                        ClickQuota(40);
+                        ClickRetain(30);
+                        say($"点回 40GB/30 天之后 = {FindQuotaRoot()?.Text}");
                         break;
                     case 13:
                         // 库窗口里点「选择目录」：回调得改采集器 + 落盘，但**不能把用户正站着的窗口关掉**
@@ -287,6 +307,7 @@ internal sealed class TrayApp : ApplicationContext
             _cap.GopFrames = _fps;
             _cap.Quota = _policy;
             _cap.AudioEnabled = _capture.Audio;
+            _cap.MicEnabled = _capture.Mic;
             _cap.BeepOnSave = _beep;
             _cap.OcrEnabled = _ocr;
             _cap.MergeMs = _detect.MergeSec * 1000;
@@ -451,7 +472,13 @@ internal sealed class TrayApp : ApplicationContext
             return;
         }
         var dir = _cap?.ClipDir ?? Paths.Clips;
-        _libForm = new LibraryForm(new ClipLibrary(dir), _policy) { Threshold = EffectiveThreshold, OnThresholdChanged = v => ApplyThreshold(v) };
+        _libForm = new LibraryForm(new ClipLibrary(dir), _policy)
+        {
+            Threshold = EffectiveThreshold,
+            OnThresholdChanged = v => ApplyThreshold(v),
+            // 库窗口状态栏里那行「配额 / 保留」点开就能改，和托盘菜单共用同一个出口
+            OnQuotaChanged = (gb, days) => ApplyQuota(gb, days),
+        };
         // 库窗口里的「选择目录」：搬家询问 + 改采集器 + 落盘都由托盘这侧做（它有 _capture 和配置路径），
         // 但**别关窗口**——用户正站在里面点按钮，关掉等于把他甩出来。
         _libForm.OnClipsDirRequested = target =>
@@ -650,53 +677,174 @@ internal sealed class TrayApp : ApplicationContext
     }
 
     /// <summary>
-    /// 「音轨」子菜单：录制前忘了加 --no-audio 就只能重开，所以给个能随时拨的开关。
-    /// 关掉之后已经在录的环形里那些带声音的片段不受影响，只有之后的片段变无声。
+    /// 「音轨」子菜单：两个独立的声音源——系统回环（游戏声）和麦克风（自己说话）。
+    /// 两个都关 = 后续片段无声；只开麦克风也行（游戏安静时的解说就不会丢）。
     /// </summary>
     private ToolStripMenuItem BuildAudioMenu()
     {
         var root = new ToolStripMenuItem("音轨");
-        var items = new List<ToolStripMenuItem>();
+        var sysItem = new ToolStripMenuItem("系统声音（游戏 / 桌面）") { Tag = "sys", CheckOnClick = true };
+        var micItem = new ToolStripMenuItem("麦克风（自己说话）") { Tag = "mic", CheckOnClick = true };
+        var items = new[] { sysItem, micItem };
 
         void Refresh()
         {
-            var on = EffectiveAudio;
-            foreach (var it in items)
-                it.Checked = (bool)it.Tag! == on;
-            // 想开但没开成（没有默认播放设备之类）时得让用户看得出来
-            var broken = on && _cap is not null && !_cap.AudioOn;
-            root.Text = on ? $"音轨（开{(broken ? "·异常" : "")}）" : "音轨（关）";
+            var sys = EffectiveAudio;
+            var mic = EffectiveMic;
+            sysItem.Checked = sys;
+            micItem.Checked = mic;
+            // 想开但没开成（没有默认播放/录音设备之类）时得让用户看得出来
+            var broken = (sys && _cap is not null && !_cap.SystemOn) || (mic && _cap is not null && !_cap.MicOn);
+            root.Text = (sys, mic) switch
+            {
+                (true, true) => "音轨（系统+麦克风）",
+                (true, false) => "音轨（仅系统）",
+                (false, true) => "音轨（仅麦克风）",
+                _ => "音轨（关）",
+            };
+            if (broken) root.Text += "·异常";
+            _ = items;
         }
 
-        var onItem = new ToolStripMenuItem("开  录游戏声音（系统回环，不碰麦克风）") { Tag = true };
-        onItem.Click += (_, _) => ApplyAudio(true, Refresh);
-        var offItem = new ToolStripMenuItem("关  片段为无声 mp4，省一点体积") { Tag = false };
-        offItem.Click += (_, _) => ApplyAudio(false, Refresh);
-        root.DropDownItems.Add(onItem);
-        root.DropDownItems.Add(offItem);
-        items.Add(onItem);
-        items.Add(offItem);
+        // CheckOnClick 会先翻转 Checked 再触发 Click，所以这里读到的是「用户想要的状态」
+        sysItem.Click += (_, _) => ApplyAudio(sysItem.Checked, micItem.Checked, Refresh);
+        micItem.Click += (_, _) => ApplyAudio(sysItem.Checked, micItem.Checked, Refresh);
+        root.DropDownItems.Add(sysItem);
+        root.DropDownItems.Add(micItem);
 
         root.DropDownOpening += (_, _) => Refresh();
         Refresh();
         return root;
     }
 
-    /// <summary>音轨该不该开：运行中问采集器，没在录看配置。</summary>
+    /// <summary>系统声音该不该开：运行中问采集器，没在录看配置。</summary>
     private bool EffectiveAudio => _cap is not null ? _cap.AudioEnabled : _capture.Audio;
 
-    /// <summary>改音轨开关：内存配置 → 就地起停采集器里的音轨 → 落盘。</summary>
-    private void ApplyAudio(bool on, Action? after = null)
+    /// <summary>麦克风该不该开，同上。</summary>
+    private bool EffectiveMic => _cap is not null ? _cap.MicEnabled : _capture.Mic;
+
+    /// <summary>改两个声音源：内存配置 → 就地起停采集器里的源 → 落盘。</summary>
+    private void ApplyAudio(bool system, bool mic, Action? after = null)
     {
-        _capture.Audio = on;
-        try { _cap?.SetAudioEnabled(on); }
-        catch (Exception ex) { Log.Write("[tray] 切音轨失败: " + ex.Message); }
+        _capture.Audio = system;
+        _capture.Mic = mic;
+        try { _cap?.SetAudioSources(system, mic); }
+        catch (Exception ex) { Log.Write("[tray] 切音源失败: " + ex.Message); }
 
         var ok = _capture.Save(_cfgPath);
-        Log.Write($"[audio] 音轨设为{(on ? "开" : "关")}" +
+        Log.Write($"[audio] 声音源设为 系统声={(system ? "开" : "关")}、麦克风={(mic ? "开" : "关")}" +
                   $"（保存到 {_cfgPath}：{(ok ? "成功" : "失败")}）");
         after?.Invoke();
         RefreshStatus();
+    }
+
+    /// <summary>
+    /// 「容量与保留」子菜单：磁盘配额 + 保留天数，两排档位。
+    /// 这两项管的是同一件事（什么时候删旧片段），拆成两个顶层菜单反而让人不知道先动哪个。
+    /// </summary>
+    private ToolStripMenuItem BuildQuotaMenu()
+    {
+        var root = new ToolStripMenuItem("容量与保留");
+        var capRoot = new ToolStripMenuItem("磁盘配额");
+        var keepRoot = new ToolStripMenuItem("保留天数");
+        var capItems = new List<ToolStripMenuItem>();
+        var keepItems = new List<ToolStripMenuItem>();
+
+        void Refresh()
+        {
+            foreach (var it in capItems) it.Checked = (int)it.Tag! == _policy.QuotaGb;
+            foreach (var it in keepItems) it.Checked = (int)it.Tag! == _policy.RetainDays;
+            capRoot.Text = "磁盘配额：" + QuotaPolicy.QuotaLabel(_policy.QuotaGb);
+            keepRoot.Text = "保留天数：" + QuotaPolicy.RetainLabel(_policy.RetainDays);
+            root.Text = $"容量与保留（{QuotaPolicy.QuotaLabel(_policy.QuotaGb)} / " +
+                        $"{QuotaPolicy.RetainLabel(_policy.RetainDays)}）";
+        }
+
+        foreach (var gb in QuotaPolicy.QuotaPresets)
+        {
+            var it = new ToolStripMenuItem(QuotaPolicy.QuotaLabel(gb)) { Tag = gb };
+            it.Click += (_, _) => ApplyQuota(gb, _policy.RetainDays, Refresh);
+            capRoot.DropDownItems.Add(it);
+            capItems.Add(it);
+        }
+        foreach (var days in QuotaPolicy.RetainPresets)
+        {
+            var it = new ToolStripMenuItem(QuotaPolicy.RetainLabel(days)) { Tag = days };
+            it.Click += (_, _) => ApplyQuota(_policy.QuotaGb, days, Refresh);
+            keepRoot.DropDownItems.Add(it);
+            keepItems.Add(it);
+        }
+
+        root.DropDownItems.Add(capRoot);
+        root.DropDownItems.Add(keepRoot);
+        root.DropDownOpening += (_, _) => Refresh();
+        Refresh();
+        return root;
+    }
+
+    /// <summary>
+    /// 改配额或保留天数：先空跑算「会删几片」，删得动东西就先问一句，再落盘 + 立刻清理。
+    /// 不问就直接删太狠了——点错一格 40GB→10GB 能把整库清空。
+    /// </summary>
+    private void ApplyQuota(long quotaGb, int retainDays, Action? after = null)
+    {
+        quotaGb = Math.Clamp(quotaGb, 0L, 2000L);
+        retainDays = Math.Clamp(retainDays, 0, 3650);
+        if (quotaGb == _policy.QuotaGb && retainDays == _policy.RetainDays) return;
+
+        var probe = new QuotaPolicy
+        {
+            QuotaGb = quotaGb,
+            RetainDays = retainDays,
+            WatermarkGb = _policy.WatermarkGb,
+            CheckMinutes = _policy.CheckMinutes,
+        };
+
+        // 空跑：只算出会删哪些，文件一个都不动
+        QuotaReport? dry = null;
+        try
+        {
+            if (_cap is not null) dry = QuotaEnforcer.Run(new ClipLibrary(_cap.ClipDir), probe, null, dryRun: true);
+        }
+        catch (Exception ex) { Log.Write("[quota] 预估失败: " + ex.Message); }
+
+        if (dry is { DeletedTotal: > 0 })
+        {
+            var ans = MessageBox.Show(
+                $"按新设置会立刻删掉 {dry.DeletedTotal} 片（{QuotaReport.Mb(dry.BytesFreed)}）：\n\n" +
+                $"  超期 {dry.DeletedByAge.Count} 片、超配额 {dry.DeletedByQuota.Count} 片\n\n" +
+                "超出部分按「最不值钱」的顺序挑（小队淘汰 → 助攻 → 队友击倒 → 自己被击倒 → 自己击倒）。\n" +
+                "确定要改吗？",
+                "ApexHighlights",
+                MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2);
+            if (ans != DialogResult.Yes) return;
+        }
+
+        var oldText = $"{QuotaPolicy.QuotaLabel(_policy.QuotaGb)}/{QuotaPolicy.RetainLabel(_policy.RetainDays)}";
+        _policy.QuotaGb = quotaGb;
+        _policy.RetainDays = retainDays;
+        if (_cap is not null) _cap.Quota = _policy;
+
+        _policy.Save(_cfgPath);      // QuotaPolicy.Save 内部吞异常，不返回成败
+        QuotaReport? rep = null;
+        try { rep = _cap?.RunQuotaCheck(); } catch (Exception ex) { Log.Write("[quota] 清理失败: " + ex.Message); }
+
+        var nowText = $"{QuotaPolicy.QuotaLabel(quotaGb)}/{QuotaPolicy.RetainLabel(retainDays)}";
+        Log.Write($"[quota] 容量与保留 {oldText} → {nowText}（写入 {_cfgPath}）" +
+                  (rep is null ? "" : $"  → {rep}"));
+        if (rep is { DeletedTotal: > 0 })
+            _icon.ShowBalloonTip(4000, "ApexHighlights",
+                $"按新配额清理了 {rep.DeletedTotal} 片，释放 {QuotaReport.Mb(rep.BytesFreed)}。",
+                ToolTipIcon.Info);
+
+        after?.Invoke();
+        RefreshStatus();
+        // 库窗口开着的话，它得重新数一遍（可能刚被删掉几片）
+        if (_libForm is { IsDisposed: false } lf)
+        {
+            lf.SetPolicy(_policy);
+            lf.Reload();
+        }
     }
 
     /// <summary>
@@ -1028,13 +1176,44 @@ internal sealed class TrayApp : ApplicationContext
         _icon.ContextMenuStrip?.Items.OfType<ToolStripMenuItem>()
             .FirstOrDefault(i => i.Text.StartsWith("音轨", StringComparison.Ordinal));
 
-    /// <summary>自检用：等价于点了一下音轨开关。</summary>
-    private void ClickAudio(bool on)
+    /// <summary>自检用：把两个声音源都拨到指定状态（sys/mic）。</summary>
+    private void ClickAudio(bool sys, bool mic)
     {
         var root = FindAudioRoot();
-        var hit = root?.DropDownItems.OfType<ToolStripMenuItem>()
-            .FirstOrDefault(i => i.Tag is bool b && b == on);
-        if (hit is null) { Log.Write($"[t] 找不到音轨项 {(on ? "开" : "关")}"); return; }
+        if (root is null) { Log.Write("[t] 找不到音轨菜单"); return; }
+        var sysItem = root.DropDownItems.OfType<ToolStripMenuItem>().FirstOrDefault(i => (i.Tag as string) == "sys");
+        var micItem = root.DropDownItems.OfType<ToolStripMenuItem>().FirstOrDefault(i => (i.Tag as string) == "mic");
+        if (sysItem is null || micItem is null) { Log.Write("[t] 音轨菜单缺项"); return; }
+        if (sysItem.Checked != sys) sysItem.PerformClick();
+        if (micItem.Checked != mic) micItem.PerformClick();
+    }
+
+    /// <summary>自检用：找到「容量与保留」根菜单项。</summary>
+    private ToolStripMenuItem? FindQuotaRoot() =>
+        _icon.ContextMenuStrip?.Items.OfType<ToolStripMenuItem>()
+            .FirstOrDefault(i => i.Text.StartsWith("容量与保留", StringComparison.Ordinal));
+
+    /// <summary>自检用：等价于点某个配额档位（GB）。</summary>
+    private void ClickQuota(long gb)
+    {
+        var root = FindQuotaRoot();
+        var sub = root?.DropDownItems.OfType<ToolStripMenuItem>()
+            .FirstOrDefault(i => i.Text.StartsWith("磁盘配额", StringComparison.Ordinal));
+        var hit = sub?.DropDownItems.OfType<ToolStripMenuItem>().FirstOrDefault(i => i.Tag is long g && g == gb)
+                  ?? sub?.DropDownItems.OfType<ToolStripMenuItem>().FirstOrDefault(i => i.Tag is int g2 && g2 == gb);
+        if (hit is null) { Log.Write($"[t] 找不到配额档位 {gb}GB"); return; }
+        hit.PerformClick();
+    }
+
+    /// <summary>自检用：等价于点某个保留天数档位。</summary>
+    private void ClickRetain(int days)
+    {
+        var root = FindQuotaRoot();
+        var sub = root?.DropDownItems.OfType<ToolStripMenuItem>()
+            .FirstOrDefault(i => i.Text.StartsWith("保留天数", StringComparison.Ordinal));
+        var hit = sub?.DropDownItems.OfType<ToolStripMenuItem>().FirstOrDefault(i => i.Tag is int g && g == days)
+                  ?? sub?.DropDownItems.OfType<ToolStripMenuItem>().FirstOrDefault(i => i.Tag is long g2 && g2 == days);
+        if (hit is null) { Log.Write($"[t] 找不到保留档位 {days} 天"); return; }
         hit.PerformClick();
     }
 

@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 
 namespace ApexHighlights;
@@ -173,10 +174,37 @@ public sealed class QuotaPolicy
         {
             var dir = System.IO.Path.GetDirectoryName(path);
             if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
-            File.WriteAllText(path, ToJson());
+
+            // 只改自己这四个键：config.json 里还躺着 DetectPolicy / CapturePolicy 的字段，
+            // 整份覆盖会把用户的灵敏度、码率、录制种类一起抹掉（以前是整份写，只是没人从界面调过配额）。
+            JsonObject root;
+            try
+            {
+                root = File.Exists(path) ? JsonNode.Parse(File.ReadAllText(path)) as JsonObject ?? new JsonObject()
+                                         : new JsonObject();
+            }
+            catch { root = new JsonObject(); }
+
+            root["QuotaGb"] = QuotaGb;
+            root["RetainDays"] = RetainDays;
+            root["WatermarkGb"] = WatermarkGb;
+            root["CheckMinutes"] = CheckMinutes;
+            File.WriteAllText(path, root.ToJsonString(Json));
         }
         catch { }
     }
+
+    /// <summary>配额档位（GB；0 = 不限）。界面照这个顺序排，档位外的值照样能用。</summary>
+    public static readonly int[] QuotaPresets = { 0, 10, 20, 30, 40, 60, 80, 120, 200 };
+
+    /// <summary>保留天数档位（0 = 永久保留）。</summary>
+    public static readonly int[] RetainPresets = { 0, 7, 14, 30, 60, 90, 180, 365 };
+
+    /// <summary>「40GB」/「不限」。</summary>
+    public static string QuotaLabel(long gb) => gb <= 0 ? "不限" : $"{gb}GB";
+
+    /// <summary>「30 天」/「永久」。</summary>
+    public static string RetainLabel(int days) => days <= 0 ? "永久" : $"{days} 天";
 }
 
 /// <summary>一次清理的结果，便于日志和自检断言。</summary>
@@ -222,7 +250,12 @@ public static class QuotaEnforcer
         _ => 6,   // Kill
     };
 
-    public static QuotaReport Run(ClipLibrary lib, QuotaPolicy p, DateTime? nowLocal = null)
+    /// <summary>
+    /// 跑一次清理。
+    /// <paramref name="dryRun"/> = true 时只算出「会删哪些」，文件一个都不动——托盘里让用户改配额前
+    /// 得先能说清楚「这一下要少多少片」，不能等切完才发现库被清空。
+    /// </summary>
+    public static QuotaReport Run(ClipLibrary lib, QuotaPolicy p, DateTime? nowLocal = null, bool dryRun = false)
     {
         var now = nowLocal ?? DateTime.Now;
         var clips = lib.Scan();
@@ -237,7 +270,7 @@ public static class QuotaEnforcer
             var cutoff = now.AddDays(-p.RetainDays);
             foreach (var c in clips.Where(c => c.CreatedLocal < cutoff).ToList())
             {
-                if (lib.Delete(c)) { byAge.Add(c.Name); alive.Remove(c); }
+                if (dryRun || lib.Delete(c)) { byAge.Add(c.Name); alive.Remove(c); }
             }
         }
 
@@ -250,7 +283,7 @@ public static class QuotaEnforcer
                                    .ToList())
             {
                 if (total <= p.QuotaBytes) break;
-                if (lib.Delete(c)) { byQuota.Add(c.Name); total -= c.Bytes; alive.Remove(c); }
+                if (dryRun || lib.Delete(c)) { byQuota.Add(c.Name); total -= c.Bytes; alive.Remove(c); }
             }
         }
 

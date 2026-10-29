@@ -60,6 +60,8 @@ internal static class Program
 
             if (args.Any(a => a == "--quota-test")) return QuotaTest.Run();
 
+            if (args.Any(a => a == "--mic-test")) return MicTest.Run();
+
             if (args.Any(a => a == "--lib-list" || a == "--quota-run"))
                 return LibCli(args);
 
@@ -158,7 +160,7 @@ internal static class Program
             // 成片目录：必须在 Capture 构造之前定下来（Capture.ClipDir 的默认值读 Paths.Clips）
             Paths.SetClipsRoot(capture.ClipsDir);
             Console.WriteLine($"[2d] 画质码率 {capture.BitrateMbps}Mbps（config.json 的 BitrateMbps，托盘「画质码率」可调）");
-            Console.WriteLine($"[2e] 音轨 {(capture.Audio ? "开" : "关")}（config.json 的 Audio，托盘「音轨」可调）");
+            Console.WriteLine($"[2e] 音轨 {AudioSummary(capture)}（config.json 的 Audio / Mic，托盘「音轨」可调）");
             Console.WriteLine($"[2f] 成片目录 {Paths.Clips}{(capture.ClipsDir.Length == 0 ? "（默认）" : "")}（config.json 的 ClipsDir，托盘「片段目录」可改）");
 
             return offline is not null
@@ -511,14 +513,14 @@ internal static class Program
         }
 
         // 这些启动行也用 Log.Write：托盘模式控制台会被藏掉，只有写进日志才能事后核对
-        Log.Write($"[1] 托盘常驻：目标 \"{title}\"，{fps}fps {capture.BitrateMbps}Mbps，音轨{(capture.Audio ? "开" : "关")}，提示音{(beep ? "开" : "关")}，横幅分类{(ocr ? "开" : "关")}");
+        Log.Write($"[1] 托盘常驻：目标 \"{title}\"，{fps}fps {capture.BitrateMbps}Mbps，音轨{AudioSummary(capture)}，提示音{(beep ? "开" : "关")}，横幅分类{(ocr ? "开" : "关")}");
         Log.Write($"[2] 配额 {quota.QuotaGb}GB / 保留 {(quota.RetainDays == 0 ? "永久" : quota.RetainDays + " 天")} / 水位 {quota.WatermarkGb}GB");
         var thShown = detect.Threshold > 0 ? detect.Threshold : prof.Templates[0].Threshold;
         Log.Write($"[2b] 命中阈值 {thShown:F2}（config.json 的 Threshold 字段，托盘菜单「检测灵敏度」里可调）");
         Log.Write($"[2c] 合并窗口 {(detect.MergeSec == 0 ? "关（每次命中各出一段）" : detect.MergeSec + "s")}" +
                   "（config.json 的 MergeSec 字段，托盘菜单「合并窗口」里可调）");
         Log.Write($"[2d] 画质码率 {capture.BitrateMbps}Mbps（config.json 的 BitrateMbps 字段，托盘菜单「画质码率」里可调）");
-        Log.Write($"[2e] 音轨 {(capture.Audio ? "开（系统回环，不碰麦克风）" : "关（片段无声）")}（config.json 的 Audio 字段，托盘菜单「音轨」里可调）");
+        Log.Write($"[2e] 音轨 {AudioSummary(capture)}（config.json 的 Audio / Mic 字段，托盘菜单「音轨」里可调）");
         Log.Write($"[2f] 成片目录 {Paths.Clips}{(capture.ClipsDir.Length == 0 ? "（默认）" : "（自定义）")}（config.json 的 ClipsDir 字段，托盘菜单「片段目录」里可改）");
         Log.Write("[3] 右键托盘图标可以打开回顾库；关掉这个窗口也不影响录制。");
 
@@ -551,6 +553,15 @@ internal static class Program
         Console.WriteLine("[end] 已退出。");
         return exit;
     }
+
+    /// <summary>把两个声音源说清楚：「开（系统声音 + 麦克风）」这种，比一个「开」字有用。</summary>
+    private static string AudioSummary(CapturePolicy c) => (c.Audio, c.Mic) switch
+    {
+        (true, true) => "开（系统声音 + 麦克风）",
+        (true, false) => "开（仅系统声音）",
+        (false, true) => "开（仅麦克风）",
+        _ => "关（片段无声）",
+    };
 
     private static int Live(BannerEngine engine, int dumpAtSec, string title, string? logPath, int fps, int bitrate, bool encode, int gop, int fakeHit, int durationSec, bool audio = true, bool beep = true, QuotaPolicy? quotaPolicy = null, bool tray = true, bool ui = false, int traySelfTest = 0, DetectPolicy? detectPolicy = null, string? cfgPath = null, bool ocr = true, int fakeRepeat = 1, int fakeGap = 700, CapturePolicy? capturePolicy = null)
     {
@@ -605,6 +616,7 @@ internal static class Program
             cap.FakeHitGapMs = fakeGap > 0 ? fakeGap : 700;
             cap.DumpAtSec = dumpAtSec;
             cap.AudioEnabled = audio;
+            cap.MicEnabled = capture.Mic;
             cap.BeepOnSave = beep;
             cap.OcrEnabled = ocr;
             cap.Quota = quota;

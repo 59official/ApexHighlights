@@ -142,6 +142,32 @@ internal static class QuotaTest
             File.WriteAllText(bad, "{ this is not json");
             var def = QuotaPolicy.Load(bad);
             Check(def.QuotaGb == 40 && def.RetainDays == 30 && def.WatermarkGb == 2, "坏配置退回默认 40GB/30天/2GB");
+
+            // ⑥ config.json 里不止配额：别的字段（灵敏度/码率/合并窗口）不能被配额的 Save 抹掉。
+            // 托盘里改配额走的就是这条路，以前整份覆盖会把这些全清回默认。
+            var shared = Path.Combine(root, "shared.json");
+            File.WriteAllText(shared, "{\n  \"Threshold\": 0.66,\n  \"BitrateMbps\": 40,\n  \"MergeSec\": 8\n}");
+            new QuotaPolicy { QuotaGb = 15, RetainDays = 5 }.Save(shared);
+            var json = File.ReadAllText(shared);
+            Check(json.Contains("0.66") && json.Contains("BitrateMbps") && json.Contains("MergeSec"),
+                "配额 Save 只写自己四个键，灵敏度/码率/合并窗口都留着");
+            Check(json.Contains("\"QuotaGb\": 15") && json.Contains("\"RetainDays\": 5"), "新配额与保留天数已写入");
+            var merged = QuotaPolicy.Load(shared);
+            Check(merged.QuotaGb == 15 && merged.RetainDays == 5, "合并写回后仍能读回来");
+
+            // ⑦ 空跑（dryRun）只算账不动文件：托盘改配额前要能告诉用户「删几片」再问
+            var dryDir = Path.Combine(root, "dry");
+            Directory.CreateDirectory(dryDir);
+            File.WriteAllBytes(Path.Combine(dryDir, "apex_0101-120000_0.90.mp4"), new byte[20 * 1024]);
+            File.WriteAllBytes(Path.Combine(dryDir, "apex_0101-130000_0.80.mp4"), new byte[20 * 1024]);
+            var dry = QuotaEnforcer.Run(new ClipLibrary(dryDir), new QuotaPolicy { QuotaGb = 1, RetainDays = 30, WatermarkGb = 0 },
+                                        now.AddDays(60), dryRun: true);
+            Check(dry.DeletedByAge.Count == 2, $"空跑算出该删 2 片（算出 {dry.DeletedByAge.Count}）");
+            Check(Directory.EnumerateFiles(dryDir).Count() == 2, "空跑一个文件都没删");
+            Check(dry.Kept == 0 && dry.AfterBytes == 0, "空跑也给出「删完的账」（保留 0 片）");
+            var real = QuotaEnforcer.Run(new ClipLibrary(dryDir), new QuotaPolicy { QuotaGb = 1, RetainDays = 30, WatermarkGb = 0 },
+                                         now.AddDays(60));
+            Check(real.DeletedTotal == 2 && Directory.EnumerateFiles(dryDir).Count() == 0, "真跑才删（2 片已清空）");
         }
         finally
         {

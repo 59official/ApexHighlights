@@ -76,6 +76,7 @@ internal static class UiTest
 
         // ---- 批量删除：勾选框、全选、按钮跟着勾选数走 ----
         fail += BatchCheck(lib);
+        fail += QuotaMenuCheck(lib);
 
         Console.WriteLine(fail == 0 ? "[ok] 界面层自检全过" : $"[!] {fail} 项失败");
         return fail == 0 ? 0 : 9;
@@ -276,6 +277,61 @@ internal static class UiTest
     /// 这东西没有控件实体，靠手点只会验「点中了」，验不出「勾选数和按钮文字对不对」。
     /// 另外勾选是按路径存的 —— 重建行之后下标全变，所以这里连 SetClips 之后的重建也一并盯着。
     /// </summary>
+    /// <summary>
+    /// 状态栏「配额 / 保留」那一行点开的菜单：档位齐不齐、点了之后有没有把用户的选择交给宿主。
+    /// 建菜单时不 Show（真弹出来会抢焦点，把后面的断言搅乱）。
+    /// </summary>
+    private static int QuotaMenuCheck(ClipLibrary lib)
+    {
+        int fail = 0;
+        var t = new Thread(() =>
+        {
+            try
+            {
+                var policy = new QuotaPolicy { QuotaGb = 40, RetainDays = 30 };
+                using var form = new LibraryForm(lib, policy);
+                long gotQuota = -1;
+                int gotRetain = -1;
+                form.OnQuotaChanged = (gb, days) => { gotQuota = gb; gotRetain = days; };
+
+                using var menu = form.CreateQuotaMenu();
+                if (menu.Items.Count != 2 || menu.Items[0] is not ToolStripMenuItem cap || menu.Items[1] is not ToolStripMenuItem keep)
+                { Console.WriteLine($"    BAD 配额菜单顶层项数 = {menu.Items.Count}（应为 2）"); fail++; return; }
+
+                if (cap.DropDownItems.Count != QuotaPolicy.QuotaPresets.Length ||
+                    keep.DropDownItems.Count != QuotaPolicy.RetainPresets.Length)
+                { Console.WriteLine($"    BAD 档位数 配额={cap.DropDownItems.Count} 保留={keep.DropDownItems.Count}"); fail++; }
+                else Console.WriteLine($"    ok  状态栏配额菜单有 {cap.DropDownItems.Count} 个配额档 + {keep.DropDownItems.Count} 个保留档（{cap.Text} / {keep.Text}）");
+
+                var sixty = cap.DropDownItems.OfType<ToolStripMenuItem>()
+                    .FirstOrDefault(i => i.Text == QuotaPolicy.QuotaLabel(60));
+                if (sixty is null) { Console.WriteLine("    BAD 找不到 60GB 档"); fail++; return; }
+                sixty.PerformClick();
+                if (gotQuota != 60 || gotRetain != 30)
+                { Console.WriteLine($"    BAD 点 60GB 传出去是 ({gotQuota}, {gotRetain})，应为 (60, 30)"); fail++; }
+                else Console.WriteLine("    ok  点「60GB」→ 宿主收到 (60, 30)");
+
+                var week = keep.DropDownItems.OfType<ToolStripMenuItem>()
+                    .FirstOrDefault(i => i.Text == QuotaPolicy.RetainLabel(7));
+                if (week is null) { Console.WriteLine("    BAD 找不到 7 天档"); fail++; return; }
+                week.PerformClick();
+                if (gotQuota != 40 || gotRetain != 7)
+                { Console.WriteLine($"    BAD 点「7 天」传出去是 ({gotQuota}, {gotRetain})，应为 (40, 7)"); fail++; }
+                else Console.WriteLine("    ok  点「7 天」→ 宿主收到 (40, 7)");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("    BAD 配额菜单自检抛异常：" + ex.Message);
+                fail++;
+            }
+        });
+        t.SetApartmentState(ApartmentState.STA);
+        t.IsBackground = true;
+        t.Start();
+        t.Join(15_000);
+        return fail;
+    }
+
     private static int BatchCheck(ClipLibrary lib)
     {
         int fail = 0;

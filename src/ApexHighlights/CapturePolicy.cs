@@ -24,8 +24,18 @@ public sealed class CapturePolicy
     /// </summary>
     public int BitrateMbps { get; set; } = 20;
 
-    /// <summary>录不录音轨（系统回环 = 游戏声，不碰麦克风）。关掉后片段是无音轨的 mp4。</summary>
+    /// <summary>录不录系统声音（WASAPI 回环 = 游戏声/桌面声）。关掉后如果麦克风也关，片段就是无音轨 mp4。</summary>
     public bool Audio { get; set; } = true;
+
+    /// <summary>
+    /// 录不录麦克风（默认关）。用户 2026-10-29 提的：想自己决定要不要录自己说话。
+    /// 默认关是有意的——录到自己的私聊/环境音比「少录了」更让人难受，想开的人自己去点。
+    /// </summary>
+    public bool Mic { get; set; } = false;
+
+    /// <summary>音轨要不要存在：两个源关掉任意一个都还能有声音，两个都关就没有音轨。</summary>
+    [JsonIgnore]
+    public bool AnyAudio => Audio || Mic;
 
     /// <summary>
     /// 不在录的种类（托盘里关掉的开关）。存 enum 名字，config.json 里能直接读懂；
@@ -110,6 +120,7 @@ public sealed class CapturePolicy
 
             root["BitrateMbps"] = BitrateMbps;
             root["Audio"] = Audio;
+            root["Mic"] = Mic;
             var skips = new JsonArray();
             foreach (var k in SkipKinds) skips.Add(k.ToString());
             root["SkipKinds"] = skips;
