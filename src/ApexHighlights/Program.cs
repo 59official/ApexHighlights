@@ -148,10 +148,6 @@ internal static class Program
 
             if (args.Any(a => a == "--mic-test")) return MicTest.Run();
 
-            // 识别诊断报告：读 console 模式留下的逐帧 CSV，给一份人话结论
-            var diagArg = args.FirstOrDefault(a => a.StartsWith("--diag-report=", StringComparison.OrdinalIgnoreCase));
-            if (diagArg is not null) return DiagReport.Run(diagArg["--diag-report=".Length..].Trim('"'));
-
 
             // 横幅分类的多语言回归（简中/繁中/英文原文）
             if (args.Any(a => a == "--ocr-parse-test")) return OcrParseTest.Run();
@@ -744,7 +740,6 @@ internal static class Program
         Out($"[1] 目标窗口: \"{Native.TitleOf(hwnd)}\"");
         using var cap = new Capture(hwnd, engine)
         {
-            DiagPath = logPath is null ? null : logPath + ".csv",
             TargetFps = fps,
             EncodedFps = fps,
             Bitrate = bitrate,

@@ -61,7 +61,6 @@ else
 fi
 cp packaging/identity/register-identity.ps1 dist/
 # 识别诊断脚本：用户「怎么又没录上」时的第一手工具，跟着便携版一起发
-cp "诊断-识别.bat" dist/
 
 echo "==> 编译安装包"
 # MSYS_NO_PATHCONV：Git Bash 会把 /DAppVersion=… 当成路径改写成 D:\…，ISCC 就不认了

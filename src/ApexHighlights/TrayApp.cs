@@ -313,7 +313,6 @@ internal sealed class TrayApp : ApplicationContext
             _eng = eng;
             _cap = new Capture(hwnd, eng)
             {
-                DiagPath = null,
                 TargetFps = _fps,
                 EncodedFps = _fps,
                 Bitrate = _capture.BitrateBps,
