@@ -74,6 +74,20 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
 [Run]
 Filename: "{app}\{#AppExe}"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags: nowait postinstall skipifsilent
 
+; 注册「身份包」：有了包身份才能声明 graphicsCaptureWithoutBorder，把录制黄框关掉。
+; 提权一次（UAC）—— 包部署服务只认机器级的证书信任，普通用户装不进去。
+; 用户点「否」或失败都不会影响安装结果，只是黄框留着（脚本自己吞掉错误、始终成功返回）。
+Filename: "powershell.exe"; \
+  Parameters: "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""{app}\register-identity.ps1"" -AppDir ""{app}"""; \
+  StatusMsg: "正在注册「无边框录制」组件（会弹一次管理员确认）…"; \
+  Flags: shellexec runhidden waituntilterminated skipifsilent; Verb: runas
+
+[UninstallRun]
+; 反注册放在删文件之前（脚本本身还在），普通权限就够：包是当前用户注册的
+Filename: "powershell.exe"; \
+  Parameters: "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""{app}\register-identity.ps1"" -AppDir ""{app}"" -Unregister"; \
+  Flags: runhidden waituntilterminated; RunOnceId: "ApexHighlightsIdentity"
+
 [UninstallDelete]
 ; 应用自己写出来的东西：配置、日志、释放出来的游戏档案。清掉它们才算真的卸干净
 Type: files; Name: "{app}\config.json"

@@ -56,8 +56,11 @@ internal sealed class Capture : IDisposable
     // 音轨（系统回环 + 可选麦克风 → 混音 → AAC → 内存环形）
     private AacEncoder? _aac;
     private AudioRing? _aRing;
+    private readonly IntPtr _hwnd;         // 被录的那个窗口：进程回环要拿它的 PID
     private LoopbackCapture? _wcap;
-    private LoopbackCapture? _mic;         // 麦克风采集（用户开了才有）
+    private LoopbackCapture? _game;        // 进程回环（只录游戏进程树）
+    private Thread? _gameWatch;            // 进程回环的静默看门狗
+    private LoopbackCapture? _mic;         // 麦克风采集（用户选了「整机 + 麦克风」才有）
     private MicMixer? _micMixer;           // 麦克风队列（由主时钟按帧取走）
     private Thread? _audioFill;
     /// <summary>音频喂数据的串行化：真声音来自 wasapi 线程，补的静音来自 fill 线程，编码器不是线程安全的。</summary>
@@ -73,15 +76,20 @@ internal sealed class Capture : IDisposable
     private volatile bool _audioFillRun;
     /// <summary>环形容量（秒）：运行期重开音轨时要按同样的容量重建 AudioRing。</summary>
     private int _ringCapacitySec = 90;
-    /// <summary>系统声音（游戏声）开不开。</summary>
-    public bool AudioEnabled = true;
-    /// <summary>麦克风开不开。默认关，和 <see cref="CapturePolicy.Mic"/> 保持同义。</summary>
-    public bool MicEnabled;
+    /// <summary>
+    /// 音轨档位，和 <see cref="CapturePolicy.Audio"/> 同义。外面只改这个 + <see cref="SetAudioMode"/>，
+    /// 不要直接摸那几个采集源。
+    /// </summary>
+    public AudioMode Mode = AudioMode.GameOnly;
     public int AudioRate = 48000;
     public int AudioChannels = 2;
     public int AudioBitrate = 160000;
     /// <summary>录完一段是否响一声（用户要的：有提示音、不弹窗）。</summary>
-    public bool BeepOnSave = true;
+    /// <summary>
+    /// 落盘完成的通知（种类 + 时长秒）。提示音/浮层由宿主决定 ——
+    /// 录制器不该知道用户选的是「叮一声」还是「滑出一个小窗」。
+    /// </summary>
+    public event Action<ClipKind, double>? ClipSaved;
 
     private long _frames, _samples, _hits, _encoded, _droppedFrames, _totalMs;
     private long _limiterDrops, _capDrops, _queueDrops, _poolCreated;
@@ -185,6 +193,7 @@ internal sealed class Capture : IDisposable
 
     public Capture(IntPtr hwnd, BannerEngine engine)
     {
+        _hwnd = hwnd;
         _eng = engine;
         _prof = engine.Profile;
         _band = new byte[_prof.Band.W * _prof.Band.H];
@@ -223,6 +232,8 @@ internal sealed class Capture : IDisposable
             new Windows.Graphics.SizeInt32 { Width = Width, Height = Height });
         _session = _pool.CreateCaptureSession(item);
         try { _session.IsCursorCaptureEnabled = false; } catch { }
+        // 能关就把那条黄框关掉（要包身份 + 用户授权过；关了不影响录到的画面）
+        BorderlessAccess.TryEnable(_session);
         _pool.FrameArrived += (_, _) => OnFrame();
         _session.StartCapture();
         _clock.Start();
@@ -252,17 +263,17 @@ internal sealed class Capture : IDisposable
         _ring = new SegmentRing(dir, Width, Height, capacitySec);
         _lib = new ClipLibrary(ClipDir);
 
-        // 音轨：系统回环（+ 用户开了的麦克风）。
+        // 音轨：按用户选的那一档起（只录游戏 / 整机 / 整机+麦 / 不录）。
         // 编码器构造失败不该让视频也停掉，所以整段兜住（StartAudio 内部已经兜了）。
-        if (AudioEnabled || MicEnabled) StartAudio();
+        if (Mode != AudioMode.None) StartAudio();
 
         _encThread = new Thread(EncodeLoop) { IsBackground = true, Name = "encode", Priority = ThreadPriority.AboveNormal };
         _encThread.Start();
     }
 
     /// <summary>
-    /// 起音轨：AAC 编码器 + 音频环形 + 静音补齐线程，再按需起两个采集源（系统回环 / 麦克风）。
-    /// 启动时和「用户把音轨从关拨到开」时都走这里，两条路径不能有第二份实现。
+    /// 起音轨：AAC 编码器 + 音频环形 + 静音补齐线程，再按 <see cref="Mode"/> 起对应的采集源。
+    /// 启动时和「用户换档位」时都走这里，两条路径不能有第二份实现。
     /// </summary>
     private void StartAudio()
     {
@@ -295,15 +306,30 @@ internal sealed class Capture : IDisposable
             return;
         }
 
-        if (AudioEnabled) StartSystemSource();
-        if (MicEnabled) StartMicSource();
+        switch (Mode)
+        {
+            case AudioMode.GameOnly:
+                if (!StartGameSource()) StartSystemSource();     // 进程回环起不来就直接退整机
+                break;
+            case AudioMode.SystemAndMic:
+                StartSystemSource();
+                StartMicSource();
+                break;
+            case AudioMode.SystemOnly:
+                StartSystemSource();
+                break;
+        }
 
-        Log.Write($"[audio] 音轨已开启（{(_aac!.SampleRate)}Hz/{_aac.Channels}ch，" +
-                  $"系统声={(AudioOn && SystemOn ? "开" : "关")}，" +
+        Log.Write($"[audio] 音轨已开启（{_aac!.SampleRate}Hz/{_aac.Channels}ch，{ModeName()}，" +
+                  $"系统声={(SystemOn ? "开" : "关")}，游戏={(GameOn ? "开" : "关")}，" +
                   $"麦克风={(MicOn ? "开" : "关")}{(_audioErr.Length > 0 ? "，" + _audioErr : "")}）");
     }
 
-    /// <summary>起系统回环采集。失败只记一笔：麦克风还可能是好的。</summary>
+    /// <summary>音轨档位的人话名字，日志和菜单共用。</summary>
+    private string ModeName() =>
+        CapturePolicy.AudioLabel(Mode) + (GameFellBack ? "（已回退系统声音）" : "");
+
+    /// <summary>起系统回环采集（整机）。失败只记一笔：别的源还可能是好的。</summary>
     private void StartSystemSource()
     {
         if (_wcap is not null) return;
@@ -332,7 +358,66 @@ internal sealed class Capture : IDisposable
     }
 
     /// <summary>
-    /// 起麦克风采集。设备没有/被独占/被系统禁麦都会失败——那只记一笔，不能把系统声音也拖下水。
+    /// 起进程回环：只抓游戏进程（含子进程树）出声，桌面上的 Discord / 浏览器进不来。
+    /// 返回 false 表示这条链路没建起来，调用方负责退回整机回环。
+    /// </summary>
+    private bool StartGameSource()
+    {
+        if (_game is not null) return true;
+        try
+        {
+            int pid = ProcessIdOf(_hwnd);
+            if (pid <= 0) throw new InvalidOperationException("拿不到窗口所属进程号");
+            var cap = new LoopbackCapture(AudioSourceKind.GameProcess, pid);
+            cap.Start(OnPcm);
+            _game = cap;
+            _audioName = "进程 " + pid;
+            Log.Write($"[audio] 只录游戏：进程回环已开（pid {pid}，含子进程）");
+            _gameWatch = new Thread(() => GameWatchdog(pid)) { IsBackground = true, Name = "audio-gamewatch" };
+            _gameWatch.Start();
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _audioErr = "进程回环启动失败: " + ex.Message;
+            Log.Write("[audio] " + _audioErr + "，改抓整机回环");
+            return false;
+        }
+    }
+
+    private void StopGameSource()
+    {
+        var g = _game;
+        _game = null;
+        try { g?.Dispose(); } catch { }
+    }
+
+    /// <summary>
+    /// 进程回环的看门狗：3 秒一个包都没来，就退回整机回环。
+    ///
+    /// 进程回环坏起来有两种：激活时直接报错（好办，上面那条 catch 就兜住了），
+    /// 或者激活成功但系统打死不给包——不报错、不抛异常，最后录出来一条无声片段，
+    /// 那是最坏的失败方式（用户以为录到了）。所以只能等 3 秒看有没有数据。
+    /// 误判的代价是混进了桌面的声音，比录出无声片段小得多。
+    /// </summary>
+    private void GameWatchdog(int pid)
+    {
+        Thread.Sleep(3000);
+        var cap = _game;
+        if (cap is null || !ReferenceEquals(_game, cap)) return;   // 这期间用户换档了
+        if (cap.Bytes > 0 || cap.Packets > 0) return;
+        Log.Write($"[audio] 进程回环 3 秒没有任何数据（pid {pid}），退回整机回环");
+        try
+        {
+            StopGameSource();
+            GameFellBack = true;
+            StartSystemSource();
+        }
+        catch (Exception ex) { _audioErr = "回退整机回环失败: " + ex.Message; }
+    }
+
+    /// <summary>
+    /// 起麦克风采集。设备没有/被独占/被系统禁麦都会失败——那只记一笔，不能把别的源也拖下水。
     /// </summary>
     private void StartMicSource()
     {
@@ -364,7 +449,7 @@ internal sealed class Capture : IDisposable
     }
 
     /// <summary>
-    /// 关音轨：先停两个源（Dispose 内部会 Join 采集线程并 Stop 客户端），再放编码器和环形。
+    /// 关音轨：先停所有源（Dispose 内部会 Join 采集线程并 Stop 客户端），再放编码器和环形。
     /// 之后 WriteClip 传 null 的 AudioRing，Ring.Prepare 会自动退回「只有视频轨」的封装。
     /// </summary>
     private void StopAudio()
@@ -372,6 +457,7 @@ internal sealed class Capture : IDisposable
         _audioFillRun = false;
 
         StopSystemSource();
+        StopGameSource();
         StopMicSource();
 
         lock (_audioFeedGate)
@@ -387,23 +473,29 @@ internal sealed class Capture : IDisposable
     /// <summary>音轨当前是不是真的在录（关掉或启动失败都为 false）。</summary>
     public bool AudioOn => _aac is not null;
 
-    /// <summary>系统声音这个源在不在录。</summary>
+    /// <summary>整机回环这个源在不在录。</summary>
     public bool SystemOn => _wcap is not null;
+
+    /// <summary>进程回环（只录游戏）这个源在不在录。</summary>
+    public bool GameOn => _game is not null;
 
     /// <summary>麦克风这个源在不在录。</summary>
     public bool MicOn => _mic is not null;
 
+    /// <summary>「只录游戏」是不是已经因为进程回环起不来而退回整机了（托盘菜单要标出来）。</summary>
+    public bool GameFellBack { get; private set; }
+
     /// <summary>
-    /// 运行中改两个声音源：不重开录制、不重建视频链路，正在写的环形照常。
-    /// 两个都关 = 音轨整个关掉；两个都开 = 两个源混在一起进同一路 AAC。
+    /// 运行中换音轨档位：不重开录制、不重建视频链路，正在写的环形照常。
+    /// 「不录声音」= 整条音轨关掉；其它档就是换源，编码器和时间轴都不动。
     /// </summary>
-    public void SetAudioSources(bool system, bool mic)
+    public void SetAudioMode(AudioMode mode)
     {
-        AudioEnabled = system;
-        MicEnabled = mic;
+        Mode = mode;
+        GameFellBack = false;
         try
         {
-            if (!system && !mic)
+            if (mode == AudioMode.None)
             {
                 if (AudioOn) StopAudio();
                 return;
@@ -411,25 +503,47 @@ internal sealed class Capture : IDisposable
 
             if (!AudioOn)
             {
-                StartAudio();            // 内部会按 AudioEnabled/MicEnabled 起对应的源
+                StartAudio();            // 内部会按 Mode 起对应的源
                 return;
             }
 
-            // 音轨已经开着：只调这两个源，别动编码器和时间轴
-            if (system && !SystemOn) StartSystemSource();
-            else if (!system && SystemOn) StopSystemSource();
-            if (mic && !MicOn) StartMicSource();
-            else if (!mic && MicOn) StopMicSource();
+            bool wantSystem = mode is AudioMode.SystemOnly or AudioMode.SystemAndMic;
+            bool wantGame = mode == AudioMode.GameOnly;
+            bool wantMic = mode == AudioMode.SystemAndMic;
 
-            Log.Write($"[audio] 声音源改为：系统声={(SystemOn ? "开" : "关")}，麦克风={(MicOn ? "开" : "关")}");
+            if (wantGame && !GameOn)
+            {
+                StopSystemSource();
+                if (!StartGameSource()) StartSystemSource();
+            }
+            else if (wantSystem && !SystemOn)
+            {
+                StopGameSource();
+                StartSystemSource();
+            }
+
+            if (wantMic && !MicOn) StartMicSource();
+            else if (!wantMic && MicOn) StopMicSource();
+
+            Log.Write($"[audio] 音轨来源改为：{ModeName()}" +
+                      $"（系统声={(SystemOn ? "开" : "关")}，游戏={(GameOn ? "开" : "关")}，麦克风={(MicOn ? "开" : "关")}）");
         }
         catch (Exception ex) { _audioErr = "切换音源失败: " + ex.Message; }
     }
 
-    /// <summary>
-    /// 只拨系统声音（老入口，麦克风保持原样）。
-    /// </summary>
-    public void SetAudioEnabled(bool on) => SetAudioSources(on, MicEnabled);
+    /// <summary>窗口所属进程号（进程回环要它）。拿不到就返回 0。</summary>
+    private static int ProcessIdOf(IntPtr hwnd)
+    {
+        try
+        {
+            GetWindowThreadProcessId(hwnd, out uint pid);
+            return pid > int.MaxValue ? 0 : (int)pid;
+        }
+        catch { return 0; }
+    }
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
 
 
     /// <summary>
@@ -1028,7 +1142,8 @@ internal sealed class Capture : IDisposable
                 throw;
             }
 
-            if (BeepOnSave) Beep.Saved();
+            // 提示交给宿主（托盘）：这里只报「存好了、是什么、多长」
+            ClipSaved?.Invoke(ClipKinds.FromBanner(det.Kind), Math.Max(0, stopUs - startUs) / 1_000_000.0);
             // 新片落盘后立即查一次配额（spec §5 的清理触发点之一）
             MaybeQuotaCheck(true);
             return (path, written);
@@ -1122,10 +1237,11 @@ internal sealed class Capture : IDisposable
         {
             var ac = _aRing.Coverage();
             s += $" 音频={_aRing.TotalFrames}帧/{_aRing.DiskBytes() / 1024}KB 覆盖({ac.From / 1000},{ac.To / 1000})ms";
-            s += $" 源[系统={(_wcap is null ? "关" : "开")} 麦={(MicOn ? "开" : "关")}" +
+            s += $" 源[系统={(_wcap is null ? "关" : "开")} 游戏={(_game is null ? "关" : "开")}{(GameFellBack ? "回退" : "")}" +
+                 $" 麦={(MicOn ? "开" : "关")}" +
                  $"{(MicOn ? $"/{_micMixer?.Frames ?? 0}帧缓" : "")}]";
         }
-        else if (!AudioEnabled && !MicEnabled) s += " 音频=关";
+        else if (Mode == AudioMode.None) s += " 音频=关";
         if (OcrEnabled && _ocrCount > 0)
             s += $" OCR={_ocrCount}次/{_ocrMs}ms 合并={_merged}次";
         if (_ocr.Err.Length > 0) s += $"  ocrErr={_ocr.Err}";

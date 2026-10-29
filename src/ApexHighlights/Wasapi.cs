@@ -9,6 +9,11 @@ internal enum AudioSourceKind
     System,
     /// <summary>默认录音设备 = 麦克风。</summary>
     Microphone,
+    /// <summary>
+    /// 某个进程（含子进程树）自己发出的声音，不含别的程序。
+    /// 走「进程回环」虚拟设备，见 <see cref="LoopbackCapture"/> 里的 ActivateAudioInterfaceAsync。
+    /// </summary>
+    GameProcess,
 }
 
 /// <summary>
@@ -33,13 +38,16 @@ internal sealed class LoopbackCapture : IDisposable
     private readonly AudioSourceKind _kind;
     private readonly int _dataFlow;
     private readonly uint _baseFlags;
+    /// <summary>进程回环时抓哪个进程（0 = 不是进程回环）。</summary>
+    private readonly int _processId;
 
-    public LoopbackCapture(AudioSourceKind kind = AudioSourceKind.System)
+    public LoopbackCapture(AudioSourceKind kind = AudioSourceKind.System, int processId = 0)
     {
         _kind = kind;
+        _processId = processId;
         _dataFlow = kind == AudioSourceKind.Microphone ? DataFlowCapture : DataFlowRender;
-        // 麦克风不能用 LOOPBACK 标志（那是渲染端专属的），只保留事件驱动
-        _baseFlags = kind == AudioSourceKind.Microphone ? 0u : FlagsLoopback;
+        // 麦克风与进程回环都不能带 LOOPBACK 标志（那是「默认渲染设备整机回环」专属的），只保留事件驱动
+        _baseFlags = kind == AudioSourceKind.System ? FlagsLoopback : 0u;
     }
 
     /// <summary>这个实例抓的是哪种流。</summary>
@@ -54,44 +62,68 @@ internal sealed class LoopbackCapture : IDisposable
     [ComImport, Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
     private interface IMMDeviceEnumerator
     {
+        [PreserveSig]
         int EnumAudioEndpoints(int dataFlow, int stateMask, out IntPtr devices);
+        [PreserveSig]
         int GetDefaultAudioEndpoint(int dataFlow, int role, [MarshalAs(UnmanagedType.Interface)] out IMMDevice device);
+        [PreserveSig]
         int GetDevice([MarshalAs(UnmanagedType.LPWStr)] string id, [MarshalAs(UnmanagedType.Interface)] out IMMDevice device);
+        [PreserveSig]
         int RegisterEndpointNotificationCallback(IntPtr callback);
+        [PreserveSig]
         int UnregisterEndpointNotificationCallback(IntPtr callback);
     }
 
     [ComImport, Guid("D666063F-1587-4E43-81F1-B948E807363F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
     private interface IMMDevice
     {
+        [PreserveSig]
         int Activate(ref Guid iid, int clsCtx, IntPtr activationParams, [MarshalAs(UnmanagedType.IUnknown)] out object iface);
+        [PreserveSig]
         int OpenPropertyStore(int access, out IntPtr props);
+        [PreserveSig]
         int GetId([MarshalAs(UnmanagedType.LPWStr)] out string id);
+        [PreserveSig]
         int GetState(out int state);
     }
 
     [ComImport, Guid("1CB9AD4C-DBFA-4C32-B178-C2F568A703B2"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
     private interface IAudioClient
     {
+        [PreserveSig]
         int Initialize(int shareMode, uint streamFlags, long bufferDuration, long periodicity, IntPtr format, IntPtr sessionGuid);
+        [PreserveSig]
         int GetBufferSize(out uint frames);
+        [PreserveSig]
         int GetStreamLatency(out long latency);
+        [PreserveSig]
         int GetCurrentPadding(out uint frames);
+        [PreserveSig]
         int IsFormatSupported(int shareMode, IntPtr format, out IntPtr closestMatch);
+        [PreserveSig]
         int GetMixFormat(out IntPtr format);
+        [PreserveSig]
         int GetDevicePeriod(out long defaultPeriod, out long minimumPeriod);
+        [PreserveSig]
         int Start();
+        [PreserveSig]
         int Stop();
+        [PreserveSig]
         int Reset();
+        [PreserveSig]
         int SetEventHandle(IntPtr handle);
+        [PreserveSig]
         int GetService(ref Guid iid, [MarshalAs(UnmanagedType.Interface)] out object service);
     }
 
     [ComImport, Guid("C8ADBD64-E71E-48A0-A4DE-185C395CD317"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
     private interface IAudioCaptureClient
     {
+        [PreserveSig]
         int GetBuffer(out IntPtr data, out uint frames, out uint flags, out ulong devicePosition, out ulong qpcPosition);
+        [PreserveSig]
         int ReleaseBuffer(uint frames);
+        [PreserveSig]
         int GetNextPacketSize(out uint frames);
     }
 
@@ -119,6 +151,14 @@ internal sealed class LoopbackCapture : IDisposable
     /// <summary>起采集。失败抛异常（上层决定是静默降级还是报错）。</summary>
     public void Start(PcmHandler onPcm)
     {
+        if (_kind == AudioSourceKind.GameProcess)
+        {
+            _client = ActivateProcessLoopback(_processId);
+            DeviceName = "进程 " + _processId;
+            FinishStart(onPcm);
+            return;
+        }
+
         var enumerator = (IMMDeviceEnumerator)new MMDeviceEnumeratorComObject();
         int hr = enumerator.GetDefaultAudioEndpoint(_dataFlow, RoleConsole, out var device);
         if (hr < 0)
@@ -132,59 +172,191 @@ internal sealed class LoopbackCapture : IDisposable
             _client = (IAudioClient)obj;
 
             try { DeviceName = device.GetId(out var id) >= 0 ? ShortId(id) : "?"; } catch { }
-
-            hr = _client.GetMixFormat(out _format);
-            if (hr < 0) throw new COMException($"GetMixFormat 0x{hr:X8}");
-            ParseFormat(_format, out int rate, out int ch);
-            SampleRate = rate; Channels = ch;
-
-            _signal = new AutoResetEvent(false);
-
-            // 先试事件驱动（CPU 最省）；不行退回轮询
-            uint flags = _baseFlags | FlagsEventCallback;
-            long[] durations = { 1_000_000, 200_000, 2_000_000, 0 };   // 100ms / 20ms / 200ms / 引擎默认
-            bool ok = false;
-            string last = "";
-            foreach (var dur in durations)
-            {
-                hr = _client.Initialize(ShareModeShared, flags, dur, 0, _format, IntPtr.Zero);
-                if (hr >= 0) { ok = true; break; }
-                last = $"event dur={dur} 0x{hr:X8}";
-            }
-            if (!ok)
-            {
-                foreach (var dur in durations)
-                {
-                    hr = _client.Initialize(ShareModeShared, _baseFlags, dur, 0, _format, IntPtr.Zero);
-                    if (hr >= 0) { ok = true; flags = _baseFlags; break; }
-                    last += $" | poll dur={dur} 0x{hr:X8}";
-                }
-            }
-            if (!ok) throw new COMException($"IAudioClient.Initialize 全失败：{last}");
-
-            var capIid = typeof(IAudioCaptureClient).GUID;
-            hr = _client.GetService(ref capIid, out var capObj);
-            if (hr < 0) throw new COMException($"GetService(IAudioCaptureClient) 0x{hr:X8}");
-            _capture = (IAudioCaptureClient)capObj;
-
-            if ((flags & FlagsEventCallback) != 0)
-            {
-                hr = _client.SetEventHandle(_signal.SafeWaitHandle.DangerousGetHandle());
-                if (hr < 0) throw new COMException($"SetEventHandle 0x{hr:X8}");
-            }
-
-            hr = _client.Start();
-            if (hr < 0) throw new COMException($"IAudioClient.Start 0x{hr:X8}");
-
-            Running = true;
-            _thread = new Thread(() => Loop(onPcm, (flags & FlagsEventCallback) != 0))
-            {
-                IsBackground = true,
-                Name = "wasapi",
-            };
-            _thread.Start();
+            FinishStart(onPcm);
         }
         finally { Marshal.ReleaseComObject(device); }
+    }
+
+    /// <summary>拿到 IAudioClient 之后的公共部分：定格式 → 初始化 → 起采集线程。</summary>
+    private void FinishStart(PcmHandler onPcm)
+    {
+        int hr = _client!.GetMixFormat(out _format);
+        if (hr < 0)
+        {
+            // 进程回环在部分驱动上不支持 GetMixFormat —— 退回 48k/2ch/16bit 的标准混音格式
+            if (_kind != AudioSourceKind.GameProcess) throw new COMException($"GetMixFormat 0x{hr:X8}");
+            UseFallbackFormat();
+        }
+        else
+        {
+            ParseFormat(_format, out int rate, out int ch);
+            SampleRate = rate; Channels = ch;
+        }
+
+        _signal = new AutoResetEvent(false);
+
+        // 整机回环：LOOPBACK 标志 + 事件驱动；进程回环/麦克风：不能带 LOOPBACK。
+        // 每个变体再按 100ms/20ms/200ms/引擎默认 的周期各试一遍 —— 驱动对周期的容忍度差别很大。
+        uint[] variants = _kind == AudioSourceKind.System
+            ? new[] { _baseFlags | FlagsEventCallback, _baseFlags }
+            : new uint[] { FlagsEventCallback, 0u, FlagsLoopback | FlagsEventCallback, FlagsLoopback };
+        long[] durations = { 1_000_000, 200_000, 2_000_000, 0 };
+        uint flags = 0;
+        bool ok = false;
+        string last = "";
+        foreach (var v in variants)
+        {
+            foreach (var dur in durations)
+            {
+                hr = _client.Initialize(ShareModeShared, v, dur, 0, _format, IntPtr.Zero);
+                if (hr >= 0) { ok = true; flags = v; break; }
+                last += $" [flags=0x{v:X} dur={dur} 0x{hr:X8}]";
+            }
+            if (ok) break;
+        }
+        if (!ok) throw new COMException($"IAudioClient.Initialize 全失败：{last}");
+
+        var capIid = typeof(IAudioCaptureClient).GUID;
+        hr = _client.GetService(ref capIid, out var capObj);
+        if (hr < 0) throw new COMException($"GetService(IAudioCaptureClient) 0x{hr:X8}");
+        _capture = (IAudioCaptureClient)capObj;
+
+        if ((flags & FlagsEventCallback) != 0)
+        {
+            hr = _client.SetEventHandle(_signal.SafeWaitHandle.DangerousGetHandle());
+            if (hr < 0) throw new COMException($"SetEventHandle 0x{hr:X8}");
+        }
+
+        hr = _client.Start();
+        if (hr < 0) throw new COMException($"IAudioClient.Start 0x{hr:X8}");
+
+        Running = true;
+        _thread = new Thread(() => Loop(onPcm, (flags & FlagsEventCallback) != 0))
+        {
+            IsBackground = true,
+            Name = "wasapi",
+        };
+        _thread.Start();
+    }
+
+    /// <summary>GetMixFormat 不可用时手搭一个 48kHz / 立体声 / 16bit 的 WAVEFORMATEX。</summary>
+    private void UseFallbackFormat()
+    {
+        const int ch = 2, rate = 48000, bits = 16;
+        int block = ch * bits / 8;
+        if (_format != IntPtr.Zero) { try { Marshal.FreeCoTaskMem(_format); } catch { } }
+        _format = Marshal.AllocCoTaskMem(18);
+        Marshal.WriteInt16(_format, 0, 1);                  // WAVE_FORMAT_PCM
+        Marshal.WriteInt16(_format, 2, (short)ch);
+        Marshal.WriteInt32(_format, 4, rate);
+        Marshal.WriteInt32(_format, 8, rate * block);
+        Marshal.WriteInt16(_format, 12, (short)block);
+        Marshal.WriteInt16(_format, 14, (short)bits);
+        Marshal.WriteInt16(_format, 16, 0);
+        SampleRate = rate; Channels = ch; _bits = bits; _isPcm = true; _isFloat = false;
+    }
+
+    // ── 进程回环（AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK，Windows 10 2004+）──────────
+    // 整机回环只能抓「扬声器上的一切」，Discord/浏览器全混进来。想让用户只录游戏，
+    // 就得在进程级开一条回环：激活一个挂在 VAD\Process_Loopback 虚拟设备上的 IAudioClient，
+    // 用 PROPVARIANT 告诉系统要抓哪个进程（含它的子进程树）。
+    private const string VirtualProcessLoopback = @"VAD\Process_Loopback";
+    private const int ActivationTypeProcessLoopback = 1;
+    private const int ProcessLoopbackIncludeTree = 0;   // INCLUDE_TARGET_PROCESS_TREE
+    private const int ProcessLoopbackExcludeTree = 1;   // EXCLUDE_TARGET_PROCESS_TREE
+
+    // 注意：这个接口**不能**标 [ComImport] —— 我们自己要在托管代码里实现它（ActivationWaiter），
+    // 而 ComImport 接口是「由 COM 提供的」，CLR 拒绝为它生成调用包装，运行时直接抛
+    // NotImplementedException（E_NOTIMPL），排查起来像激活失败，实际上是接口声明方式错了。
+    [Guid("41D949AB-9862-444A-80F6-C261334DA5EB"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    private interface IActivateAudioInterfaceCompletionHandler
+    {
+        [PreserveSig] int ActivateCompleted(
+            [MarshalAs(UnmanagedType.Interface)] IActivateAudioInterfaceAsyncOperation operation);
+    }
+
+    [ComImport, Guid("72A22D78-CDE4-431D-B8CC-843A71199B6D"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    private interface IActivateAudioInterfaceAsyncOperation
+    {
+        [PreserveSig] int GetActivateResult(out int activateResult,
+            [MarshalAs(UnmanagedType.IUnknown)] out object? activatedInterface);
+    }
+
+    [DllImport("Mmdevapi.dll", ExactSpelling = true, PreserveSig = false)]
+    private static extern void ActivateAudioInterfaceAsync(
+        [MarshalAs(UnmanagedType.LPWStr)] string deviceInterfacePath,
+        [In] ref Guid riid,
+        IntPtr activationParams,
+        [MarshalAs(UnmanagedType.Interface)] IActivateAudioInterfaceCompletionHandler completionHandler,
+        [MarshalAs(UnmanagedType.Interface)] out IActivateAudioInterfaceAsyncOperation operation);
+
+    /// <summary>等 ActivateAudioInterfaceAsync 的回调（回调来自 COM 的线程池线程，所以只用事件同步）。</summary>
+    [ComVisible(true)]
+    [ClassInterface(ClassInterfaceType.None)]
+    private sealed class ActivationWaiter : IActivateAudioInterfaceCompletionHandler, IDisposable
+    {
+        private readonly ManualResetEventSlim _done = new(false);
+        public IAudioClient? Client;
+        public int Hr = unchecked((int)0x80004005);
+
+        public bool Wait(int ms) => _done.Wait(ms);
+
+        public int ActivateCompleted(IActivateAudioInterfaceAsyncOperation operation)
+        {
+            try
+            {
+                int hr = operation.GetActivateResult(out int result, out object? iface);
+                if (hr < 0) Hr = hr;
+                else if (result < 0) Hr = result;
+                else if (iface is IAudioClient client) { Client = client; Hr = 0; }
+                else Hr = unchecked((int)0x80004005);
+            }
+            catch (Exception ex) { Hr = ex.HResult; }
+            finally { _done.Set(); }
+            return 0;
+        }
+
+        public void Dispose() => _done.Dispose();
+    }
+
+    /// <summary>
+    /// 激活一条「只抓某个进程（含子进程）」的回环 IAudioClient。
+    /// 失败抛异常，由上层决定要不要退回整机回环。
+    /// </summary>
+    private static IAudioClient ActivateProcessLoopback(int pid)
+    {
+        if (pid <= 0) throw new ArgumentException("进程回环需要一个有效的进程号", nameof(pid));
+
+        // AUDIOCLIENT_ACTIVATION_PARAMS = { ActivationType; ProcessLoopbackParams{ pid; mode } }，共 12 字节
+        const int paramsBytes = 12;
+        IntPtr blob = Marshal.AllocCoTaskMem(paramsBytes);
+        IntPtr prop = Marshal.AllocCoTaskMem(24);          // PROPVARIANT（x64 上是 24 字节）
+        var waiter = new ActivationWaiter();
+        IActivateAudioInterfaceAsyncOperation? op = null;
+        try
+        {
+            Marshal.WriteInt32(blob, 0, ActivationTypeProcessLoopback);
+            Marshal.WriteInt32(blob, 4, pid);
+            Marshal.WriteInt32(blob, 8, ProcessLoopbackIncludeTree);
+
+            Marshal.WriteInt16(prop, 0, 0x0041);           // VT_BLOB
+            Marshal.WriteInt32(prop, 8, paramsBytes);      // BLOB.cbSize
+            Marshal.WriteIntPtr(prop, 16, blob);           // BLOB.pBlobData
+
+            var iid = typeof(IAudioClient).GUID;
+            ActivateAudioInterfaceAsync(VirtualProcessLoopback, ref iid, prop, waiter, out op);
+            if (!waiter.Wait(3000)) throw new TimeoutException("ActivateAudioInterfaceAsync 3 秒没回调");
+            if (waiter.Client is null)
+                throw new COMException($"进程回环激活失败 0x{waiter.Hr:X8}（进程 {pid} 可能没有音频会话）");
+            return waiter.Client;
+        }
+        finally
+        {
+            if (op is not null) { try { Marshal.ReleaseComObject(op); } catch { } }
+            waiter.Dispose();
+            Marshal.FreeCoTaskMem(prop);
+            Marshal.FreeCoTaskMem(blob);
+        }
     }
 
     private static string ShortId(string id)

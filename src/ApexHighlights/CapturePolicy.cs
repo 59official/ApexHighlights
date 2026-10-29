@@ -5,8 +5,47 @@ using System.Text.Json.Serialization;
 namespace ApexHighlights;
 
 /// <summary>
-/// 录制参数（用户可自调）：画质码率 + 音轨开关 + 逐种类开关 + 成片存哪。
-/// 存在 config.json 的顶层 "BitrateMbps" / "Audio" / "SkipKinds" / "ClipsDir" 字段里，
+/// 音轨来源。四档互斥，托盘里是单选（用户 2026-10-29 定的）。
+///
+/// 分档的理由：整机回环抓的是「扬声器上的一切」，队友的 Discord 语音、后台的音乐全在里面；
+/// 进程回环只抓游戏自己出声。这两种「游戏声」对用户来说是完全不同的东西，所以不能混成一档。
+/// </summary>
+public enum AudioMode
+{
+    /// <summary>不录声音（片段是无音轨 mp4，体积最小）。</summary>
+    None = 0,
+
+    /// <summary>
+    /// 只录游戏进程（默认）。进程级回环，Discord / 浏览器 / 系统提示音进不来。
+    /// 默认给这一档是因为录出来最"干净"——用户要的是集锦，不是桌面录音。
+    /// </summary>
+    GameOnly = 1,
+
+    /// <summary>整机回环 + 麦克风（全都要）。</summary>
+    SystemAndMic = 2,
+
+    /// <summary>整机回环，不含麦克风。</summary>
+    SystemOnly = 3,
+}
+
+/// <summary>
+/// 录制反馈方式。三档互斥（用户 2026-10-29 定的：提示音和浮层会打架，只留一种）。
+/// </summary>
+public enum NoticeMode
+{
+    /// <summary>什么都不提示。</summary>
+    None = 0,
+
+    /// <summary>只响一声「叮」（落盘时）。</summary>
+    Beep = 1,
+
+    /// <summary>右上角滑出浮层（默认）：开始录一条提示、存好一条提示。</summary>
+    Toast = 2,
+}
+
+/// <summary>
+/// 录制参数（用户可自调）：画质码率 + 音轨来源 + 提示方式 + 逐种类开关 + 成片存哪。
+/// 存在 config.json 的顶层 "BitrateMbps" / "AudioMode" / "Notice" / "SkipKinds" / "ClipsDir" 字段里，
 /// 跟配额、阈值共用一个文件。
 ///
 /// 为什么又是独立一个类：DetectPolicy 管「认不认这张横幅」，QuotaPolicy 管「删旧的」，
@@ -24,18 +63,27 @@ public sealed class CapturePolicy
     /// </summary>
     public int BitrateMbps { get; set; } = 20;
 
-    /// <summary>录不录系统声音（WASAPI 回环 = 游戏声/桌面声）。关掉后如果麦克风也关，片段就是无音轨 mp4。</summary>
-    public bool Audio { get; set; } = true;
-
     /// <summary>
-    /// 录不录麦克风（默认关）。用户 2026-10-29 提的：想自己决定要不要录自己说话。
-    /// 默认关是有意的——录到自己的私聊/环境音比「少录了」更让人难受，想开的人自己去点。
+    /// 音轨来源，见 <see cref="AudioMode"/>。默认「只录游戏」。
+    ///
+    /// 老配置里是 Audio/Mic 两个布尔，Load 时会自动折算过来（见 <see cref="Migrate"/>），
+    /// 所以升级不会让谁的音轨突然变了。
     /// </summary>
-    public bool Mic { get; set; } = false;
+    // 属性叫 Audio（代码里读着顺），但 config.json 里写成 AudioMode —— 加上 JsonPropertyName 对齐，
+    // 不然写盘写 AudioMode、读盘读 Audio，用户手改的那份配置永远读不回来。
+    [JsonPropertyName("AudioMode")]
+    public AudioMode Audio { get; set; } = AudioMode.GameOnly;
 
-    /// <summary>音轨要不要存在：两个源关掉任意一个都还能有声音，两个都关就没有音轨。</summary>
+    /// <summary>录制反馈方式，见 <see cref="NoticeMode"/>。默认滑出浮层。</summary>
+    public NoticeMode Notice { get; set; } = NoticeMode.Toast;
+
+    /// <summary>要不要音轨：只有「不录声音」这一档没有。</summary>
     [JsonIgnore]
-    public bool AnyAudio => Audio || Mic;
+    public bool AnyAudio => Audio != AudioMode.None;
+
+    /// <summary>只录游戏进程时，托盘菜单里显示「已回退系统」——进程回环没起来过。</summary>
+    [JsonIgnore]
+    public bool GameFellBack { get; set; }
 
     /// <summary>
     /// 不在录的种类（托盘里关掉的开关）。存 enum 名字，config.json 里能直接读懂；
@@ -77,6 +125,12 @@ public sealed class CapturePolicy
         Converters = { new JsonStringEnumConverter() },
     };
 
+    private static readonly JsonDocumentOptions JsonDoc = new()
+    {
+        CommentHandling = JsonCommentHandling.Skip,
+        AllowTrailingCommas = true,
+    };
+
     /// <summary>换算成 Capture/EncoderChain 用的 bps。</summary>
     public int BitrateBps => BitrateMbps * 1_000_000;
 
@@ -88,7 +142,20 @@ public sealed class CapturePolicy
         {
             if (path is not null && File.Exists(path))
             {
-                var loaded = JsonSerializer.Deserialize<CapturePolicy>(File.ReadAllText(path), Json);
+                var text = File.ReadAllText(path);
+                var root = JsonNode.Parse(text, documentOptions: JsonDoc) as JsonObject ?? new JsonObject();
+
+                // 老配置只有 Audio/Mic 两个布尔，没有 AudioMode。必须**反序列化之前**把它们换掉：
+                // 换成 AudioMode 之前直接 Deserialize 会撞上「布尔值喂给枚举」→ JsonException →
+                // 整份配置退回默认（用户的码率、阈值一起丢），所以先改写 JSON 再反序列化。
+                if (root["AudioMode"] is null)
+                {
+                    root["AudioMode"] = Migrate(Bool(root["Audio"], true), Bool(root["Mic"], false)).ToString();
+                    root.Remove("Audio");
+                    root.Remove("Mic");
+                }
+
+                var loaded = JsonSerializer.Deserialize<CapturePolicy>(root.ToJsonString(), Json);
                 if (loaded is not null) p = loaded;
             }
         }
@@ -96,8 +163,23 @@ public sealed class CapturePolicy
         return Clamp(p);
     }
 
+    private static bool Bool(JsonNode? n, bool fallback)
+    {
+        try { return n is JsonValue v && v.TryGetValue<bool>(out var b) ? b : fallback; }
+        catch { return fallback; }
+    }
+
+    /// <summary>旧版两个布尔 → 四档。(false,true) 那一档已经删了，折成「整机 + 麦克风」保住录音意图。</summary>
+    public static AudioMode Migrate(bool audio, bool mic) => (audio, mic) switch
+    {
+        (false, false) => AudioMode.None,
+        (false, true) => AudioMode.SystemAndMic,
+        (true, true) => AudioMode.SystemAndMic,
+        _ => AudioMode.SystemOnly,
+    };
+
     /// <summary>
-    /// 写回 config.json：只改自己这两个字段，阈值/配额等原样保留。
+    /// 写回 config.json：只改自己的字段，阈值/配额等原样保留。
     /// 跟 DetectPolicy.Save 一个写法 —— 用 JsonObject 局部改，而不是重新序列化整份配置。
     /// </summary>
     public bool Save(string path)
@@ -110,17 +192,16 @@ public sealed class CapturePolicy
                 var text = File.ReadAllText(path);
                 root = string.IsNullOrWhiteSpace(text)
                     ? new JsonObject()
-                    : (JsonNode.Parse(text, documentOptions: new JsonDocumentOptions
-                    {
-                        CommentHandling = JsonCommentHandling.Skip,
-                        AllowTrailingCommas = true,
-                    }) as JsonObject ?? new JsonObject());
+                    : (JsonNode.Parse(text, documentOptions: JsonDoc) as JsonObject ?? new JsonObject());
             }
             else root = new JsonObject();
 
             root["BitrateMbps"] = BitrateMbps;
-            root["Audio"] = Audio;
-            root["Mic"] = Mic;
+            root["AudioMode"] = Audio.ToString();
+            root["Notice"] = Notice.ToString();
+            // 老字段已经没人读了，代码里留着只会让手改配置的人以为它还有效
+            root.Remove("Audio");
+            root.Remove("Mic");
             var skips = new JsonArray();
             foreach (var k in SkipKinds) skips.Add(k.ToString());
             root["SkipKinds"] = skips;
@@ -134,11 +215,13 @@ public sealed class CapturePolicy
         catch { return false; }
     }
 
-    /// <summary>夹到有意义的范围：5–200 Mbps（再低没法看，再高硬盘撑不住）。</summary>
+    /// <summary>夹到有意义的范围：5–200 Mbps（再低没法看，再高硬盘撑不住），枚举值不认识就回默认档。</summary>
     public static CapturePolicy Clamp(CapturePolicy p)
     {
         if (p.BitrateMbps < 5) p.BitrateMbps = 5;
         if (p.BitrateMbps > 200) p.BitrateMbps = 200;
+        if (!Enum.IsDefined(p.Audio)) p.Audio = AudioMode.GameOnly;
+        if (!Enum.IsDefined(p.Notice)) p.Notice = NoticeMode.Toast;
         // 去重，并丢掉本版本已经没有的种类（老配置里可能留着 Kill/Knocked）
         p.SkipKinds = p.SkipKinds?.Where(k => Array.IndexOf(ClipKinds.All, k) >= 0).Distinct().ToList()
                       ?? new List<ClipKind>();
@@ -159,5 +242,51 @@ public sealed class CapturePolicy
         <= 40 => "推荐：细节明显更清楚，体积约 1.5 倍",
         <= 60 => "很清晰，一小时约 20GB",
         _ => "近乎无损，硬盘吃得快",
+    };
+
+    /// <summary>音轨档位在菜单里的顺序（默认档排第一，用户从上往下看就是推荐顺序）。</summary>
+    public static readonly AudioMode[] AudioModes =
+    {
+        AudioMode.GameOnly,
+        AudioMode.SystemAndMic,
+        AudioMode.SystemOnly,
+        AudioMode.None,
+    };
+
+    public static readonly NoticeMode[] NoticeModes =
+    {
+        NoticeMode.Toast,
+        NoticeMode.Beep,
+        NoticeMode.None,
+    };
+
+    public static string AudioLabel(AudioMode m) => m switch
+    {
+        AudioMode.GameOnly => "只录游戏（推荐）",
+        AudioMode.SystemAndMic => "系统声音 + 麦克风",
+        AudioMode.SystemOnly => "系统声音（不含麦克风）",
+        _ => "不录声音",
+    };
+
+    public static string AudioHint(AudioMode m) => m switch
+    {
+        AudioMode.GameOnly => "只抓 Apex 自己的声音；Discord、浏览器音乐不会进来",
+        AudioMode.SystemAndMic => "声卡上的一切 + 你的麦克风",
+        AudioMode.SystemOnly => "声卡上的一切，包括队友语音；不录麦克风",
+        _ => "片段没有音轨，体积最小",
+    };
+
+    public static string NoticeLabel(NoticeMode n) => n switch
+    {
+        NoticeMode.Toast => "滑出提示（推荐）",
+        NoticeMode.Beep => "只响一声",
+        _ => "不提示",
+    };
+
+    public static string NoticeHint(NoticeMode n) => n switch
+    {
+        NoticeMode.Toast => "右上角滑出一个小窗，开始录和存好各一次",
+        NoticeMode.Beep => "存好时「叮」一声，不动画面",
+        _ => "完全静默",
     };
 }

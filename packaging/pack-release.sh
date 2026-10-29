@@ -51,6 +51,16 @@ echo "==> publish dist（self-contained，用户不需要装 .NET）"
 dotnet publish src/ApexHighlights/ApexHighlights.csproj -c Release -r win-x64 \
   --self-contained true -p:PublishSingleFile=false -p:DebugType=none -o dist -v q
 
+echo "==> 生成身份包（sparse MSIX，用来关掉录制黄框）"
+# 失败不算致命：没有它安装包照样能装，只是黄框关不掉（IsBorderRequired 那条路走不通）
+if powershell -NoProfile -ExecutionPolicy Bypass -File packaging/make-identity.ps1 -Version "$VERSION"; then
+  cp packaging/identity/out/ApexHighlights.Identity.msix dist/
+  cp packaging/identity/out/ApexHighlights.cer        dist/
+else
+  echo "   （身份包没做出来，这一版没有无边框录制；其余功能不受影响）" >&2
+fi
+cp packaging/identity/register-identity.ps1 dist/
+
 echo "==> 编译安装包"
 # MSYS_NO_PATHCONV：Git Bash 会把 /DAppVersion=… 当成路径改写成 D:\…，ISCC 就不认了
 MSYS_NO_PATHCONV=1 "$ISCC" /Q "/DAppVersion=$VERSION" packaging/ApexHighlights.iss

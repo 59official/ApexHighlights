@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  「身份包」（sparse MSIX / package with external location）的清单。
+
+  它里面没有我们的程序 —— 程序仍然躺在安装目录里。这个包唯一的作用是给
+  ApexHighlights.exe 一个「包身份」，因为 graphicsCaptureWithoutBorder
+  这个能力只能写在包清单里，绿色 exe 永远拿不到。
+
+  三个硬约束，改之前先想清楚：
+  1. Identity@Publisher 必须和签名证书的 Subject 完全一致（现在是 CN=ApexHighlights）。
+  2. AllowExternalContent=true，否则系统会以为包里自带文件，注册时找不到 exe。
+  3. Capabilities 里必须有 runFullTrust + unvirtualizedResources，
+     否则这个「包」跑的不是普通桌面程序，我们的 Win32 调用会全部失灵。
+
+  graphicsCaptureWithoutBorder 是 restricted capability：
+  sideload 不需要微软审核，但用户机器必须信任签名证书（安装器会把公钥导进
+  「受信任的人」）。
+-->
+<Package IgnorableNamespaces="uap uap10 rescap"
+         xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+         xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+         xmlns:uap10="http://schemas.microsoft.com/appx/manifest/uap/windows10/10"
+         xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities">
+
+  <Identity Name="ApexHighlights"
+            Publisher="CN=ApexHighlights"
+            Version="__VERSION__"
+            ProcessorArchitecture="neutral" />
+
+  <Properties>
+    <DisplayName>ApexHighlights</DisplayName>
+    <PublisherDisplayName>ApexHighlights</PublisherDisplayName>
+    <Logo>Assets\StoreLogo.png</Logo>
+    <uap10:AllowExternalContent>true</uap10:AllowExternalContent>
+  </Properties>
+
+  <Resources>
+    <Resource Language="zh-cn" />
+    <Resource Language="en-us" />
+  </Resources>
+
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.19041.0" MaxVersionTested="10.0.26100.0" />
+  </Dependencies>
+
+  <Capabilities>
+    <rescap:Capability Name="runFullTrust" />
+    <rescap:Capability Name="unvirtualizedResources" />
+    <!-- 关掉录制窗口外面那条黄框的唯一官方途径 -->
+    <rescap:Capability Name="graphicsCaptureWithoutBorder" />
+  </Capabilities>
+
+  <Applications>
+    <Application Id="ApexHighlights"
+                 Executable="ApexHighlights.exe"
+                 uap10:TrustLevel="mediumIL"
+                 uap10:RuntimeBehavior="win32App">
+      <!-- AppListEntry=none：这是身份包，不是要给用户点的应用，别出现在开始菜单里 -->
+      <uap:VisualElements AppListEntry="none"
+                          DisplayName="ApexHighlights"
+                          Description="Apex 精彩片段自动录制"
+                          BackgroundColor="transparent"
+                          Square150x150Logo="Assets\Square150x150Logo.png"
+                          Square44x44Logo="Assets\Square44x44Logo.png" />
+    </Application>
+  </Applications>
+</Package>

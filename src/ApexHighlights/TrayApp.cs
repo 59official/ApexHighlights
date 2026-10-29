@@ -35,7 +35,6 @@ internal sealed class TrayApp : ApplicationContext
     private int _fps;
     private string _title;
     private readonly bool _openUiFirst;
-    private readonly bool _beep;
     private readonly bool _ocr;
     private readonly int _fakeHit;
     private readonly int _selfTest;
@@ -71,7 +70,6 @@ internal sealed class TrayApp : ApplicationContext
         _title = title;
         _fps = fps;
         _openUiFirst = openUiFirst;
-        _beep = beep;
         _ocr = ocr;
         _fakeHit = fakeHit;
         _selfTest = selfTest;
@@ -93,6 +91,7 @@ internal sealed class TrayApp : ApplicationContext
         menu.Items.Add(BuildMergeMenu());
         menu.Items.Add(BuildBitrateMenu());
         menu.Items.Add(BuildAudioMenu());
+        menu.Items.Add(BuildNoticeMenu());
         menu.Items.Add(BuildKindsMenu());
         menu.Items.Add(BuildQuotaMenu());
         menu.Items.Add(new ToolStripSeparator());
@@ -172,22 +171,33 @@ internal sealed class TrayApp : ApplicationContext
                         say($"改前码率 = {EffectiveBitrateMbps}Mbps");
                         ClickBitrate(40);
                         say($"点 40Mbps 之后 = {EffectiveBitrateMbps}Mbps，采集器里 Bitrate = {(_cap?.Bitrate.ToString() ?? "无采集")}");
-                        say($"音轨菜单 = {FindAudioRoot()?.Text ?? "找不到"}，改前 = 系统{(EffectiveAudio ? "开" : "关")}/麦{(EffectiveMic ? "开" : "关")}，实际在录 = {(_cap?.AudioOn.ToString() ?? "无采集")}");
-                        ClickAudio(false, false);
-                        say($"两个都关之后 = {FindAudioRoot()?.Text}，实际在录 = {(_cap?.AudioOn.ToString() ?? "无采集")}");
+                        say($"音轨菜单 = {FindAudioRoot()?.Text ?? "找不到"}，改前 = {CapturePolicy.AudioLabel(_capture.Audio)}，实际在录 = {(_cap?.AudioOn.ToString() ?? "无采集")}");
+                        ClickAudio(AudioMode.None);
+                        say($"「不录声音」之后 = {FindAudioRoot()?.Text}，实际在录 = {(_cap?.AudioOn.ToString() ?? "无采集")}");
                         say("config.json 现在是 " +
                             (File.Exists(_cfgPath) ? string.Join(" ", File.ReadAllLines(_cfgPath)) : "(没写)"));
                         // 再开回来：验证 StopAudio/StartAudio 往返没问题（这是最容易踩坑的一条路径）
-                        ClickAudio(true, false);
-                        say($"只开系统声之后 = {FindAudioRoot()?.Text}，实际在录 = {(_cap?.AudioOn.ToString() ?? "无采集")}，系统源 = {(_cap?.SystemOn.ToString() ?? "无采集")}");
+                        ClickAudio(AudioMode.GameOnly);
+                        say($"「只录游戏」之后 = {FindAudioRoot()?.Text}，实际在录 = {(_cap?.AudioOn.ToString() ?? "无采集")}，" +
+                            $"游戏源 = {(_cap?.GameOn.ToString() ?? "无采集")}，回退 = {(_cap?.GameFellBack.ToString() ?? "无采集")}");
+                        ClickAudio(AudioMode.SystemOnly);
+                        say($"「系统声音」之后 = {FindAudioRoot()?.Text}，系统源 = {(_cap?.SystemOn.ToString() ?? "无采集")}，游戏源 = {(_cap?.GameOn.ToString() ?? "无采集")}");
                         // 麦克风：这台机器上可能没有录音设备，所以这里验的是「菜单/配置/采集器状态一致」，
-                        // 真开机器的能力由 --audio-test / --mic-test 负责
-                        ClickAudio(true, true);
-                        say($"再开麦克风之后 = {FindAudioRoot()?.Text}，配置 Mic = {_capture.Mic}，采集器里麦克风 = {(_cap?.MicOn.ToString() ?? "无采集")}");
+                        // 真开设备的能力由 --audio-test / --mic-test 负责
+                        ClickAudio(AudioMode.SystemAndMic);
+                        say($"「系统+麦克风」之后 = {FindAudioRoot()?.Text}，采集器里麦克风 = {(_cap?.MicOn.ToString() ?? "无采集")}");
                         say("config.json 现在是 " +
                             (File.Exists(_cfgPath) ? string.Join(" ", File.ReadAllLines(_cfgPath)) : "(没写)"));
-                        ClickAudio(true, false);
-                        say($"关掉麦克风之后 = {FindAudioRoot()?.Text}，配置 Mic = {_capture.Mic}，采集器里麦克风 = {(_cap?.MicOn.ToString() ?? "无采集")}");
+                        ClickAudio(AudioMode.GameOnly);
+                        say($"回到「只录游戏」之后 = {FindAudioRoot()?.Text}");
+                        // 提示三档：只验菜单选中态和落盘，浮层本身由 --ui-test 的离屏用例管
+                        say($"录制提示菜单 = {FindNoticeRoot()?.Text ?? "找不到"}");
+                        ClickNotice(NoticeMode.Beep);
+                        say($"点「只响一声」之后 = {FindNoticeRoot()?.Text}，配置 Notice = {_capture.Notice}");
+                        ClickNotice(NoticeMode.None);
+                        say($"点「不提示」之后 = {FindNoticeRoot()?.Text}，配置 Notice = {_capture.Notice}");
+                        ClickNotice(NoticeMode.Toast);
+                        say($"点回「滑出提示」之后 = {FindNoticeRoot()?.Text}，配置 Notice = {_capture.Notice}");
                         ClickBitrate(20);
                         say($"点回 20Mbps 之后 = {EffectiveBitrateMbps}Mbps");
                         // 种类开关：关掉「助攻击倒」，看闸门真的不切片，再开回来
@@ -306,9 +316,7 @@ internal sealed class TrayApp : ApplicationContext
             };
             _cap.GopFrames = _fps;
             _cap.Quota = _policy;
-            _cap.AudioEnabled = _capture.Audio;
-            _cap.MicEnabled = _capture.Mic;
-            _cap.BeepOnSave = _beep;
+            _cap.Mode = _capture.Audio;
             _cap.OcrEnabled = _ocr;
             _cap.MergeMs = _detect.MergeSec * 1000;
             // 种类开关：闭包捕获的是同一个 CapturePolicy 实例，所以托盘里再关/开也立刻生效，
@@ -316,6 +324,7 @@ internal sealed class TrayApp : ApplicationContext
             _cap.KindFilter = k => _capture.Records(k);
             _cap.FakeHitAtSec = _fakeHit;
             _cap.Detected += OnDetected;
+            _cap.ClipSaved += OnClipSaved;
             _cap.EnableEncoding(90);
             var rep = _cap.RunQuotaCheck();
 
@@ -326,8 +335,7 @@ internal sealed class TrayApp : ApplicationContext
             // 捕获成功 = 控制台可以从这一刻起算 5 秒后藏掉（用户要的「长亮 5 秒」）
             if (_captureStartMs < 0) _captureStartMs = _sinceStart.ElapsedMilliseconds;
             _statusItem.Text = $"录制中 {_cap.Width}×{_cap.Height} @{_fps}fps";
-            _icon.ShowBalloonTip(3000, "ApexHighlights",
-                $"开始录制 {Native.TitleOf(hwnd)}\n命中击倒横幅会自动存一段。", ToolTipIcon.Info);
+            NoticeStart(_cap.Width, _cap.Height);
         }
         catch (Exception ex)
         {
@@ -677,65 +685,139 @@ internal sealed class TrayApp : ApplicationContext
     }
 
     /// <summary>
-    /// 「音轨」子菜单：两个独立的声音源——系统回环（游戏声）和麦克风（自己说话）。
-    /// 两个都关 = 后续片段无声；只开麦克风也行（游戏安静时的解说就不会丢）。
+    /// 「音轨」子菜单：四档单选（只录游戏 / 系统 + 麦克风 / 系统声音 / 不录声音）。
+    ///
+    /// 以前是两个独立勾选（系统声、麦克风），但「只录游戏进程」和「整机回环」是互斥的两种抓法，
+    /// 勾选表达不出来，所以改成单选。档位顺序见 <see cref="CapturePolicy.AudioModes"/>。
     /// </summary>
     private ToolStripMenuItem BuildAudioMenu()
     {
         var root = new ToolStripMenuItem("音轨");
-        var sysItem = new ToolStripMenuItem("系统声音（游戏 / 桌面）") { Tag = "sys", CheckOnClick = true };
-        var micItem = new ToolStripMenuItem("麦克风（自己说话）") { Tag = "mic", CheckOnClick = true };
-        var items = new[] { sysItem, micItem };
+        var items = new List<ToolStripMenuItem>();
 
         void Refresh()
         {
-            var sys = EffectiveAudio;
-            var mic = EffectiveMic;
-            sysItem.Checked = sys;
-            micItem.Checked = mic;
-            // 想开但没开成（没有默认播放/录音设备之类）时得让用户看得出来
-            var broken = (sys && _cap is not null && !_cap.SystemOn) || (mic && _cap is not null && !_cap.MicOn);
-            root.Text = (sys, mic) switch
-            {
-                (true, true) => "音轨（系统+麦克风）",
-                (true, false) => "音轨（仅系统）",
-                (false, true) => "音轨（仅麦克风）",
-                _ => "音轨（关）",
-            };
-            if (broken) root.Text += "·异常";
-            _ = items;
+            var mode = _cap?.Mode ?? _capture.Audio;
+            foreach (var it in items) it.Checked = (AudioMode)it.Tag! == mode;
+
+            root.Text = "音轨（" + ShortAudio(mode) + "）";
+            // 只录游戏、但进程回环没起来（已经退回整机抓了）：菜单上必须看得出来，
+            // 否则用户会以为 Discord 的声音没被录进去，其实录进去了
+            if (mode == AudioMode.GameOnly && _cap?.GameFellBack == true) root.Text = "音轨（只录游戏·已回退系统）";
+            else if (mode != AudioMode.None && _cap is not null && !_cap.AudioOn) root.Text += "·异常";
         }
 
-        // CheckOnClick 会先翻转 Checked 再触发 Click，所以这里读到的是「用户想要的状态」
-        sysItem.Click += (_, _) => ApplyAudio(sysItem.Checked, micItem.Checked, Refresh);
-        micItem.Click += (_, _) => ApplyAudio(sysItem.Checked, micItem.Checked, Refresh);
-        root.DropDownItems.Add(sysItem);
-        root.DropDownItems.Add(micItem);
+        foreach (var m in CapturePolicy.AudioModes)
+        {
+            var it = new ToolStripMenuItem(CapturePolicy.AudioLabel(m))
+            {
+                Tag = m,
+                ToolTipText = CapturePolicy.AudioHint(m),
+            };
+            it.Click += (_, _) => ApplyAudio(m, Refresh);
+            root.DropDownItems.Add(it);
+            items.Add(it);
+        }
 
         root.DropDownOpening += (_, _) => Refresh();
         Refresh();
         return root;
     }
 
-    /// <summary>系统声音该不该开：运行中问采集器，没在录看配置。</summary>
-    private bool EffectiveAudio => _cap is not null ? _cap.AudioEnabled : _capture.Audio;
-
-    /// <summary>麦克风该不该开，同上。</summary>
-    private bool EffectiveMic => _cap is not null ? _cap.MicEnabled : _capture.Mic;
-
-    /// <summary>改两个声音源：内存配置 → 就地起停采集器里的源 → 落盘。</summary>
-    private void ApplyAudio(bool system, bool mic, Action? after = null)
+    /// <summary>根菜单里只写短名字——括号已经占了一层，全称塞进去太长。</summary>
+    private static string ShortAudio(AudioMode m) => m switch
     {
-        _capture.Audio = system;
-        _capture.Mic = mic;
-        try { _cap?.SetAudioSources(system, mic); }
-        catch (Exception ex) { Log.Write("[tray] 切音源失败: " + ex.Message); }
+        AudioMode.GameOnly => "只录游戏",
+        AudioMode.SystemAndMic => "系统+麦克风",
+        AudioMode.SystemOnly => "系统声音",
+        _ => "关",
+    };
+
+    /// <summary>改音轨档位：内存配置 → 就地换采集源的档 → 落盘。</summary>
+    private void ApplyAudio(AudioMode mode, Action? after = null)
+    {
+        _capture.Audio = mode;
+        try { _cap?.SetAudioMode(mode); }
+        catch (Exception ex) { Log.Write("[tray] 切音轨失败: " + ex.Message); }
 
         var ok = _capture.Save(_cfgPath);
-        Log.Write($"[audio] 声音源设为 系统声={(system ? "开" : "关")}、麦克风={(mic ? "开" : "关")}" +
-                  $"（保存到 {_cfgPath}：{(ok ? "成功" : "失败")}）");
+        Log.Write($"[audio] 音轨设为 {CapturePolicy.AudioLabel(mode)}（保存到 {_cfgPath}：{(ok ? "成功" : "失败")}）");
         after?.Invoke();
         RefreshStatus();
+    }
+
+    /// <summary>
+    /// 「录制提示」子菜单：三档单选（滑出浮层 / 只响一声 / 不提示）。
+    /// 提示音和浮层同时来会打架，所以是单选而不是两个开关。
+    /// </summary>
+    private ToolStripMenuItem BuildNoticeMenu()
+    {
+        var root = new ToolStripMenuItem("录制提示");
+        var items = new List<ToolStripMenuItem>();
+
+        void Refresh()
+        {
+            foreach (var it in items) it.Checked = (NoticeMode)it.Tag! == _capture.Notice;
+            root.Text = "录制提示（" + ShortNotice(_capture.Notice) + "）";
+        }
+
+        foreach (var n in CapturePolicy.NoticeModes)
+        {
+            var it = new ToolStripMenuItem(CapturePolicy.NoticeLabel(n))
+            {
+                Tag = n,
+                ToolTipText = CapturePolicy.NoticeHint(n),
+            };
+            it.Click += (_, _) => ApplyNotice(n, Refresh);
+            root.DropDownItems.Add(it);
+            items.Add(it);
+        }
+
+        root.DropDownOpening += (_, _) => Refresh();
+        Refresh();
+        return root;
+    }
+
+    private static string ShortNotice(NoticeMode n) => n switch
+    {
+        NoticeMode.Toast => "滑出浮层",
+        NoticeMode.Beep => "提示音",
+        _ => "关",
+    };
+
+    /// <summary>改提示方式。不需要动采集器——提示是宿主的事，录制器只负责报事件。</summary>
+    private void ApplyNotice(NoticeMode mode, Action? after = null)
+    {
+        _capture.Notice = mode;
+        var ok = _capture.Save(_cfgPath);
+        Log.Write($"[notice] 录制提示设为 {CapturePolicy.NoticeLabel(mode)}（保存到 {_cfgPath}：{(ok ? "成功" : "失败")}）");
+        after?.Invoke();
+        RefreshStatus();
+    }
+
+    /// <summary>
+    /// 开录提示。只有「滑出浮层」这一档会在开录时说话 —— 另外两档不该在开录时打扰，
+    /// 用户选提示音要的是「存好了告诉我」，不是「开机式的一串响动」。
+    /// </summary>
+    private void NoticeStart(int w, int h)
+    {
+        if (_capture.Notice != NoticeMode.Toast) return;
+        Toast.Show($"{h}p · {_fps}fps", "ApexHighlights正在录制");
+    }
+
+    /// <summary>
+    /// 存好一段的通知。录制线程调过来，得切回 UI 线程再弹窗/响铃。
+    /// 盯的是 _capture.Notice 而不是保存那一刻的快照：用户在存盘途中改了档位，以新档为准。
+    /// </summary>
+    private void OnClipSaved(ClipKind kind, double seconds)
+    {
+        if (_capture.Notice == NoticeMode.None) return;
+        _marshal.BeginInvoke(() =>
+        {
+            if (_capture.Notice == NoticeMode.Beep) { Beep.Saved(); return; }
+            if (_capture.Notice == NoticeMode.Toast)
+                Toast.Show($"{seconds:F0} 秒 · {ClipKinds.Label(kind)}", "ApexHighlights已录制");
+        });
     }
 
     /// <summary>
@@ -1176,17 +1258,32 @@ internal sealed class TrayApp : ApplicationContext
         _icon.ContextMenuStrip?.Items.OfType<ToolStripMenuItem>()
             .FirstOrDefault(i => i.Text.StartsWith("音轨", StringComparison.Ordinal));
 
-    /// <summary>自检用：把两个声音源都拨到指定状态（sys/mic）。</summary>
-    private void ClickAudio(bool sys, bool mic)
+    /// <summary>自检用：点到某个音轨档位（等价于用户在菜单里点那一项）。</summary>
+    private void ClickAudio(AudioMode mode)
     {
         var root = FindAudioRoot();
         if (root is null) { Log.Write("[t] 找不到音轨菜单"); return; }
-        var sysItem = root.DropDownItems.OfType<ToolStripMenuItem>().FirstOrDefault(i => (i.Tag as string) == "sys");
-        var micItem = root.DropDownItems.OfType<ToolStripMenuItem>().FirstOrDefault(i => (i.Tag as string) == "mic");
-        if (sysItem is null || micItem is null) { Log.Write("[t] 音轨菜单缺项"); return; }
-        if (sysItem.Checked != sys) sysItem.PerformClick();
-        if (micItem.Checked != mic) micItem.PerformClick();
+        var hit = root.DropDownItems.OfType<ToolStripMenuItem>()
+            .FirstOrDefault(i => i.Tag is AudioMode m && m == mode);
+        if (hit is null) { Log.Write($"[t] 音轨菜单缺档位 {mode}"); return; }
+        if (!hit.Checked) hit.PerformClick();
     }
+
+    /// <summary>自检用：点到某个提示档位。</summary>
+    private void ClickNotice(NoticeMode mode)
+    {
+        var root = FindNoticeRoot();
+        if (root is null) { Log.Write("[t] 找不到录制提示菜单"); return; }
+        var hit = root.DropDownItems.OfType<ToolStripMenuItem>()
+            .FirstOrDefault(i => i.Tag is NoticeMode n && n == mode);
+        if (hit is null) { Log.Write($"[t] 录制提示菜单缺档位 {mode}"); return; }
+        if (!hit.Checked) hit.PerformClick();
+    }
+
+    /// <summary>自检用：找到「录制提示」根菜单项。</summary>
+    private ToolStripMenuItem? FindNoticeRoot() =>
+        _icon.ContextMenuStrip?.Items.OfType<ToolStripMenuItem>()
+            .FirstOrDefault(i => i.Text.StartsWith("录制提示", StringComparison.Ordinal));
 
     /// <summary>自检用：找到「容量与保留」根菜单项。</summary>
     private ToolStripMenuItem? FindQuotaRoot() =>

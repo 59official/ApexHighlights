@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  应用清单（side-by-side）。
+
+  这里只有一件事是必须的：把 exe 和「身份包」绑起来。
+  <msix> 里的 publisher / packageName / applicationId 三个值必须和
+  packaging/identity/AppxManifest.xml 里的 Identity@Publisher / Identity@Name / Application@Id
+  一字不差 —— 对不上不会报错，只会「注册成功但运行时没有包身份」，
+  然后关黄框那步静默失效，排查起来极难受。
+
+  注意：不要在这里声明 dpiAware/dpiAwareness。
+  分辨率意识由 Program.cs 的 Application.SetHighDpiMode(PerMonitorV2) 在运行时设，
+  清单里一旦写死，程序里那次调用会被系统忽略。
+-->
+<assembly manifestVersion="1.0" xmlns="urn:schemas-microsoft-com:asm.v1">
+  <assemblyIdentity version="1.0.0.0" name="ApexHighlights.app" />
+
+  <msix xmlns="urn:schemas-microsoft-com:msix.v1"
+        publisher="CN=ApexHighlights"
+        packageName="ApexHighlights"
+        applicationId="ApexHighlights" />
+</assembly>

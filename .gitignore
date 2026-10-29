@@ -43,3 +43,8 @@ desktop.ini
 
 # 运行时配置（阈值/配额），用户机器上各不相同，不入库
 config.json
+
+# 身份包的自签证书（私钥）与中间产物，只留在本机
+packaging/.secrets/
+packaging/identity/out/
+packaging/identity/stage/

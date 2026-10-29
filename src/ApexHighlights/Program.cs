@@ -19,6 +19,22 @@ internal static class Program
                 return 0;
             }
 
+            // 打包用：身份包（sparse MSIX）要的那几张 png 从同一份绘制代码出，
+            // 免得商店资产和 exe 图标是两张脸。
+            var assetsArg = args.FirstOrDefault(a => a.StartsWith("--make-assets=", StringComparison.OrdinalIgnoreCase));
+            if (assetsArg is not null)
+            {
+                var dir = assetsArg[14..];
+                Directory.CreateDirectory(dir);
+                foreach (var (name, size) in new[] { ("StoreLogo.png", 50), ("Square44x44Logo.png", 44), ("Square150x150Logo.png", 150) })
+                {
+                    using var bmp = AppIcon.Render(size);
+                    bmp.Save(Path.Combine(dir, name), System.Drawing.Imaging.ImageFormat.Png);
+                }
+                Console.WriteLine($"[icon] 身份包资产已写入 {Path.GetFullPath(dir)}（StoreLogo/Square44/Square150）");
+                return 0;
+            }
+
             string game = "apex";
             string? logPath = null, title = null, offline = null;
             int fps = 60, gop = 0, fakeHit = 0, bitrate = 20_000_000, dump = 0, duration = 0, traySelfTest = 0;
@@ -46,8 +62,8 @@ internal static class Program
                 else if (a.StartsWith("--fps=", StringComparison.OrdinalIgnoreCase)) fps = int.Parse(a[6..]);
                 else if (a.StartsWith("--bitrate=", StringComparison.OrdinalIgnoreCase)) { bitrate = int.Parse(a[10..]) * 1_000_000; bitrateGiven = true; }
                 else if (a == "--no-encode") encode = false;
-                else if (a == "--no-audio") audio = false;
-                else if (a == "--no-beep") beep = false;
+                else if (a == "--no-audio") audio = false;      // = 音轨「不录声音」那一档
+                else if (a == "--no-beep") beep = false;        // = 录制提示「不提示」那一档
                 else if (a == "--no-ocr") ocr = false;
                 else if (a == "--tray") tray = true;
                 else if (a == "--no-tray") tray = false;
@@ -71,7 +87,27 @@ internal static class Program
 
             if (args.Any(a => a == "--quota-test")) return QuotaTest.Run();
 
+            if (args.Any(a => a == "--policy-test")) return PolicyTest.Run();
+
             if (args.Any(a => a == "--mic-test")) return MicTest.Run();
+
+            // 浮层提示的视觉自检：弹出来，在滑入/停留/滑出三个时刻各截一张图
+            if (args.Any(a => a.StartsWith("--toast-test", StringComparison.Ordinal)))
+            {
+                var dir = args.Where(a => a.StartsWith("--toast-test=", StringComparison.Ordinal))
+                              .Select(a => a["--toast-test=".Length..]).FirstOrDefault()
+                          ?? Path.Combine("captures");
+                return ToastTest.Run(dir);
+            }
+
+            // 进程回环（只录游戏）的自检：把探针挂在自己进程上，播一声自己的提示音看抓不抓得到
+            if (args.Any(a => a.StartsWith("--audio-probe", StringComparison.Ordinal)))
+            {
+                var probeMs = args.Where(a => a.StartsWith("--audio-probe=", StringComparison.Ordinal))
+                                  .Select(a => int.TryParse(a["--audio-probe=".Length..], out var v) ? v : 2000)
+                                  .DefaultIfEmpty(2000).First();
+                return AudioProbe.Run(probeMs);
+            }
 
             if (args.Any(a => a == "--lib-list" || a == "--quota-run"))
                 return LibCli(args);
@@ -164,14 +200,16 @@ internal static class Program
             // 然后把这个「最终生效值」同时喂给采集器和托盘菜单 —— 两边显示必须一致。
             var capture = CapturePolicy.Load(cfgPath);
             if (bitrateGiven && bitrate > 0) capture.BitrateMbps = Math.Max(1, bitrate / 1_000_000);
-            if (!audio) capture.Audio = false;
+            if (!audio) capture.Audio = AudioMode.None;
+            if (!beep) capture.Notice = NoticeMode.None;
             capture = CapturePolicy.Clamp(capture);
             bitrate = capture.BitrateBps;
-            audio = capture.Audio;
+            audio = capture.Audio != AudioMode.None;
             // 成片目录：必须在 Capture 构造之前定下来（Capture.ClipDir 的默认值读 Paths.Clips）
             Paths.SetClipsRoot(capture.ClipsDir);
             Console.WriteLine($"[2d] 画质码率 {capture.BitrateMbps}Mbps（config.json 的 BitrateMbps，托盘「画质码率」可调）");
-            Console.WriteLine($"[2e] 音轨 {AudioSummary(capture)}（config.json 的 Audio / Mic，托盘「音轨」可调）");
+            Console.WriteLine($"[2e] 音轨 {AudioSummary(capture)}，提示 {CapturePolicy.NoticeLabel(capture.Notice)}" +
+                              $"（config.json 的 AudioMode / Notice，托盘里可调）");
             Console.WriteLine($"[2f] 成片目录 {Paths.Clips}{(capture.ClipsDir.Length == 0 ? "（默认）" : "")}（config.json 的 ClipsDir，托盘「片段目录」可改）");
 
             return offline is not null
@@ -524,14 +562,16 @@ internal static class Program
         }
 
         // 这些启动行也用 Log.Write：托盘模式控制台会被藏掉，只有写进日志才能事后核对
-        Log.Write($"[1] 托盘常驻：目标 \"{title}\"，{fps}fps {capture.BitrateMbps}Mbps，音轨{AudioSummary(capture)}，提示音{(beep ? "开" : "关")}，横幅分类{(ocr ? "开" : "关")}");
+        Log.Write($"[1] 托盘常驻：目标 \"{title}\"，{fps}fps {capture.BitrateMbps}Mbps，音轨{AudioSummary(capture)}，" +
+                  $"提示{CapturePolicy.NoticeLabel(capture.Notice)}，横幅分类{(ocr ? "开" : "关")}");
         Log.Write($"[2] 配额 {quota.QuotaGb}GB / 保留 {(quota.RetainDays == 0 ? "永久" : quota.RetainDays + " 天")} / 水位 {quota.WatermarkGb}GB");
         var thShown = detect.Threshold > 0 ? detect.Threshold : prof.Templates[0].Threshold;
         Log.Write($"[2b] 命中阈值 {thShown:F2}（config.json 的 Threshold 字段，托盘菜单「检测灵敏度」里可调）");
         Log.Write($"[2c] 合并窗口 {(detect.MergeSec == 0 ? "关（每次命中各出一段）" : detect.MergeSec + "s")}" +
                   "（config.json 的 MergeSec 字段，托盘菜单「合并窗口」里可调）");
         Log.Write($"[2d] 画质码率 {capture.BitrateMbps}Mbps（config.json 的 BitrateMbps 字段，托盘菜单「画质码率」里可调）");
-        Log.Write($"[2e] 音轨 {AudioSummary(capture)}（config.json 的 Audio / Mic 字段，托盘菜单「音轨」里可调）");
+        Log.Write($"[2e] 音轨 {AudioSummary(capture)}，提示{CapturePolicy.NoticeLabel(capture.Notice)}" +
+                  $"（config.json 的 AudioMode / Notice 字段，托盘菜单里可调）");
         Log.Write($"[2f] 成片目录 {Paths.Clips}{(capture.ClipsDir.Length == 0 ? "（默认）" : "（自定义）")}（config.json 的 ClipsDir 字段，托盘菜单「片段目录」里可改）");
         Log.Write("[3] 右键托盘图标可以打开回顾库；关掉这个窗口也不影响录制。");
 
@@ -566,11 +606,12 @@ internal static class Program
     }
 
     /// <summary>把两个声音源说清楚：「开（系统声音 + 麦克风）」这种，比一个「开」字有用。</summary>
-    private static string AudioSummary(CapturePolicy c) => (c.Audio, c.Mic) switch
+    /// <summary>音轨档位的人话摘要，启动日志和自检输出共用。</summary>
+    private static string AudioSummary(CapturePolicy c) => c.Audio switch
     {
-        (true, true) => "开（系统声音 + 麦克风）",
-        (true, false) => "开（仅系统声音）",
-        (false, true) => "开（仅麦克风）",
+        AudioMode.GameOnly => "只录游戏（进程回环）",
+        AudioMode.SystemAndMic => "系统声音 + 麦克风",
+        AudioMode.SystemOnly => "系统声音（不含麦克风）",
         _ => "关（片段无声）",
     };
 
@@ -582,7 +623,11 @@ internal static class Program
         var cfg = cfgPath ?? Paths.ConfigFile;
         // 托盘菜单要显示/落盘这些值，所以得把「最终生效值」原样带进去；
         // 别的调用方（测试入口）不传就当从 bitrate/audio 参数推出来。
-        var capture = capturePolicy ?? new CapturePolicy { BitrateMbps = Math.Max(1, bitrate / 1_000_000), Audio = audio };
+        var capture = capturePolicy ?? new CapturePolicy
+        {
+            BitrateMbps = Math.Max(1, bitrate / 1_000_000),
+            Audio = audio ? AudioMode.GameOnly : AudioMode.None,
+        };
 
         // 日志必须在托盘分支之前开 —— 托盘模式会把控制台藏起来，
         // 要是跟以前一样放在分支后面，托盘模式就一个字节都不写，
@@ -626,9 +671,9 @@ internal static class Program
             cap.FakeHitRepeat = fakeRepeat > 0 ? fakeRepeat : 1;
             cap.FakeHitGapMs = fakeGap > 0 ? fakeGap : 700;
             cap.DumpAtSec = dumpAtSec;
-            cap.AudioEnabled = audio;
-            cap.MicEnabled = capture.Mic;
-            cap.BeepOnSave = beep;
+            cap.Mode = capture.Audio;
+
+
             cap.OcrEnabled = ocr;
             cap.Quota = quota;
             cap.MergeMs = detect.MergeSec * 1000;
