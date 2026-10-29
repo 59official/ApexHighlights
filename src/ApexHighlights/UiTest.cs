@@ -71,6 +71,9 @@ internal static class UiTest
         // ---- 胶囊下拉：点一下开、再点一下收（用户报过收不回去）----
         fail += PillToggleCheck();
 
+        // ---- 成片目录：能改、能记住、不冲掉别的配置 ----
+        fail += ClipsDirCheck();
+
         Console.WriteLine(fail == 0 ? "[ok] 界面层自检全过" : $"[!] {fail} 项失败");
         return fail == 0 ? 0 : 9;
     }
@@ -179,6 +182,84 @@ internal static class UiTest
         t.SetApartmentState(ApartmentState.STA);
         t.Start();
         t.Join();
+        return fail;
+    }
+
+    /// <summary>
+    /// 成片目录（回顾库文件夹）：config.json 的 ClipsDir 读得出来、写得回去、还能改 Paths。
+    ///
+    /// 用户 2026-10-29 要的是「自己选回顾目录放哪个文件夹」——这条链路最脆的一步是「保存」：
+    /// CapturePolicy.Save 是局部改 JsonObject，万一写成整份序列化就会把阈值/配额顺手清掉。
+    /// 所以这里专门盯 config.json 里别的键还在不在，并顺手验非法路径会退回默认。
+    /// </summary>
+    private static int ClipsDirCheck()
+    {
+        int fail = 0;
+        var tmp = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "apex-clipsdir-" + Guid.NewGuid().ToString("N")[..6]);
+        try
+        {
+            Directory.CreateDirectory(tmp);
+            var cfg = System.IO.Path.Combine(tmp, "config.json");
+            File.WriteAllText(cfg, "{ \"Threshold\": 0.72, \"MergeSec\": 5, \"QuotaGb\": 33, \"RetainDays\": 11 }");
+
+            var p = CapturePolicy.Load(cfg);
+            if (p.ClipsDir.Length == 0) Console.WriteLine("    ok  老配置没有 ClipsDir → 默认位置（行为不变）");
+            else { Console.WriteLine($"    BAD 老配置读出的 ClipsDir = {p.ClipsDir}"); fail++; }
+
+            var want = System.IO.Path.Combine(tmp, "my-clips");
+            p.ClipsDir = want + "\\";                    // 用户从资源管理器复制粘贴常带个尾巴
+            var saved = p.Save(cfg);
+            var back = CapturePolicy.Load(cfg);
+            var text = File.ReadAllText(cfg);
+            if (saved && string.Equals(back.ClipsDir, want, StringComparison.OrdinalIgnoreCase))
+                Console.WriteLine($"    ok  ClipsDir 存得住（读回 {back.ClipsDir}）");
+            else { Console.WriteLine($"    BAD ClipsDir 读回 {back.ClipsDir}，应为 {want}"); fail++; }
+            if (text.Contains("\"Threshold\"") && text.Contains("0.72") && text.Contains("\"QuotaGb\"") && text.Contains("33"))
+                Console.WriteLine("    ok  改目录没冲掉阈值/配额");
+            else { Console.WriteLine("    BAD 改目录把阈值/配额写丢了: " + text.Replace("\n", " ")); fail++; }
+
+            Paths.SetClipsRoot(back.ClipsDir);
+            if (string.Equals(Paths.Clips, want, StringComparison.OrdinalIgnoreCase))
+                Console.WriteLine($"    ok  Paths.Clips 跟着变 → {Paths.Clips}");
+            else { Console.WriteLine($"    BAD Paths.Clips = {Paths.Clips}"); fail++; }
+            Paths.SetClipsRoot(null);
+            if (Paths.Clips == Paths.DefaultClips) Console.WriteLine("    ok  清空后回到默认位置");
+            else { Console.WriteLine($"    BAD 清空后仍是 {Paths.Clips}"); fail++; }
+
+            var broken = CapturePolicy.Clamp(new CapturePolicy { ClipsDir = "::::" });
+            if (broken.ClipsDir.Length == 0) Console.WriteLine("    ok  写坏的路径退回默认（不让录制跟着崩）");
+            else { Console.WriteLine($"    BAD 非法路径没被清掉: {broken.ClipsDir}"); fail++; }
+
+            // 换目录时「把现有片段搬过去」那段：真搬两个假文件，同名的不许覆盖
+            var src = System.IO.Path.Combine(tmp, "old");
+            var dst = System.IO.Path.Combine(tmp, "new");
+            Directory.CreateDirectory(src);
+            File.WriteAllBytes(System.IO.Path.Combine(src, "a.mp4"), new byte[10]);
+            File.WriteAllBytes(System.IO.Path.Combine(src, "b.mp4"), new byte[20]);
+            Directory.CreateDirectory(dst);
+            File.WriteAllBytes(System.IO.Path.Combine(dst, "b.mp4"), new byte[1]);   // 同名占位
+            var (moved, skipped) = TrayApp.MoveClips(src, dst);
+            var aThere = File.Exists(System.IO.Path.Combine(dst, "a.mp4"));
+            var bKept = new FileInfo(System.IO.Path.Combine(dst, "b.mp4")).Length == 1;
+            var bStillOld = File.Exists(System.IO.Path.Combine(src, "b.mp4"));
+            if (moved == 1 && skipped == 1 && aThere && bKept && bStillOld)
+                Console.WriteLine("    ok  迁移片段：搬走 1 个、同名 1 个留着不覆盖");
+            else
+            {
+                Console.WriteLine($"    BAD 迁移片段 搬走={moved} 跳过={skipped} a存在={aThere} b未覆盖={bKept} b留原地={bStillOld}");
+                fail++;
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"    BAD 成片目录自检抛异常 {ex.GetType().Name}: {ex.Message}");
+            fail++;
+        }
+        finally
+        {
+            Paths.SetClipsRoot(null);                    // 别把全局状态留给后面的检查
+            try { Directory.Delete(tmp, true); } catch { }
+        }
         return fail;
     }
 

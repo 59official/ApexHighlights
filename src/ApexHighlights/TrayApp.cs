@@ -27,6 +27,11 @@ internal sealed class TrayApp : ApplicationContext
     private readonly ToolStripMenuItem _statusItem = new("启动中…") { Enabled = false };
     private readonly ToolStripMenuItem _libraryItem = new("打开回顾库");
 
+    // 「片段目录」子菜单的常驻对象：改完目录 / 展开菜单 / 自检刷新标题都要用
+    private ToolStripMenuItem? _clipsRoot;
+    private ToolStripMenuItem? _clipsWhere;
+    private ToolStripMenuItem? _clipsReset;
+
     private int _fps;
     private string _title;
     private readonly bool _openUiFirst;
@@ -77,9 +82,7 @@ internal sealed class TrayApp : ApplicationContext
         menu.Items.Add(new ToolStripSeparator());
         _libraryItem.Click += (_, _) => ShowLibrary();
         menu.Items.Add(_libraryItem);
-        var reveal = new ToolStripMenuItem("打开片段目录");
-        reveal.Click += (_, _) => Reveal(null);
-        menu.Items.Add(reveal);
+        menu.Items.Add(BuildClipsDirMenu());
         menu.Items.Add(new ToolStripSeparator());
         _pauseItem.Click += (_, _) => TogglePause();
         menu.Items.Add(_pauseItem);
@@ -186,6 +189,15 @@ internal sealed class TrayApp : ApplicationContext
                             (File.Exists(_cfgPath) ? string.Join(" ", File.ReadAllLines(_cfgPath)) : "(没写)"));
                         ClickKind(ClipKind.AssistKnock, true);
                         say($"开回来之后 = {FindKindsRoot()?.Text}，闸门说 {(_cap?.WillRecord(ClipKind.AssistKnock).ToString() ?? "无采集")}");
+                        // 片段目录：换到临时子目录 → 看采集器/菜单/配置 → 点「恢复默认位置」回来
+                        say($"目录菜单 = {FindClipsRoot()?.Text ?? "找不到"}，当前 = {EffectiveClipsDir}");
+                        var testDir = Path.Combine(Paths.DataRoot, "clips-test");
+                        ApplyClipsDir(testDir);
+                        say($"改成 {testDir} 之后：采集器 ClipDir = {(_cap?.ClipDir ?? "无采集")}，菜单 = {FindClipsRoot()?.Text}");
+                        say("config.json 现在是 " +
+                            (File.Exists(_cfgPath) ? string.Join(" ", File.ReadAllLines(_cfgPath)) : "(没写)"));
+                        ClickClipsDefault();
+                        say($"点了「恢复默认位置」之后 = {EffectiveClipsDir}，采集器 ClipDir = {(_cap?.ClipDir ?? "无采集")}，菜单 = {FindClipsRoot()?.Text}");
                         break;
                     case 4:
                         say($"点「暂停录制」→ {_pauseItem.Text}");
@@ -725,6 +737,198 @@ internal sealed class TrayApp : ApplicationContext
                   $"（保存到 {_cfgPath}：{(ok ? "成功" : "失败")}）");
         after?.Invoke();
         RefreshStatus();
+    }
+
+    /// <summary>成片放在哪：运行中问采集器，还没开始录就看配置。</summary>
+    private string EffectiveClipsDir => _cap is not null ? _cap.ClipDir : Paths.Clips;
+
+    /// <summary>
+    /// 「片段目录」子菜单：回顾库的成片存在哪个文件夹，用户自己挑。
+    ///
+    /// 起因是 2026-10-29 的提问「没有开关能选回顾目录放哪个文件夹吗」。之前唯一的办法是
+    /// --data= 把整个数据目录搬走，可那会把 config.json、环形分片一起搬，太重；
+    /// 而且 1440p60 一小时七八个 GB，系统盘很容易被它塞满，用户需要的正是「只让成片去别的盘」。
+    /// </summary>
+    private ToolStripMenuItem BuildClipsDirMenu()
+    {
+        var root = new ToolStripMenuItem("片段目录");
+        var where = new ToolStripMenuItem { Enabled = false };
+        var pick = new ToolStripMenuItem("选择文件夹…");
+        var open = new ToolStripMenuItem("打开这个文件夹");
+        var reset = new ToolStripMenuItem("恢复默认位置");
+
+        _clipsRoot = root;
+        _clipsWhere = where;
+        _clipsReset = reset;
+
+        pick.Click += (_, _) => PickClipsDir();
+        open.Click += (_, _) => Reveal(null);
+        reset.Click += (_, _) =>
+        {
+            if (_capture.ClipsDir.Length == 0) return;
+            // 回到默认位置时也问一句：默认目录里可能已经有老片段，搬回去容易撞名
+            if (!AskMoveClips(EffectiveClipsDir, Paths.DefaultClips)) return;
+            ApplyClipsDir("");
+        };
+
+        root.DropDownItems.Add(where);
+        root.DropDownItems.Add(new ToolStripSeparator());
+        root.DropDownItems.Add(pick);
+        root.DropDownItems.Add(open);
+        root.DropDownItems.Add(reset);
+
+        // 托盘菜单是常驻对象，用户可能在录制中改过目录，展开时重算一次
+        root.DropDownOpening += (_, _) => RefreshClipsDirMenu();
+        RefreshClipsDirMenu();
+        return root;
+    }
+
+    /// <summary>刷新「片段目录」的标题与内部状态行（改完目录、展开菜单、自检都走这里）。</summary>
+    private void RefreshClipsDirMenu()
+    {
+        if (_clipsRoot is null) return;
+        var dir = EffectiveClipsDir;
+        var custom = _capture.ClipsDir.Length > 0;
+        if (_clipsWhere is not null) _clipsWhere.Text = (custom ? "当前：" : "默认：") + dir;
+        if (_clipsReset is not null) _clipsReset.Enabled = custom;
+        // 托盘菜单宽度有限，标题只放叶子名，完整路径在展开后的第一行
+        var leaf = System.IO.Path.GetFileName(dir.TrimEnd('\\', '/'));
+        _clipsRoot.Text = custom && leaf.Length > 0 ? $"片段目录（{leaf}）" : "片段目录（默认）";
+    }
+
+    /// <summary>点「选择文件夹…」：挑目录 → 问要不要把现有片段搬过去 → 改目录并落盘。</summary>
+    private void PickClipsDir()
+    {
+        var old = EffectiveClipsDir;
+        using var dlg = new FolderBrowserDialog
+        {
+            Description = "选择回顾库文件夹（以后录的片段存在这里）",
+            UseDescriptionForTitle = true,
+            ShowNewFolderButton = true,
+            SelectedPath = Directory.Exists(old) ? old : Paths.DataRoot,
+        };
+        if (dlg.ShowDialog() != DialogResult.OK) return;
+
+        var target = Paths.NormalizeDir(dlg.SelectedPath);
+        if (target.Length == 0) return;
+        if (SameDir(old, target))
+        {
+            Log.Write("[dir] 选的是当前目录，没改");
+            return;
+        }
+        if (!AskMoveClips(old, target)) return;   // 用户点了取消
+        ApplyClipsDir(target);
+    }
+
+    /// <summary>
+    /// 换目录前问一句「现有片段要不要一起搬过去」，答「是」就真搬。
+    /// 返回 false = 用户取消，别改目录。
+    ///
+    /// 为什么问：回顾库只显示当前目录，默不作声换走会让用户以为 30 多片被删了。
+    /// 为什么是移动不是复制：同一块盘上 rename 是瞬时的，跨盘也就一次读写，不会翻倍占空间。
+    /// </summary>
+    private bool AskMoveClips(string from, string to)
+    {
+        var files = ClipFiles(from);
+        if (files.Count == 0) return true;
+        if (SameDir(from, to)) return true;
+
+        long bytes = 0;
+        foreach (var f in files) { try { bytes += new FileInfo(f).Length; } catch { } }
+
+        var ask = MessageBox.Show(
+            $"当前目录有 {files.Count} 个片段（{QuotaReport.Mb(bytes)}）：\n{from}\n\n" +
+            $"要把它们一起搬到新目录吗？\n{to}\n\n" +
+            "是：搬过去（移动，不复制）\n" +
+            "否：只改以后存哪，旧片段留在原目录\n" +
+            "取消：什么都不改",
+            "回顾库目录", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
+        if (ask == DialogResult.Cancel) return false;
+        if (ask == DialogResult.No) return true;
+
+        var (ok, fail) = MoveClips(from, to);
+        Log.Write($"[dir] 迁移片段：成功 {ok}，失败 {fail}（{from} → {to}）");
+        if (fail > 0)
+            MessageBox.Show($"搬过去 {ok} 个，{fail} 个没搬成（同名或正被占用）。\n明细在 live.log 里。",
+                "回顾库目录", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        return true;
+    }
+
+    /// <summary>
+    /// 把 <paramref name="from"/> 下的成片移到 <paramref name="to"/>，同名的不覆盖。
+    /// 单独拆出来是为了能在自检里直接验（对话框没法自动点）。
+    /// </summary>
+    internal static (int Ok, int Fail) MoveClips(string from, string to)
+    {
+        int ok = 0, fail = 0;
+        try { Directory.CreateDirectory(to); } catch { }
+        foreach (var f in ClipFiles(from))
+        {
+            try
+            {
+                var dst = System.IO.Path.Combine(to, System.IO.Path.GetFileName(f));
+                if (File.Exists(dst)) { fail++; continue; }   // 同名不覆盖
+                File.Move(f, dst);
+                ok++;
+            }
+            catch { fail++; }
+        }
+        return (ok, fail);
+    }
+
+    /// <summary>改目录：内存配置 → Paths → 就地换采集器的成片目录 → 落盘 → 回顾库跟着换。</summary>
+    private void ApplyClipsDir(string? dir, Action? after = null)
+    {
+        var full = Paths.NormalizeDir(dir);
+        _capture.ClipsDir = full;
+        Paths.SetClipsRoot(full);
+        try { _cap?.SetClipDir(Paths.Clips); }
+        catch (Exception ex) { Log.Write("[tray] 换成片目录失败: " + ex.Message); }
+
+        var ok = _capture.Save(_cfgPath);
+        Log.Write($"[dir] 成片目录设为 {Paths.Clips}{(full.Length == 0 ? "（默认位置）" : "")}" +
+                  $"（保存到 {_cfgPath}：{(ok ? "成功" : "失败")}）");
+
+        // 回顾库窗口缓存着自己那份 ClipLibrary，换完直接关掉，下次打开读新目录
+        if (_libForm is { IsDisposed: false })
+        {
+            try { _libForm.Close(); } catch { }
+            _libForm = null;
+        }
+
+        RefreshClipsDirMenu();
+        after?.Invoke();
+        RefreshStatus();
+    }
+
+    /// <summary>目录里现有的成片（只看顶层，回顾库也只扫顶层）。</summary>
+    private static List<string> ClipFiles(string dir)
+    {
+        var list = new List<string>();
+        try
+        {
+            if (Directory.Exists(dir)) list.AddRange(Directory.GetFiles(dir, "*.mp4", SearchOption.TopDirectoryOnly));
+        }
+        catch { }
+        return list;
+    }
+
+    private static bool SameDir(string a, string b)
+        => string.Equals(Paths.NormalizeDir(a), Paths.NormalizeDir(b), StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>自检用：找到「片段目录」根菜单项。</summary>
+    private ToolStripMenuItem? FindClipsRoot() =>
+        _icon.ContextMenuStrip?.Items.OfType<ToolStripMenuItem>()
+            .FirstOrDefault(i => i.Text.StartsWith("片段目录", StringComparison.Ordinal));
+
+    /// <summary>自检用：等价于点了一下「恢复默认位置」。</summary>
+    private void ClickClipsDefault()
+    {
+        var root = FindClipsRoot();
+        var hit = root?.DropDownItems.OfType<ToolStripMenuItem>()
+            .FirstOrDefault(i => i.Text.StartsWith("恢复默认位置", StringComparison.Ordinal));
+        if (hit is null) { Log.Write("[t] 找不到「恢复默认位置」"); return; }
+        if (hit.Enabled) hit.PerformClick();
     }
 
     /// <summary>改阈值：写进内存配置 → 立刻套到正在跑的采集上 → 落盘记住。</summary>

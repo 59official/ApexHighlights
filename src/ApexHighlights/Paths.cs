@@ -16,6 +16,7 @@ namespace ApexHighlights;
 internal static class Paths
 {
     private static string? _dataRoot;
+    private static string? _clipsRoot;
 
     /// <summary>exe 所在目录（发布版里就是解压目录）。</summary>
     public static string ExeDir { get; } = AppContext.BaseDirectory.TrimEnd('\\', '/');
@@ -26,8 +27,51 @@ internal static class Paths
     /// <summary>录制产物根目录。</summary>
     public static string Captures => Path.Combine(DataRoot, "captures");
 
-    /// <summary>成片目录（回顾库看的就是这里）。</summary>
-    public static string Clips => Path.Combine(Captures, "clips");
+    /// <summary>成片目录的默认位置（数据目录\captures\clips）。</summary>
+    public static string DefaultClips => Path.Combine(Captures, "clips");
+
+    /// <summary>
+    /// 成片目录（回顾库看的就是这里）。
+    ///
+    /// 默认放在数据目录下，但用户可以把它指到别的盘（config.json 的 ClipsDir，
+    /// 托盘菜单「片段目录」里选）—— 420 秒 1440p60 的素材很容易把系统盘塞满。
+    /// 环形分片（<see cref="Ring"/>）不跟着走，它只是临时文件，永远留在数据目录里。
+    /// </summary>
+    public static string Clips => _clipsRoot ?? DefaultClips;
+
+    /// <summary>
+    /// 把成片目录指到别处。必须在 Capture 构造之前调用（Capture.ClipDir 的默认值读的就是这里）。
+    /// 传 null/空串 = 回到默认位置。
+    /// </summary>
+    public static void SetClipsRoot(string? dir)
+    {
+        var full = NormalizeDir(dir);
+        _clipsRoot = full.Length == 0 ? null : full;
+    }
+
+    /// <summary>
+    /// 把用户给的目录整成绝对路径并去掉末尾分隔符；空/写坏了返回空串（调用方当默认处理）。
+    /// 注意根目录要留着那个尾巴：D:\ 去掉就成了 D:，那是「D 盘的当前目录」，不是根。
+    /// </summary>
+    public static string NormalizeDir(string? dir)
+    {
+        if (string.IsNullOrWhiteSpace(dir)) return "";
+        try
+        {
+            var full = Path.GetFullPath(dir.Trim());
+            // 必须是绝对路径，且不含 Windows 文件名里不许出现的字符。
+            // 这类路径要等到真去建目录时才炸，那时已经在录制流程里了 —— 不如在这里就当没设过。
+            if (!Path.IsPathFullyQualified(full)) return "";
+            foreach (var bad in BadNameChars)
+                if (full.IndexOf(bad) >= 0) return "";
+            // 根目录要留着那个尾巴：D:\ 去掉就成了 D:，那是「D 盘的当前目录」，不是根
+            if (full.Length > 3) full = full.TrimEnd('\\', '/');
+            return full;
+        }
+        catch { return ""; }
+    }
+
+    private static readonly char[] BadNameChars = { '<', '>', '|', '"', '?', '*' };
 
     /// <summary>环形分片临时目录。</summary>
     public static string Ring => Path.Combine(Captures, "ring");

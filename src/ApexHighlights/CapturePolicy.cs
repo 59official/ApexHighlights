@@ -5,11 +5,12 @@ using System.Text.Json.Serialization;
 namespace ApexHighlights;
 
 /// <summary>
-/// 录制参数（用户可自调）：画质码率 + 音轨开关。
-/// 存在 config.json 的顶层 "BitrateMbps" / "Audio" 字段里，跟配额、阈值共用一个文件。
+/// 录制参数（用户可自调）：画质码率 + 音轨开关 + 逐种类开关 + 成片存哪。
+/// 存在 config.json 的顶层 "BitrateMbps" / "Audio" / "SkipKinds" / "ClipsDir" 字段里，
+/// 跟配额、阈值共用一个文件。
 ///
 /// 为什么又是独立一个类：DetectPolicy 管「认不认这张横幅」，QuotaPolicy 管「删旧的」，
-/// 这里管「录成什么样」。三者的失效方式完全不同（码率填错只是糊或占盘，阈值写坏会漏录，
+/// 这里管「录成什么样、录到哪」。三者的失效方式完全不同（码率填错只是糊或占盘，阈值写坏会漏录，
 /// 配额写坏会乱删），所以各自 Load/Save，谁也冲不掉谁。
 /// </summary>
 public sealed class CapturePolicy
@@ -31,6 +32,19 @@ public sealed class CapturePolicy
     /// 缺字段 = 全录，所以老配置升上来行为不变。
     /// </summary>
     public List<ClipKind> SkipKinds { get; set; } = new();
+
+    /// <summary>
+    /// 成片放哪个文件夹（绝对路径）。空 = 默认位置（数据目录\captures\clips），
+    /// 老配置没有这个字段就是空，行为不变。
+    ///
+    /// 用户 2026-10-29 提的：想自己挑盘点——1440p60 一小时 7GB 上下，系统盘很容易被塞满。
+    /// 只有成片跟着走，环形分片是临时文件，始终留在数据目录里。
+    /// </summary>
+    public string ClipsDir { get; set; } = "";
+
+    /// <summary>实际生效的成片目录（配上 <see cref="Paths.SetClipsRoot"/> 用）。</summary>
+    [JsonIgnore]
+    public string EffectiveClipsDir => ClipsDir.Length == 0 ? Paths.DefaultClips : ClipsDir;
 
     /// <summary>这个种类要不要录。托盘开关和 Capture 的闸门共用这一条判断。</summary>
     public bool Records(ClipKind k) => !SkipKinds.Contains(k);
@@ -99,6 +113,7 @@ public sealed class CapturePolicy
             var skips = new JsonArray();
             foreach (var k in SkipKinds) skips.Add(k.ToString());
             root["SkipKinds"] = skips;
+            root["ClipsDir"] = ClipsDir;
 
             var dir = Path.GetDirectoryName(path);
             if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
@@ -116,6 +131,8 @@ public sealed class CapturePolicy
         // 去重，并丢掉本版本已经没有的种类（老配置里可能留着 Kill/Knocked）
         p.SkipKinds = p.SkipKinds?.Where(k => Array.IndexOf(ClipKinds.All, k) >= 0).Distinct().ToList()
                       ?? new List<ClipKind>();
+        // 路径写坏了就当没设过（回到默认目录）—— 不能让它把录制带崩
+        p.ClipsDir = Paths.NormalizeDir(p.ClipsDir);
         return p;
     }
 

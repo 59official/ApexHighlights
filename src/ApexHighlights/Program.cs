@@ -155,8 +155,11 @@ internal static class Program
             capture = CapturePolicy.Clamp(capture);
             bitrate = capture.BitrateBps;
             audio = capture.Audio;
+            // 成片目录：必须在 Capture 构造之前定下来（Capture.ClipDir 的默认值读 Paths.Clips）
+            Paths.SetClipsRoot(capture.ClipsDir);
             Console.WriteLine($"[2d] 画质码率 {capture.BitrateMbps}Mbps（config.json 的 BitrateMbps，托盘「画质码率」可调）");
             Console.WriteLine($"[2e] 音轨 {(capture.Audio ? "开" : "关")}（config.json 的 Audio，托盘「音轨」可调）");
+            Console.WriteLine($"[2f] 成片目录 {Paths.Clips}{(capture.ClipsDir.Length == 0 ? "（默认）" : "")}（config.json 的 ClipsDir，托盘「片段目录」可改）");
 
             return offline is not null
                 ? Offline(engine, offline.Length == 0 ? Path.Combine(Paths.DataRoot, "probe", "bands.bin") : offline)
@@ -496,6 +499,7 @@ internal static class Program
                   "（config.json 的 MergeSec 字段，托盘菜单「合并窗口」里可调）");
         Log.Write($"[2d] 画质码率 {capture.BitrateMbps}Mbps（config.json 的 BitrateMbps 字段，托盘菜单「画质码率」里可调）");
         Log.Write($"[2e] 音轨 {(capture.Audio ? "开（系统回环，不碰麦克风）" : "关（片段无声）")}（config.json 的 Audio 字段，托盘菜单「音轨」里可调）");
+        Log.Write($"[2f] 成片目录 {Paths.Clips}{(capture.ClipsDir.Length == 0 ? "（默认）" : "（自定义）")}（config.json 的 ClipsDir 字段，托盘菜单「片段目录」里可改）");
         Log.Write("[3] 右键托盘图标可以打开回顾库；关掉这个窗口也不影响录制。");
 
         // 托盘模式下把控制台藏掉：双击 exe 时那个黑窗口没必要一直开着。

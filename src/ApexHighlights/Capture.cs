@@ -373,6 +373,23 @@ internal sealed class Capture : IDisposable
     }
 
 
+    /// <summary>
+    /// 运行中换成片目录（托盘「片段目录」里选完立刻生效）。
+    ///
+    /// 只动成片目录：<see cref="OutDir"/>（命中条带）和环形分片仍留在数据目录里，
+    /// 它们只是临时/调试产物。库对象得跟着换一个，否则配额清理还在扫旧目录。
+    /// 旧目录里的片段不会被搬走 —— 那是界面层问过用户之后的事。
+    /// </summary>
+    public void SetClipDir(string dir)
+    {
+        var full = Paths.NormalizeDir(dir);
+        if (full.Length == 0) return;
+        ClipDir = full;
+        _lib = new ClipLibrary(full);
+        try { Directory.CreateDirectory(full); } catch { }
+        Log.Write($"[clip] 成片目录改为 {full}");
+    }
+
     /// <summary>配额策略（外部可改，线程安全地换引用即可）。</summary>
     public QuotaPolicy Quota
     {
