@@ -1,4 +1,4 @@
-﻿using System.Drawing.Imaging;
+using System.Drawing.Imaging;
 using System.Runtime.InteropServices;
 
 namespace ApexHighlights;
@@ -68,6 +68,9 @@ internal static class UiTest
         // ---- 灵敏度下拉（WinForms，单独 STA 线程）----
         fail += ThresholdCheck(lib);
 
+        // ---- 胶囊下拉：点一下开、再点一下收（用户报过收不回去）----
+        fail += PillToggleCheck();
+
         Console.WriteLine(fail == 0 ? "[ok] 界面层自检全过" : $"[!] {fail} 项失败");
         return fail == 0 ? 0 : 9;
     }
@@ -82,9 +85,11 @@ internal static class UiTest
         int Filtered(int kindIndex, int timeIndex, string? text)
             => ClipQuery.Apply(all, ClipQuery.FromUi(kindIndex, timeIndex, text, now)).Count;
 
-        foreach (var (label, ix) in new[] { ("击倒", 1), ("助攻淘汰", 5), ("击杀", 6), ("被击倒", 7) })
+        // 下拉现在是 ClipKinds.All 的投影，所以照着这张表数一遍；顺手验越界还有没有种类。
+        for (int ix = 1; ix <= ClipKinds.All.Length; ix++)
         {
             var kind = ClipQuery.KindByIndex(ix)!.Value;
+            var label = ClipKinds.Label(kind);
             int n = Filtered(ix, 0, null);
             Log(label, n);
             if (n != all.Count(c => c.Kind == kind))
@@ -93,7 +98,9 @@ internal static class UiTest
                 fail++;
             }
         }
-
+        if (ClipQuery.KindByIndex(ClipKinds.All.Length + 1) is not null)
+        { Console.WriteLine("    BAD 越界下标居然还能取到种类（列表和索引对不上）"); fail++; }
+        else Console.WriteLine($"    ok  种类下拉 {ClipKinds.All.Length} 项（击杀/被击倒已从列表移除，BannerKind 判不出来）");
         var today = Filtered(0, 1, null);
         var w7 = Filtered(0, 2, null);
         var w30 = Filtered(0, 3, null);
@@ -177,6 +184,74 @@ internal static class UiTest
 
     internal static object? Field(object o, string name) =>
         o.GetType().GetField(name, System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)?.GetValue(o);
+
+    /// <summary>
+    /// 胶囊下拉的开关：点一下弹出，弹出期间再点一下只收起、不再弹第二个。
+    ///
+    /// 这条是用户直接报的（「弹出来以后点那个胶囊第二下就该收起来」）。原来的写法是
+    /// ShowMenu 里 `if (_open) return null`，第二下什么都不做；而且菜单 AutoClose 会
+    /// 先把那一下点击吞掉，收起动画根本没机会跑。现在把菜单的关闭权收回到自己手里，
+    /// 所以必须有自检盯着这条路径 —— 靠手点是验不出来的。
+    /// </summary>
+    private static int PillToggleCheck()
+    {
+        int fail = 0;
+        var t = new Thread(() =>
+        {
+            ContextMenuStrip? first = null;
+            try
+            {
+                // 窗口挪到屏幕外：自检不该在用户桌面闪一个对话框
+                using var form = new Form
+                {
+                    Size = new Size(420, 220),
+                    StartPosition = FormStartPosition.Manual,
+                    Location = new Point(-4000, -4000),
+                    ShowInTaskbar = false,
+                };
+                var pill = new PillSelect { Location = new Point(20, 20), Width = 180 };
+                pill.Items.AddRange(new object[] { "0.65 · 默认推荐", "0.70 · 默认推荐" });
+                pill.SelectedIndex = 0;
+                form.Controls.Add(pill);
+                form.Show();
+                Application.DoEvents();
+
+                first = pill.ShowMenu();
+                if (first is null || !pill.IsOpen)
+                { Console.WriteLine("    BAD 第一次点击没弹出菜单"); fail++; }
+                else Console.WriteLine($"    ok  点一下 → 菜单弹出 {first.Width}x{first.Height}");
+
+                var second = pill.ShowMenu();
+                if (second is not null) { Console.WriteLine("    BAD 第二下又弹了一个菜单"); fail++; }
+                else Console.WriteLine($"    ok  再点一下 → 没有新菜单（收起中 IsOpen={pill.IsOpen}）");
+
+                // 动画靠 Timer，得自己泵消息；2 秒还没关就是没收掉
+                var until = DateTime.UtcNow.AddSeconds(2);
+                while (DateTime.UtcNow < until && first is { IsDisposed: false, Visible: true })
+                {
+                    Application.DoEvents();
+                    Thread.Sleep(15);
+                }
+                if (first is { IsDisposed: false, Visible: true })
+                { Console.WriteLine("    BAD 收起动画跑完菜单还开着（第二下没关掉）"); fail++; }
+                else if (pill.IsOpen) { Console.WriteLine("    BAD 菜单关了但 IsOpen 还是 true"); fail++; }
+                else Console.WriteLine("    ok  收起动画跑完 → 菜单已关、胶囊回到关闭态");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"    BAD 胶囊下拉自检抛出 {ex.GetType().Name}: {ex.Message}");
+                fail++;
+            }
+            finally
+            {
+                try { if (first is { IsDisposed: false }) first.Close(); } catch { }
+            }
+        });
+        t.SetApartmentState(ApartmentState.STA);
+        t.Start();
+        t.Join(10_000);
+        return fail;
+    }
 
     private static int DeleteCheck(ClipLibrary lib, ClipInfo src)
     {

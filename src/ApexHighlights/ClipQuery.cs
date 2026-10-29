@@ -18,18 +18,9 @@ internal readonly record struct ClipFilter(ClipKind? Kind, DateTime Since, strin
 /// </summary>
 internal static class ClipQuery
 {
-    /// <summary>「种类」下拉的索引 → 种类。0 是全部。</summary>
-    public static ClipKind? KindByIndex(int index) => index switch
-    {
-        1 => ClipKind.Knock,
-        2 => ClipKind.ReKnock,
-        3 => ClipKind.AssistKnock,
-        4 => ClipKind.Elim,
-        5 => ClipKind.AssistElim,
-        6 => ClipKind.Kill,
-        7 => ClipKind.Knocked,
-        _ => null,
-    };
+    /// <summary>「种类」下拉的索引 → 种类。0 是全部，其余按 <see cref="ClipKinds.All"/> 的顺序。</summary>
+    public static ClipKind? KindByIndex(int index)
+        => index >= 1 && index <= ClipKinds.All.Length ? ClipKinds.All[index - 1] : null;
 
     /// <summary>「时间」下拉的索引 → 下界。</summary>
     public static DateTime SinceByIndex(int index, DateTime now) => index switch

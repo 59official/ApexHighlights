@@ -164,8 +164,11 @@ public sealed class LibraryForm : Form
         _btnDel.Style = RoundButton.Look.Danger;
         _btnDel.Click += (_, _) => DeleteSelected();
 
-        _kindFilter.Items.AddRange(new object[]
-            { "全部种类", "击倒", "再次击倒", "助攻击倒", "小队淘汰", "助攻淘汰", "击杀", "被击倒" });
+        // 种类列表跟着 ClipKinds.All 走：以前手写的这份多出「击杀」「被击倒」，
+        // BannerKind 判不出这两种，选它们永远是空列表，白让人以为录漏了。
+        var kinds = new List<object> { "全部种类" };
+        foreach (var k in ClipKinds.All) kinds.Add(ClipKinds.Label(k));
+        _kindFilter.Items.AddRange(kinds.ToArray());
         _kindFilter.SelectedIndex = 0;   // ComboBox 不像 ListBox 会自动选第一项，不设就是空白
         _kindFilter.SelectedIndexChanged += (_, _) => ApplyFilter();
         _kindPill = PillHostSelect(_kindFilter, 168);
@@ -372,7 +375,9 @@ public sealed class LibraryForm : Form
     {
         Tip(_thLabel, ThresholdTip);
         if (_thPill is not null) Tip(_thPill, ThresholdTip);
-        if (_kindPill is not null) Tip(_kindPill, "按识别到的横幅类型筛选：击倒 / 助攻 / 击杀 / 被击倒。");
+        if (_kindPill is not null)
+            Tip(_kindPill, "按识别到的横幅类型筛选：" +
+                string.Join(" / ", ClipKinds.All.Select(ClipKinds.Label)) + "。");
         if (_timePill is not null) Tip(_timePill, "按片段保存的时间筛选，今天 / 最近 7 天 / 最近 30 天。");
         if (_searchPill is not null) Tip(_searchPill, "按文件名搜索，支持只输一段（比如 1028-2139）。");
     }

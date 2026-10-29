@@ -90,6 +90,7 @@ internal sealed class TrayApp : ApplicationContext
         menu.Items.Add(BuildMergeMenu());
         menu.Items.Add(BuildBitrateMenu());
         menu.Items.Add(BuildAudioMenu());
+        menu.Items.Add(BuildKindsMenu());
         menu.Items.Add(new ToolStripSeparator());
         var quit = new ToolStripMenuItem("退出");
         quit.Click += (_, _) => Quit();
@@ -177,6 +178,14 @@ internal sealed class TrayApp : ApplicationContext
                         say($"点回「开」之后 = {(EffectiveAudio ? "开" : "关")}，实际在录 = {(_cap?.AudioOn.ToString() ?? "无采集")}");
                         ClickBitrate(20);
                         say($"点回 20Mbps 之后 = {EffectiveBitrateMbps}Mbps");
+                        // 种类开关：关掉「助攻击倒」，看闸门真的不切片，再开回来
+                        say($"种类菜单 = {FindKindsRoot()?.Text ?? "找不到"}");
+                        ClickKind(ClipKind.AssistKnock, false);
+                        say($"关掉助攻击倒之后 = {FindKindsRoot()?.Text}，闸门说 {(_cap?.WillRecord(ClipKind.AssistKnock).ToString() ?? "无采集")}");
+                        say("config.json 现在是 " +
+                            (File.Exists(_cfgPath) ? string.Join(" ", File.ReadAllLines(_cfgPath)) : "(没写)"));
+                        ClickKind(ClipKind.AssistKnock, true);
+                        say($"开回来之后 = {FindKindsRoot()?.Text}，闸门说 {(_cap?.WillRecord(ClipKind.AssistKnock).ToString() ?? "无采集")}");
                         break;
                     case 4:
                         say($"点「暂停录制」→ {_pauseItem.Text}");
@@ -254,6 +263,9 @@ internal sealed class TrayApp : ApplicationContext
             _cap.BeepOnSave = _beep;
             _cap.OcrEnabled = _ocr;
             _cap.MergeMs = _detect.MergeSec * 1000;
+            // 种类开关：闭包捕获的是同一个 CapturePolicy 实例，所以托盘里再关/开也立刻生效，
+            // 不用回头动 _cap（Capture 的闸门每次切片都会问一次）
+            _cap.KindFilter = k => _capture.Records(k);
             _cap.FakeHitAtSec = _fakeHit;
             _cap.Detected += OnDetected;
             _cap.EnableEncoding(90);
@@ -587,8 +599,9 @@ internal sealed class TrayApp : ApplicationContext
     /// <summary>改码率：内存配置 → 换掉正在跑的编码器 → 落盘。</summary>
     private void ApplyBitrate(int mbps, Action? after = null)
     {
-        var p = CapturePolicy.Clamp(new CapturePolicy { BitrateMbps = mbps, Audio = _capture.Audio });
-        _capture.BitrateMbps = p.BitrateMbps;
+        // 直接在现有 policy 上改：以前这里 new 了一个新 CapturePolicy 再 Clamp，
+        // 结果种类开关那几项会被悄悄清空（新对象是默认值）
+        _capture.BitrateMbps = Math.Clamp(mbps, 5, 200);
         try { _cap?.SetBitrate(_capture.BitrateBps); }
         catch (Exception ex) { Log.Write("[tray] 改码率失败: " + ex.Message); }
 
@@ -644,6 +657,71 @@ internal sealed class TrayApp : ApplicationContext
 
         var ok = _capture.Save(_cfgPath);
         Log.Write($"[audio] 音轨设为{(on ? "开" : "关")}" +
+                  $"（保存到 {_cfgPath}：{(ok ? "成功" : "失败")}）");
+        after?.Invoke();
+        RefreshStatus();
+    }
+
+    /// <summary>
+    /// 「录制种类」子菜单：每种一条勾选项，勾着 = 录。
+    /// 以前种类只能全录，而回顾库的种类下拉里还写着「击杀/被击倒」两种根本判不出来的，
+    /// 用户自然以为「明明没做的动作也录了」。现在能逐种关掉，关掉的种类连文件都不生成。
+    /// </summary>
+    private ToolStripMenuItem BuildKindsMenu()
+    {
+        var root = new ToolStripMenuItem("录制种类");
+        var items = new List<ToolStripMenuItem>();
+
+        void Refresh()
+        {
+            foreach (var it in items)
+                it.Checked = _capture.Records((ClipKind)it.Tag!);
+
+            var off = ClipKinds.All.Where(k => !_capture.Records(k)).ToArray();
+            root.Text = off.Length == 0
+                ? "录制种类（全都录）"
+                : off.Length == ClipKinds.All.Length
+                    ? "录制种类（全关了：不录任何片段）"
+                    : $"录制种类（已关：{string.Join("、", off.Select(ClipKinds.Label))}）";
+        }
+
+        foreach (var k in ClipKinds.All)
+        {
+            var kind = k;
+            var it = new ToolStripMenuItem(ClipKinds.Label(k)) { Tag = k, CheckOnClick = true };
+            it.Click += (_, _) => ApplyKind(kind, !_capture.Records(kind), Refresh);
+            root.DropDownItems.Add(it);
+            items.Add(it);
+        }
+
+        root.DropDownItems.Add(new ToolStripSeparator());
+        var allOn = new ToolStripMenuItem("全部打开（恢复全录）");
+        allOn.Click += (_, _) =>
+        {
+            foreach (var k in ClipKinds.All) _capture.SetRecords(k, true);
+            _capture.Save(_cfgPath);
+            Log.Write("[kind] 全部种类恢复录制");
+            Refresh();
+            RefreshStatus();
+        };
+        root.DropDownItems.Add(allOn);
+
+        root.DropDownOpening += (_, _) =>
+        {
+            Refresh();
+            // 已经全开时这条没意义，灰掉但仍留着（菜单项忽隐忽现更烦人）
+            allOn.Enabled = ClipKinds.All.Any(k => !_capture.Records(k));
+        };
+        Refresh();
+        return root;
+    }
+
+    /// <summary>开/关某个种类的录制：改内存配置（Capture 的闸门立刻跟着变）→ 落盘。</summary>
+    private void ApplyKind(ClipKind k, bool on, Action? after = null)
+    {
+        _capture.SetRecords(k, on);
+        var ok = _capture.Save(_cfgPath);
+        Log.Write($"[kind]「{ClipKinds.Label(k)}」录制={(on ? "开" : "关")}" +
                   $"（保存到 {_cfgPath}：{(ok ? "成功" : "失败")}）");
         after?.Invoke();
         RefreshStatus();
@@ -723,9 +801,23 @@ internal sealed class TrayApp : ApplicationContext
         hit.PerformClick();
     }
 
-    private void Quit()
+    /// <summary>自检用：找到「录制种类」根菜单项。</summary>
+    private ToolStripMenuItem? FindKindsRoot() =>
+        _icon.ContextMenuStrip?.Items.OfType<ToolStripMenuItem>()
+            .FirstOrDefault(i => i.Text.StartsWith("录制种类", StringComparison.Ordinal));
+
+    /// <summary>自检用：等价于在种类子菜单里勾/去掉某个种类。</summary>
+    private void ClickKind(ClipKind k, bool on)
     {
-        _tick.Stop();
+        var root = FindKindsRoot();
+        var hit = root?.DropDownItems.OfType<ToolStripMenuItem>()
+            .FirstOrDefault(i => i.Tag is ClipKind kk && kk == k);
+        if (hit is null) { Log.Write($"[t] 找不到种类项 {ClipKinds.Label(k)}"); return; }
+        if (hit.Checked != on) hit.PerformClick();   // CheckOnClick 的项，点一下就是翻转
+    }
+
+    private void Quit()
+    {        _tick.Stop();
         _icon.Visible = false;
         try { _cap?.Dispose(); } catch { }
         _libForm?.Close();

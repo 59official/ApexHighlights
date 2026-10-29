@@ -35,6 +35,23 @@ internal static class ClipKinds
         _ => "击倒",
     };
 
+    /// <summary>
+    /// 真正会出现的种类，顺序 = 菜单/筛选器里的顺序。
+    ///
+    /// 以前这份顺序是手写在 LibraryForm 里的，比这里多出「击杀」「被击倒」两条：
+    /// <see cref="BannerKind"/> 根本判不出这两种（它只有 Knock/ReKnock/AssistKnock/
+    /// Elim/AssistElim），所以那两条永远是空的。用户照着列表一看「被击倒也有呀」
+    /// 就以为录错了。现在筛选器和托盘开关都从这一个数组取，不存在第二份名单。
+    /// </summary>
+    public static readonly ClipKind[] All =
+    {
+        ClipKind.Knock,
+        ClipKind.ReKnock,
+        ClipKind.AssistKnock,
+        ClipKind.Elim,
+        ClipKind.AssistElim,
+    };
+
     public static bool TryToken(string token, out ClipKind kind)
     {
         switch (token)

@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Text.Json.Serialization;
 
 namespace ApexHighlights;
 
@@ -25,12 +26,31 @@ public sealed class CapturePolicy
     /// <summary>录不录音轨（系统回环 = 游戏声，不碰麦克风）。关掉后片段是无音轨的 mp4。</summary>
     public bool Audio { get; set; } = true;
 
+    /// <summary>
+    /// 不在录的种类（托盘里关掉的开关）。存 enum 名字，config.json 里能直接读懂；
+    /// 缺字段 = 全录，所以老配置升上来行为不变。
+    /// </summary>
+    public List<ClipKind> SkipKinds { get; set; } = new();
+
+    /// <summary>这个种类要不要录。托盘开关和 Capture 的闸门共用这一条判断。</summary>
+    public bool Records(ClipKind k) => !SkipKinds.Contains(k);
+
+    /// <summary>开/关一个种类的录制，返回改完之后「还在录」的状态。</summary>
+    public bool SetRecords(ClipKind k, bool on)
+    {
+        SkipKinds.Remove(k);
+        if (!on) SkipKinds.Add(k);
+        return on;
+    }
+
     private static readonly JsonSerializerOptions Json = new()
     {
         WriteIndented = true,
         PropertyNameCaseInsensitive = true,
         ReadCommentHandling = JsonCommentHandling.Skip,
         AllowTrailingCommas = true,
+        // 种类写成 "ReKnock" 这种名字而不是 3 —— 用户手改 config.json 时看得懂
+        Converters = { new JsonStringEnumConverter() },
     };
 
     /// <summary>换算成 Capture/EncoderChain 用的 bps。</summary>
@@ -76,6 +96,9 @@ public sealed class CapturePolicy
 
             root["BitrateMbps"] = BitrateMbps;
             root["Audio"] = Audio;
+            var skips = new JsonArray();
+            foreach (var k in SkipKinds) skips.Add(k.ToString());
+            root["SkipKinds"] = skips;
 
             var dir = Path.GetDirectoryName(path);
             if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
@@ -90,6 +113,9 @@ public sealed class CapturePolicy
     {
         if (p.BitrateMbps < 5) p.BitrateMbps = 5;
         if (p.BitrateMbps > 200) p.BitrateMbps = 200;
+        // 去重，并丢掉本版本已经没有的种类（老配置里可能留着 Kill/Knocked）
+        p.SkipKinds = p.SkipKinds?.Where(k => Array.IndexOf(ClipKinds.All, k) >= 0).Distinct().ToList()
+                      ?? new List<ClipKind>();
         return p;
     }
 

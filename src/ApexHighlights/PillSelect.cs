@@ -53,6 +53,9 @@ internal sealed class PillSelect : Control
 
     public object? SelectedItem => _selected >= 0 && _selected < Items.Count ? Items[_selected] : null;
 
+    /// <summary>菜单正弹着（含收起动画中）。自检要断言「第二下收得掉」。</summary>
+    internal bool IsOpen => _open;
+
     protected override void OnPaint(PaintEventArgs e)
     {
         var g = e.Graphics;
@@ -92,11 +95,16 @@ internal sealed class PillSelect : Control
         base.OnKeyDown(e);
     }
 
-    /// <summary>弹出选项面板：深色、圆角行、悬停/选中用金色字。</summary>
     /// <summary>把菜单弹出来；返回菜单窗口本身（自检截图要用，正常用不到返回值）。</summary>
     internal ContextMenuStrip? ShowMenu()
     {
-        if (Items.Count == 0 || _open) return null;
+        if (Items.Count == 0) return null;
+        // 已经弹着 = 又点了一下胶囊，那就收起来。用户要的就是「点一下开、再点一下关」。
+        if (_open)
+        {
+            CloseAnimated();
+            return null;
+        }
         _open = true;
         Invalidate();
 
@@ -108,6 +116,9 @@ internal sealed class PillSelect : Control
             ForeColor = UiKit.Text,
             Padding = new Padding(4, 4, 4, 4),
             Renderer = new DarkMenu(),
+            // 关掉系统自带的「点外面就立刻消失」：那样点胶囊第二下会被它先吞掉，
+            // 收起动画根本没机会放。现在关的时机全由 Dismiss 过滤器 + CloseAnimated 决定。
+            AutoClose = false,
         };
 
         for (int i = 0; i < Items.Count; i++)
@@ -118,7 +129,8 @@ internal sealed class PillSelect : Control
                 ForeColor = i == _selected ? UiKit.Accent : UiKit.Text,
                 Padding = new Padding(8, 5, 8, 5),
             };
-            it.Click += (_, _) => SelectedIndex = idx;
+            // AutoClose=false 之后「选完自己收」也得自己来，否则菜单会赖在那儿
+            it.Click += (_, _) => { SelectedIndex = idx; CloseAnimated(); };
             menu.Items.Add(it);
         }
 
@@ -128,16 +140,28 @@ internal sealed class PillSelect : Control
         {
             _open = false;
             _closing = false;
+            _menu = null;
+            Dismiss(null);
             StopWatch();
             StopAnim();
             Invalidate();
             BeginInvoke(new Action(() => menu.Dispose()));
+        };
+        // Esc 自己处理：AutoClose=false 时窗口不一定会替我们关
+        menu.KeyDown += (_, e) =>
+        {
+            if (e.KeyCode != Keys.Escape) return;
+            e.Handled = e.SuppressKeyPress = true;
+            CloseAnimated();
         };
         menu.Show(this, new Point(0, Height + 4));
         using (var rp = UiKit.RoundRect(new Rectangle(0, 0, menu.Width, menu.Height), DarkMenu.Radius))
             menu.Region = new Region(rp);
 
         var settled = menu.Location;
+        _menu = menu;
+        _menuSettled = settled;
+        Dismiss(new DismissFilter(this));
         Animate(menu, settled, -SlideDist, 0, OpenMs, null, Ease.OutBack);
         WatchLeave(menu, settled);
         return menu;
@@ -147,7 +171,66 @@ internal sealed class PillSelect : Control
     private System.Windows.Forms.Timer? _watch;
     private bool _closing;
 
-    private const int OpenMs = 380;      // 滑出总时长：原来 84ms“太生硬”，后来 330ms，用户又要“再柔一点”
+    private ContextMenuStrip? _menu;
+    private Point _menuSettled;
+    private DismissFilter? _dismiss;
+
+    /// <summary>收起：走 CloseMs 的滑回动画，落定后才真的 Close。</summary>
+    private void CloseAnimated()
+    {
+        var menu = _menu;
+        if (menu is null || menu.IsDisposed || _closing) return;
+        _closing = true;
+        StopWatch();
+        Animate(menu, _menuSettled, menu.Location.Y - _menuSettled.Y, -SlideDist, CloseMs, () =>
+        {
+            _closing = false;
+            if (!menu.IsDisposed) menu.Close();
+        }, Ease.InCubic);
+    }
+
+    /// <summary>装/卸全局鼠标过滤器（只在菜单弹着的时候装）。</summary>
+    private void Dismiss(DismissFilter? f)
+    {
+        if (_dismiss is not null) Application.RemoveMessageFilter(_dismiss);
+        _dismiss = f;
+        if (f is not null) Application.AddMessageFilter(f);
+    }
+
+    /// <summary>
+    /// 菜单弹着时的鼠标接管：
+    /// - 点在胶囊上 → 先吞掉这次点击再收起（不吞的话松手后 OnMouseDown 又把它打开，就成了点不掉）；
+    /// - 点在别处 → 立刻关掉，但不吞消息，别的控件照常响应（不能像系统菜单那样要点两下）。
+    /// 只认按下，不认松开：认松开会让「拖选文字」也误关。
+    /// </summary>
+    private sealed class DismissFilter : IMessageFilter
+    {
+        private readonly PillSelect _owner;
+        public DismissFilter(PillSelect owner) => _owner = owner;
+
+        public bool PreFilterMessage(ref Message m)
+        {
+            if (m.Msg is not (0x0201 or 0x0204 or 0x0207 or 0x020B)) return false;   // L/R 按下、双击、X 键
+            var menu = _owner._menu;
+            if (menu is null || menu.IsDisposed || !menu.Visible) return false;
+
+            var p = Cursor.Position;
+            if (menu.Bounds.Contains(p)) return false;                      // 点菜单项：交给菜单
+            if (_owner.RectangleToScreen(_owner.ClientRectangle).Contains(p))
+            {
+                _owner.CloseAnimated();
+                return true;                                                 // 这一次点击就用来收起
+            }
+
+            _owner.StopWatch();
+            _owner.StopAnim();
+            _owner._closing = false;
+            menu.Close();                                                    // 点别处：马上收，别挡着人家
+            return false;
+        }
+    }
+
+    private const int OpenMs = 450;      // 滑出总时长：原来 84ms“太生硬”，后来 330ms，用户又要“再柔一点”
     private const int CloseMs = 220;     // 收起比打开快一点，像被吸回去
     private const int SlideDist = 10;    // 行程：用户嫌原来 16px 幅度太大，收小一档
     private const int LeaveDelayMs = 1000;
@@ -164,7 +247,7 @@ internal sealed class PillSelect : Control
     /// 回弹强度：c 越大冲得越远。2.0 在 10px 行程上过冲约 2px（一帧两像素，看得见但不吵）。
     /// 再大就会在末尾「悬」在 1px 上不动 —— 那是整数取整的锅，不是曲线不够弹。
     /// </summary>
-    private const double Backness = 2.0;
+    private const double Backness = 1.5;
 
     private static double EaseAt(Ease k, double p) => k switch
     {
@@ -210,12 +293,8 @@ internal sealed class PillSelect : Control
             away += t.Interval;
             if (_closing || away < LeaveDelayMs) return;
 
-            _closing = true;
-            Animate(menu, settled, menu.Location.Y - settled.Y, -SlideDist, CloseMs, () =>
-            {
-                _closing = false;
-                if (!menu.IsDisposed) menu.Close();
-            }, Ease.InCubic);
+            // 收起只有一条路（CloseAnimated），这里不再自己拼一遍动画
+            CloseAnimated();
         };
         _watch = t;
         t.Start();

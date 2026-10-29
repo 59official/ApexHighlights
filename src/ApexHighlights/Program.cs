@@ -380,7 +380,11 @@ internal static class Program
         }
 
         // 下拉菜单是独立的顶层窗口，PrintWindow 抓主窗口时抓不到，单独抓一张。
-        if (menuField is not null && UiTest.Field(form, menuField) is PillSelect sel && sel.ShowMenu() is { } menu)
+        // 有些胶囊外面还包了一层 Panel（带圆角/阴影的那种），所以字段可能不是 PillSelect 本身：
+        // 是 Panel 就往下找第一个 PillSelect 孩子。
+        if (menuField is not null && UiTest.Field(form, menuField) is { } host
+            && (host as PillSelect ?? (host as Control)?.Controls.OfType<PillSelect>().FirstOrDefault()) is { } sel
+            && sel.ShowMenu() is { } menu)
         {
             Application.DoEvents();
             Thread.Sleep(menuDelay);

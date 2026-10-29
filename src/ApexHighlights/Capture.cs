@@ -103,6 +103,16 @@ internal sealed class Capture : IDisposable
     /// 0 = 关闭合并，每次命中各出一段。
     /// </summary>
     public int MergeMs = 8000;
+    /// <summary>
+    /// 这个种类要不要切片？null = 全录（老行为）。
+    /// 托盘里给每个种类配了开关，用户明确说「不想录击倒/助攻击倒」时就靠它挡在落盘前——
+    /// 拦在 WriteClip 之前而不是事后删文件：环形里那段画面还在，只是不生成 mp4。
+    /// </summary>
+    public Func<ClipKind, bool>? KindFilter { get; set; }
+    /// <summary>这一种类是否允许切片。没装过滤器就算允许。</summary>
+    private bool Records(ClipKind k) => KindFilter?.Invoke(k) ?? true;
+    /// <summary>外面（自检/状态显示）想知道某个种类现在录不录。</summary>
+    public bool WillRecord(ClipKind k) => Records(k);
     private long _merged, _ocrMs, _ocrCount;
 
     // 配额/保留期（QuotaPolicy 默认 40GB / 30 天 / 2GB 水位）
@@ -800,6 +810,16 @@ internal sealed class Capture : IDisposable
                 Log.Write($"[merge] {group.Count} 次命中合并为一段（{group[0].Ms / 1000.0:F1}s–{lastMs / 1000.0:F1}s），种类取 {BannerOcr.Label(d.Kind)}");
             }
 
+            // 用户在托盘里把这个种类关掉了：这一场就不落盘了，直接等下一场。
+            // d.Kind 是横幅种类（BannerKind），开关用的是落盘种类（ClipKind），走 FromBanner 对齐，
+            // 否则未识别的横幅（Unknown → 击倒）会和用户勾的「击倒」对不上。
+            var kind = ClipKinds.FromBanner(d.Kind);
+            if (!Records(kind))
+            {
+                Log.Write($"[skip] 种类「{ClipKinds.Label(kind)}」已关，跳过切片（{group[0].Ms / 1000.0:F1}s–{lastMs / 1000.0:F1}s）");
+                continue;
+            }
+
             var clip = WriteClip(d, group[0].Ms, lastMs);
             Detected?.Invoke(d with { ClipPath = clip.Path, Bytes = clip.Bytes });
         }
@@ -846,8 +866,13 @@ internal sealed class Capture : IDisposable
             while (j < batch.Length && batch[j].Ms - lastMs <= MergeMs) { lastMs = batch[j].Ms; j++; }
             var rep = batch[i];
             for (int k = i; k < j; k++) if (batch[k].Score > rep.Score) rep = batch[k];
-            var clip = WriteClip(Classify(rep), firstMs, lastMs);
+            var done = Classify(rep);
+            // 退出补切也守同一条闸门，否则「关了击倒」在关程序那一刻还是会漏一段出来
+            var doneKind = ClipKinds.FromBanner(done.Kind);
+            bool keep = Records(doneKind);
+            var clip = keep ? WriteClip(done, firstMs, lastMs) : (Path: null, Bytes: 0L);
             if (clip.Path is not null) Log.Write($"[CLIP] {clip.Path}（退出时补切）");
+            else if (!keep) Log.Write($"[skip] 退出补切时种类「{ClipKinds.Label(doneKind)}」已关，丢弃 {firstMs / 1000.0:F1}s 那一段");
             i = j;
         }
     }
