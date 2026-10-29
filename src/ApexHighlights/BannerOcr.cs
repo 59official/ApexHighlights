@@ -43,6 +43,7 @@ public sealed class BannerOcr
     private readonly List<(OcrEngine Engine, string Tag)> _engines = new();
     private bool _enginesReady;
     private string _err = "";
+    private string _hint = "";
 
     /// <summary>识别次数（用于 Stats 诊断）。</summary>
     public int Count { get; private set; }
@@ -51,6 +52,12 @@ public sealed class BannerOcr
     /// <summary>引擎语言标签，比如 zh-Hans-CN。</summary>
     public string EngineName { get; private set; } = "未初始化";
     public string Err => _err;
+
+    /// <summary>
+    /// 启动时提示一次、但不该当成错误刷屏的话（例如「没装繁体语言包，装了更准」）。
+    /// 简体/英文局根本不调用繁中引擎，这条提示跟着 [stat] 每 5 秒打一遍只会误导。
+    /// </summary>
+    public string Hint => _hint;
 
     /// <summary>
     /// 读一张条带图并判定横幅种类。任何异常都吞掉并返回 Unknown（检测不该拖垮录制）。
@@ -125,7 +132,9 @@ public sealed class BannerOcr
 
             if (_engines.Count == 0) _err = "系统没有可用的 OCR 语言包";
             else if (!_engines.Any(e => e.Tag.StartsWith("zh-Hant", StringComparison.OrdinalIgnoreCase)))
-                _err = "没装繁体中文语言包，繁中局靠简中引擎读（错字会多）；装「中文(繁体,台湾)」后更准";
+                // 这只是「装了会更准」，不是错误：游戏是简体/英文时完全没影响。
+                // 之前放进 _err 会让每一行统计都带着它，简体局里看着像出事了。
+                _hint = "没装繁体中文语言包：繁中局会靠简中引擎读（错字会多）；装「中文(繁体,台湾)」后更准";
         }
         catch (Exception ex) { _err = "建 OCR 引擎失败: " + ex.Message; }
     }

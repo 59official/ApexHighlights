@@ -77,7 +77,7 @@ internal sealed class Capture : IDisposable
     /// <summary>环形容量（秒）：运行期重开音轨时要按同样的容量重建 AudioRing。</summary>
     private int _ringCapacitySec = 90;
     /// <summary>灰区下界：低于这个分数连「像横幅」都算不上，不值得补扫其它尺度。</summary>
-    private const float GrayFloor = 0.30f;
+    private const float GrayFloor = 0.40f;      // 灰区下限：再低就是噪声，补扫纯浪费
     /// <summary>
     /// 音轨档位，和 <see cref="CapturePolicy.Audio"/> 同义。外面只改这个 + <see cref="SetAudioMode"/>，
     /// 不要直接摸那几个采集源。
@@ -137,6 +137,7 @@ internal sealed class Capture : IDisposable
     /// <summary>外面（自检/状态显示）想知道某个种类现在录不录。</summary>
     public bool WillRecord(ClipKind k) => Records(k);
     private long _merged, _ocrMs, _ocrCount;
+    private bool _ocrHinted;
 
     // 配额/保留期（QuotaPolicy 默认 40GB / 30 天 / 2GB 水位）
     private ClipLibrary? _lib;
@@ -151,6 +152,9 @@ internal sealed class Capture : IDisposable
     private bool Halted => RecordingPaused || UserPaused;
     private bool _wasAbove;
     private int _nearCount;
+    private int _grayScans;        // 灰区补扫实际跑了几轮（诊断用：跑太多说明灰区门槛太低）
+    private int _grayStreak;
+    private long _lastGrayMs = -1000;
     private string _err = "";
     private string _encErr = "";
 
@@ -924,9 +928,21 @@ internal sealed class Capture : IDisposable
                 var det = _eng.Score(_band);
 
                 // 灰区补扫（用户没指定 HUD 缩放时才做）：横幅肯定在，只是尺度对不上。
-                // 平时分数都在 0.2 以下，走不到这里；真撞上也只是这一帧多花三四毫秒。
+                //
+                // 为什么要三条件：补扫一轮 = 4 档 × 3 张模板 = 12 遍 NCC。真机日志里
+                // 命中率明明很高，检测却平均 28ms/帧 —— 横幅淡出、半截露出、别的 UI 文字
+                // 都会掉进灰区，那几帧每帧都白扫 12 遍。所以要求「连续两帧都在灰区」
+                // （瞬间的噪声过不了）且「距上次补扫 ≥150ms」（一段横幅最多补几次）。
                 if (_eng.HudScalePct == 0 && det.Score >= GrayFloor && det.Score < det.Threshold)
-                    det = _eng.ScoreScaled(_band, det);
+                {
+                    if (++_grayStreak >= 2 && now - _lastGrayMs >= 150)
+                    {
+                        _lastGrayMs = now;
+                        _grayScans++;
+                        det = _eng.ScoreScaled(_band, det);
+                    }
+                }
+                else _grayStreak = 0;
                 sw.Stop();
                 _samples++; _totalMs += sw.ElapsedMilliseconds;
 
@@ -1087,6 +1103,21 @@ internal sealed class Capture : IDisposable
             foreach (var g in group) if (g.Score > rep.Score) rep = g;
             var d = Classify(rep);
 
+            // 最高分那帧有时正是横幅被人物模型挡住一半的时候，OCR 会返回「未识别」。
+            // 这时再试剩下几帧（最多 2 次），拿到种类就收手——
+            // 否则助攻击倒会被写成普通击倒（文件名少个 _ak_），事后分不出来。
+            if (d.Kind == BannerKind.Unknown && group.Count > 1)
+            {
+                foreach (var g in group.OrderByDescending(x => x.Score))
+                {
+                    if (ReferenceEquals(g, rep) || g.BandPath is null) continue;
+                    var alt = Classify(g);
+                    if (alt.Kind == BannerKind.Unknown) continue;
+                    d = d with { Kind = alt.Kind, OcrText = alt.OcrText };
+                    break;
+                }
+            }
+
             if (group.Count > 1)
             {
                 _merged += group.Count - 1;
@@ -1121,6 +1152,7 @@ internal sealed class Capture : IDisposable
             var (kind, text) = _ocr.Classify(det.BandPath);
             _ocrCount = _ocr.Count;
             _ocrMs = _ocr.TotalMs;
+            if (!_ocrHinted && _ocr.Hint.Length > 0) { _ocrHinted = true; Log.Write($"[ocr] {_ocr.Hint}"); }
             return det with { Kind = kind, OcrText = text };
         }
         catch (Exception ex)
@@ -1277,7 +1309,7 @@ internal sealed class Capture : IDisposable
 
     public string Stats()
     {
-        var s = $"帧={_frames} 采样={_samples} 事件={_hits} 近失={_nearCount}";
+        var s = $"帧={_frames} 采样={_samples} 事件={_hits} 近失={_nearCount} 灰扫={_grayScans}";
         if (_samples > 0) s += $" 检测={(_totalMs / (double)_samples):F1}ms";
         var enc = _enc;                       // 改码率会换实例，只读一次，免得拼出半个旧半个新
         if (enc is not null)
