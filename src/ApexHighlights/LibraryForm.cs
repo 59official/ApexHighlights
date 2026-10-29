@@ -88,8 +88,9 @@ public sealed class LibraryForm : Form
         Text = "ApexHighlights — 回顾库";
         StartPosition = FormStartPosition.CenterScreen;
         // 1000 宽时，批量态多出来的「取消」会顶到右侧筛选胶囊上（量过：重叠 100 多个像素）
-        MinimumSize = new Size(1120, 600);
-        Size = new Size(1360, 760);
+        // 窗口尺寸按 DPI 放大：字号是系统自动放大的，窗口不跟着长，列就全挤成省略号
+        MinimumSize = new Size(UiKit.Px(this, 1120), UiKit.Px(this, 600));
+        Size = new Size(UiKit.Px(this, 1360), UiKit.Px(this, 760));
         Font = UiKit.F95;
         Icon = AppIcon.Shared;
         BackColor = UiKit.Bg;
@@ -295,58 +296,59 @@ public sealed class LibraryForm : Form
 
     private void LayoutBands()
     {
-        const int pad = 22;
+        int z(int v) => UiKit.Px(this, v);
+        int pad = z(22);
         // 头部是「大标题 + 计数 + 一行说明」三层，78 px 放不下第三行（会压到工具条上），改 92
-        const int headH = 92;
-        const int barH = 56;
-        const int footH = 34;
+        int headH = z(92);
+        int barH = z(56);
+        int footH = z(34);
 
         int w = ClientSize.Width;
         int h = ClientSize.Height;
 
-        _head.SetBounds(pad, 8, w - pad * 2, headH);
-        _bar.SetBounds(pad, 8 + headH, w - pad * 2, barH);
+        _head.SetBounds(pad, z(8), w - pad * 2, headH);
+        _bar.SetBounds(pad, z(8) + headH, w - pad * 2, barH);
         _foot.SetBounds(0, h - footH, w, footH);
 
         int bodyTop = 8 + headH + barH;
-        _body.SetBounds(pad, bodyTop, w - pad * 2, Math.Max(120, h - bodyTop - footH - 10));
+        _body.SetBounds(pad, bodyTop, w - pad * 2, Math.Max(z(120), h - bodyTop - footH - z(10)));
 
         // ---- 标题栏：左标题、右「灵敏度 + 搜索」----
         int hw = _head.Width;
         var search = _searchPill!;
         var thPill = _thPill!;
-        search.SetBounds(hw - search.Width, 8, search.Width, 38);
-        thPill.SetBounds(search.Left - 8 - thPill.Width, 8, thPill.Width, 38);
+        search.SetBounds(hw - search.Width, z(8), search.Width, z(38));
+        thPill.SetBounds(search.Left - z(8) - thPill.Width, z(8), thPill.Width, z(38));
         // 原来是贴在右边、和计数同一行 —— 但右边是「灵敏度 + 搜索」两个胶囊，
         // 那行字会被压在胶囊底下、还顶到窗口右边缘。改到左侧标题块下面单独一行。
         _sizeNote.Location = new Point(2, _count.Bottom + 4);
         _thLabel.Text = "灵敏度";
         int thLabelW = TextRenderer.MeasureText(_thLabel.Text, _thLabel.Font).Width;
-        _thLabel.SetBounds(thPill.Left - 10 - thLabelW, 8 + (38 - _thLabel.Height) / 2, thLabelW, _thLabel.Height);
+        _thLabel.SetBounds(thPill.Left - z(10) - thLabelW, z(8) + (z(38) - _thLabel.Height) / 2, thLabelW, _thLabel.Height);
 
         // ---- 工具条：左四个动作、右两个筛选 ----
-        const int btnY = (barH - 38) / 2;
-        _btnPlay.SetBounds(0, btnY, 104, 38);
-        _btnReveal.SetBounds(112, btnY, 118, 38);
-        _btnDir.SetBounds(238, btnY, 118, 38);
-        _btnDel.SetBounds(364, btnY, _list.SelectMode ? 124 : 88, 38);
-        _btnParams.SetBounds(_btnDel.Right + 10, btnY, 118, 38);
-        _btnCancel.SetBounds(_btnParams.Right + 10, btnY, 88, 38);
+        int btnY = (barH - z(38)) / 2;
+        _btnPlay.SetBounds(0, btnY, z(104), z(38));
+        _btnReveal.SetBounds(z(112), btnY, z(118), z(38));
+        _btnDir.SetBounds(z(238), btnY, z(118), z(38));
+        _btnDel.SetBounds(z(364), btnY, z(_list.SelectMode ? 124 : 88), z(38));
+        _btnParams.SetBounds(_btnDel.Right + z(10), btnY, z(118), z(38));
+        _btnCancel.SetBounds(_btnParams.Right + z(10), btnY, z(88), z(38));
         var timePill = _timePill!;
         var kindPill = _kindPill!;
-        timePill.SetBounds(_bar.Width - timePill.Width, btnY, timePill.Width, 38);
-        kindPill.SetBounds(timePill.Left - 8 - kindPill.Width, btnY, kindPill.Width, 38);
+        timePill.SetBounds(_bar.Width - timePill.Width, btnY, timePill.Width, z(38));
+        kindPill.SetBounds(timePill.Left - z(8) - kindPill.Width, btnY, kindPill.Width, z(38));
 
         // ---- 正文：左边清单、右边详情 ----
         // 336 是量出来的：再窄下来元数据「2560 × 1440」就开始折行，再宽就让清单少一列。
         // 窗口本身很小时按比例收，别让清单被挤成一条缝。
-        int sideW = Math.Clamp(_body.Width / 4, 300, 336);
+        int sideW = Math.Clamp(_body.Width / 4, z(300), z(336));
         _detail.SetBounds(_body.Width - sideW, 0, sideW, _body.Height);
-        _listCard!.SetBounds(0, 0, Math.Max(200, _body.Width - sideW - 16), _body.Height);
+        _listCard!.SetBounds(0, 0, Math.Max(z(200), _body.Width - sideW - z(16)), _body.Height);
         _detail.FitPreview();
 
         // ---- 状态栏 ----
-        _status.SetBounds(22, 0, Math.Max(120, _foot.Width - 22 - 460 - 24), footH);
+        _status.SetBounds(z(22), 0, Math.Max(z(120), _foot.Width - z(22) - z(460) - z(24)), footH);
         _statusRight.SetBounds(_foot.Width - 22 - 460, 0, 460, footH);
     }
 

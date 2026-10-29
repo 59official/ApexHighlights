@@ -14,6 +14,10 @@ internal sealed class ParamSlider : Control
     private const int ThumbD = 14;
     private const int PadX = 2;
 
+    // 设计尺寸按 96 DPI 写，实际按窗口 DPI 放大（字号是自动放大的，几何不放就会错位/切字）
+    private float S => DeviceDpi / 96f;
+    private int Si(int v) => (int)Math.Round(v * S);
+
     private bool _drag;
 
     public string Label = "";
@@ -62,7 +66,9 @@ internal sealed class ParamSlider : Control
     private string ValueText => Format?.Invoke(_value) ?? _value.ToString();
 
     /// <summary>数值文本基线：固定贴右边，长文本也不会把轨道挤歪。</summary>
-    private int TrackTop => Height - 20;
+    private int TrackTop => Height - Si(20);
+    private int X0 => Si(PadX) + Si(ThumbD) / 2;
+    private int X1 => Width - Si(PadX) - Si(ThumbD) / 2;
 
     protected override void OnPaint(PaintEventArgs e)
     {
@@ -70,45 +76,46 @@ internal sealed class ParamSlider : Control
         g.SmoothingMode = SmoothingMode.AntiAlias;
         g.Clear(BackColor);
 
-        var labelRect = new Rectangle(PadX, 2, Width - PadX * 2, 20);
+        int padX = Si(PadX);
+        const TextFormatFlags tf = TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding;
+        int labelH = TextRenderer.MeasureText(g, Label, UiKit.F95, new Size(int.MaxValue, int.MaxValue), tf).Height;
+        var labelRect = new Rectangle(padX, Si(2), Width - padX * 2, labelH);
         TextRenderer.DrawText(g, Label, UiKit.F95, labelRect, UiKit.Text,
-            TextFormatFlags.Left | TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis);
+            TextFormatFlags.Left | TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis | TextFormatFlags.VerticalCenter);
 
-        var valRect = new Rectangle(PadX, 2, Width - PadX * 2, 20);
+        var valRect = labelRect;
         TextRenderer.DrawText(g, ValueText, UiKit.F10, valRect, Focused ? UiKit.Accent : UiKit.Dim,
             TextFormatFlags.Right | TextFormatFlags.NoPrefix);
 
         // 轨道：左半截填强调色，右半截留灰
-        int x0 = PadX + ThumbD / 2;
-        int x1 = Width - PadX - ThumbD / 2;
-        int y = TrackTop + TrackH / 2;
-        var full = new Rectangle(x0, TrackTop, Math.Max(1, x1 - x0), TrackH);
-        UiKit.Fill(g, full, TrackH / 2, Color.FromArgb(58, 61, 70));
+        int trackH = Math.Max(2, Si(TrackH));
+        int thumbD = Si(ThumbD);
+        int thumbR = thumbD / 2;
+        int trackTop = TrackTop;
+        int y = trackTop + trackH / 2;
+        var full = new Rectangle(X0, trackTop, Math.Max(1, X1 - X0), trackH);
+        UiKit.Fill(g, full, trackH / 2, Color.FromArgb(58, 61, 70));
 
         int tx = ValueToX(_value);
-        if (tx > x0)
-            UiKit.Fill(g, new Rectangle(x0, TrackTop, tx - x0, TrackH), TrackH / 2, UiKit.Accent);
+        if (tx > X0)
+            UiKit.Fill(g, new Rectangle(X0, trackTop, tx - X0, trackH), trackH / 2, UiKit.Accent);
 
-        var thumb = new Rectangle(tx - ThumbD / 2, y - ThumbD / 2, ThumbD, ThumbD);
+        var thumb = new Rectangle(tx - thumbR, y - thumbR, thumbD, thumbD);
         using (var b = new SolidBrush(UiKit.Accent)) g.FillEllipse(b, thumb);
         using (var p = new Pen(Color.FromArgb(20, 21, 25), 2)) g.DrawEllipse(p, thumb);
     }
 
     private int ValueToX(int v)
     {
-        int x0 = PadX + ThumbD / 2;
-        int x1 = Width - PadX - ThumbD / 2;
-        if (Max <= Min) return x0;
+        if (Max <= Min) return X0;
         double t = (v - Min) / (double)(Max - Min);
-        return x0 + (int)Math.Round(t * (x1 - x0));
+        return X0 + (int)Math.Round(t * (X1 - X0));
     }
 
     private int XToValue(int x)
     {
-        int x0 = PadX + ThumbD / 2;
-        int x1 = Width - PadX - ThumbD / 2;
-        if (x1 <= x0) return Min;
-        double t = Math.Clamp((x - x0) / (double)(x1 - x0), 0, 1);
+        if (X1 <= X0) return Min;
+        double t = Math.Clamp((x - X0) / (double)(X1 - X0), 0, 1);
         return Min + (int)Math.Round(t * (Max - Min));
     }
 

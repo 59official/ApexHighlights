@@ -27,19 +27,22 @@ internal sealed class ClipDetailPane : Panel
         BackColor = UiKit.Bg;
 
         _card.Dock = DockStyle.Fill;
-        _card.Padding = new Padding(12);
+        _card.Padding = new Padding(UiKit.Px(this, 12));
 
         _preview.Dock = DockStyle.Top;
-        _preview.Height = 186;
+        _preview.Height = UiKit.Px(this, 186);
         _preview.EmptyText = "选一条看看";
         _preview.DoubleClick += (_, _) => OpenRequested?.Invoke(this, EventArgs.Empty);
 
-        var metaPad = new Panel { Dock = DockStyle.Fill, Padding = new Padding(0, 10, 0, 6), BackColor = UiKit.Surface };
+        // 键值表的两列也是设计像素：不缩放的话「分辨率」这种三字标题会被切掉
+        _meta.RowHeight = UiKit.Px(this, 27);
+        _meta.KeyWidth = UiKit.Px(this, 52);
+        var metaPad = new Panel { Dock = DockStyle.Fill, Padding = new Padding(0, UiKit.Px(this, 10), 0, UiKit.Px(this, 6)), BackColor = UiKit.Surface };
         _meta.Dock = DockStyle.Fill;
         metaPad.Controls.Add(_meta);
 
         _note.Dock = DockStyle.Bottom;
-        _note.Height = 40;
+        _note.Height = UiKit.Px(this, 40);
         _note.AutoEllipsis = true;      // 窗口再窄下去宁可省略号，也别折行糊成一片
         _note.ForeColor = UiKit.Dim;
         _note.Font = UiKit.F9;

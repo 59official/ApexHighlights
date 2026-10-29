@@ -24,10 +24,10 @@ internal sealed class ClipListView : ListView
     // 勾选列不真加一列：真加一列会把 Cols[] 的下标全推一位，
     // DrawSubItem 里的 e.ColumnIndex 就再对不上 Cols（之前踩过整排串色的坑）。
     // 做法是「批量态下把第一列左边让出一段」，勾选框画在这段里。
-    private const int CheckPadL = 14;                        // 勾选框左缩进
-    private const int CheckSize = 18;                        // 勾选框边长（圆角 5，够圆润）
-    private const int CheckSpan = CheckPadL + CheckSize + 12; // 整段让位宽度
-    private const int CheckRadius = 5;
+    private int CheckPadL => UiKit.Px(this, 14);                    // 勾选框左缩进
+    private int CheckSize => UiKit.Px(this, 18);                    // 勾选框边长（圆角 5，够圆润）
+    private int CheckSpan => CheckPadL + CheckSize + UiKit.Px(this, 12); // 整段让位宽度
+    private int CheckRadius => UiKit.Px(this, 5);
 
     private readonly ImageList _thumbs = new()
     {
@@ -125,7 +125,7 @@ internal sealed class ClipListView : ListView
         OwnerDraw = true;
         HeaderStyle = ColumnHeaderStyle.Nonclickable;
 
-        foreach (var col in Cols) Columns.Add(col.Label, col.Width, col.Align);
+        foreach (var col in Cols) Columns.Add(col.Label, UiKit.Px(this, col.Width), col.Align);
 
         // 文件名列吃掉剩余宽度：别的列固定，窗口拉宽就多显示文件名。
         Resize += (_, _) => FitNameColumn();
@@ -187,7 +187,7 @@ internal sealed class ClipListView : ListView
         if (!on) _checked.Clear();
         // 第一列得变宽：勾选那段是挤在它里面的，不腾地方时间会被截成「10-28 2…」。
         // 只让 40 而不是整个 CheckSpan：多让出来的都是文件名列的钱，批量态本来也不用看清名字。
-        Columns[0].Width = Cols[0].Width + (on ? 40 : 0);
+        Columns[0].Width = UiKit.Px(this, Cols[0].Width) + (on ? UiKit.Px(this, 40) : 0);
         FitNameColumn();
         Invalidate(true);   // 连表头一起刷（「全选」那格是自己画的）
         CheckedChanged?.Invoke();
@@ -399,7 +399,7 @@ internal sealed class ClipListView : ListView
     /// 画一个圆角勾选框。勾上时填金色 + 深色对勾，没勾时是一圈细描边的深底。
     /// 圆角 5 是刻意调的：再小像直角、再大像个圆点药丸。
     /// </summary>
-    private static void DrawCheck(Graphics g, Rectangle box, bool on)
+    private void DrawCheck(Graphics g, Rectangle box, bool on)
     {
         if (on)
         {
@@ -432,7 +432,9 @@ internal sealed class ClipListView : ListView
         if (Columns.Count < 8) return;
         int fixedWidth = 0;
         for (int i = 0; i < Columns.Count - 1; i++) fixedWidth += Columns[i].Width;
-        Columns[^1].Width = Math.Max(120, ClientSize.Width - fixedWidth - 2);
+        // 要留出竖滚动条的宽度，否则最后一行刚好差十几像素，底下会多出一条横向滚动条
+        int avail = ClientSize.Width - fixedWidth - SystemInformation.VerticalScrollBarWidth - UiKit.Px(this, 2);
+        Columns[^1].Width = Math.Max(UiKit.Px(this, 120), avail);
     }
 
     // ------------------------------------------------------------------ 自绘

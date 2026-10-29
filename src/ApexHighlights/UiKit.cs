@@ -14,6 +14,18 @@ namespace ApexHighlights;
 /// </summary>
 internal static class UiKit
 {
+    /// <summary>当前控件的 DPI 缩放比（96 DPI = 1.0）。</summary>
+    public static float Dpi(Control c) => c.DeviceDpi / 96f;
+
+    /// <summary>
+    /// 把「按 96 DPI 写死的设计像素」换成当前 DPI 的真实像素。
+    ///
+    /// 为什么需要：字号是系统按 DPI 自动放大的，而我们的布局全是手写的整数像素。
+    /// 125% / 150% 缩放下字变大了、格子没变，就会出现「字被切掉一半」「列全挤成省略号」。
+    /// 所有自绘布局的尺寸都该过一遍这个函数。
+    /// </summary>
+    public static int Px(Control c, int v) => (int)Math.Round(v * Dpi(c));
+
     // ---- 色板（深灰蓝底 + Apex 金强调）----
     public static readonly Color Bg = Color.FromArgb(20, 21, 25);         // 窗口底
     public static readonly Color Surface = Color.FromArgb(29, 30, 36);    // 卡片

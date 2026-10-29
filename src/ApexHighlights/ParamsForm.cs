@@ -10,7 +10,13 @@ namespace ApexHighlights;
 /// </summary>
 internal sealed class ParamsForm : Form
 {
-    private const int W = 520, H = 404, PadX = 24, TitleH = 72;
+    private const int W = 520, H = 392, PadX = 24, TitleH = 60;
+
+    // 面板里的尺寸都是按 96 DPI 写的「设计像素」，实际窗口按当前 DPI 放大——
+    // 不这么做的话，125% 缩放时字号自动变大、矩形还是老尺寸，副标题就会被切掉上半截
+    // （用户真机截图：『拖完立刻生效，不用保存』只剩半行）。
+    private float S => DeviceDpi / 96f;
+    private int Si(int v) => (int)Math.Round(v * S);
 
     private readonly ParamSlider _bitrate = new();
     private readonly ParamSlider _pre = new();
@@ -37,7 +43,9 @@ internal sealed class ParamsForm : Form
         StartPosition = FormStartPosition.Manual;
         ShowInTaskbar = false;
         BackColor = UiKit.Bg;
-        ClientSize = new Size(W, H);
+        // 几何自己按 DPI 算（见 S/Si），就别让 WinForms 再缩一遍——Toast 那边同款写法
+        AutoScaleMode = AutoScaleMode.None;
+        ClientSize = new Size(Si(W), Si(H));
         DoubleBuffered = true;
         KeyPreview = true;
         Text = "录制参数";
@@ -64,7 +72,7 @@ internal sealed class ParamsForm : Form
         for (int i = 0; i < sliders.Length; i++)
         {
             var s = sliders[i];
-            s.SetBounds(PadX, TitleH + 10 + i * 60, W - PadX * 2, 58);
+            s.SetBounds(Si(PadX), Si(TitleH + 10 + i * 60), Si(W - PadX * 2), Si(58));
             s.Dragged += Fire;          // 拖动中：实时改采集器
             s.Committed += Commit;      // 松手：落盘
             Controls.Add(s);
@@ -80,16 +88,16 @@ internal sealed class ParamsForm : Form
             Fire();
             Commit();          // 恢复默认是明确动作，立刻落盘
         };
-        reset.SetBounds(PadX, H - 56, 104, 38);
+        reset.SetBounds(Si(PadX), Si(H - 56), Si(104), Si(38));
         Controls.Add(reset);
 
         var done = new RoundButton("完成", 96) { Style = RoundButton.Look.Primary };
         done.Click += (_, _) => Close();
-        done.SetBounds(W - PadX - 96, H - 56, 96, 38);
+        done.SetBounds(Si(W - PadX - 96), Si(H - 56), Si(96), Si(38));
         Controls.Add(done);
 
         // 无边框窗口的圆角：Region 会在四角留出真正的透明，不然会露出方形黑角
-        using (var path = UiKit.RoundRect(new Rectangle(0, 0, W, H), 14))
+        using (var path = UiKit.RoundRect(new Rectangle(0, 0, ClientSize.Width, ClientSize.Height), Si(14)))
             Region = new Region(path);
 
         KeyDown += (_, e) => { if (e.KeyCode == Keys.Escape) Close(); };
@@ -123,22 +131,29 @@ internal sealed class ParamsForm : Form
         g.SmoothingMode = SmoothingMode.AntiAlias;
         g.Clear(UiKit.Bg);
         using (var pen = new Pen(UiKit.Line))
-            g.DrawPath(pen, UiKit.RoundRect(new Rectangle(0, 0, W - 1, H - 1), 14));
+            g.DrawPath(pen, UiKit.RoundRect(new Rectangle(0, 0, ClientSize.Width - 1, ClientSize.Height - 1), Si(14)));
 
-        TextRenderer.DrawText(g, "录制参数", UiKit.F11B, new Rectangle(PadX, 14, 240, 26), UiKit.Text,
-            TextFormatFlags.Left | TextFormatFlags.NoPrefix);
+        // 标题与副标题：先量字高再画，别用写死的 26/18 —— DPI 一放大就切字
+        const TextFormatFlags tf = TextFormatFlags.Left | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding;
+        int padX = Si(PadX);
+        int textW = ClientSize.Width - padX * 2 - Si(44);
+        int titleY = Si(12);
+        int titleH = TextRenderer.MeasureText(g, "录制参数", UiKit.F11B, new Size(int.MaxValue, int.MaxValue), tf).Height;
+        TextRenderer.DrawText(g, "录制参数", UiKit.F11B, new Rectangle(padX, titleY, textW, titleH), UiKit.Text, tf);
+
+        int subY = titleY + titleH + Si(2);
+        int subH = TextRenderer.MeasureText(g, "拖完立刻生效，不用保存", UiKit.F9, new Size(int.MaxValue, int.MaxValue), tf).Height;
         TextRenderer.DrawText(g, "拖完立刻生效，不用保存", UiKit.F9,
-            new Rectangle(PadX, 44, 320, 18), UiKit.Dim,
-            TextFormatFlags.Left | TextFormatFlags.NoPrefix);
+            new Rectangle(padX, subY, textW, subH), UiKit.Dim, tf);
 
         // 右上角关闭：画一个 ✕，命中区域在 OnMouseDown 里判
-        var close = new Rectangle(W - 44, 14, 28, 28);
+        var close = CloseHit;
         var hot = close.Contains(PointToClient(Cursor.Position));
         TextRenderer.DrawText(g, "✕", UiKit.F95, close,
             hot ? UiKit.Text : UiKit.Dim, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
     }
 
-    private Rectangle CloseHit => new(W - 44, 14, 28, 28);
+    private Rectangle CloseHit => new(ClientSize.Width - Si(44), Si(12), Si(28), Si(28));
 
     // 无边框窗口：标题区可拖动
     protected override void WndProc(ref Message m)
@@ -148,7 +163,7 @@ internal sealed class ParamsForm : Form
         {
             int y = (short)((long)m.LParam >> 16);
             int x = (short)((long)m.LParam & 0xFFFF);
-            if (y < TitleH && !CloseHit.Contains(x, y))
+            if (y < Si(TitleH) && !CloseHit.Contains(x, y))
             {
                 ReleaseCapture();
                 SendMessage(Handle, 0x00A1 /*WM_NCLBUTTONDOWN*/, (IntPtr)HTCAPTION, IntPtr.Zero);
@@ -167,7 +182,8 @@ internal sealed class ParamsForm : Form
     protected override void OnMouseMove(MouseEventArgs e)
     {
         base.OnMouseMove(e);
-        Invalidate(new Rectangle(W - 46, 12, 32, 32));      // ✕ 的 hover 高亮
+        var r = CloseHit; r.Inflate(2, 2);
+        Invalidate(r);                                     // ✕ 的 hover 高亮
     }
 
     [System.Runtime.InteropServices.DllImport("user32.dll")]
