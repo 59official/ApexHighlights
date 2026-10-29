@@ -151,6 +151,32 @@ internal sealed class LoopbackCapture : IDisposable
     /// <summary>起采集。失败抛异常（上层决定是静默降级还是报错）。</summary>
     public void Start(PcmHandler onPcm)
     {
+        if (_kind != AudioSourceKind.GameProcess)
+        {
+            StartCore(onPcm);
+            return;
+        }
+
+        // 进程回环必须在 MTA 线程上激活。
+        // 托盘的「开始录制」是在 WinForms 的 STA 界面线程里调的：COM 会把 ActivateAudioInterfaceAsync
+        // 返回的对象编组进 STA，而 mmdevapi 给进程回环客户端准备的代理并不实现 IAudioClient，
+        // 第一次碰它（GetMixFormat / 强转）就 E_NOINTERFACE（0x80004002）。
+        // 控制台里跑同样的代码却是好的——因为控制台主线程是 MTA。这个差异坑过一次真机。
+        Exception? err = null;
+        var t = new Thread(() =>
+        {
+            try { StartCore(onPcm); }
+            catch (Exception ex) { err = ex; }
+        })
+        { IsBackground = true, Name = "wasapi-activate" };
+        t.SetApartmentState(ApartmentState.MTA);
+        t.Start();
+        if (!t.Join(8000)) throw new TimeoutException("进程回环 8 秒没启动起来");
+        if (err is not null) throw err;
+    }
+
+    private void StartCore(PcmHandler onPcm)
+    {
         if (_kind == AudioSourceKind.GameProcess)
         {
             _client = ActivateProcessLoopback(_processId);
@@ -473,9 +499,29 @@ internal sealed class LoopbackCapture : IDisposable
         _stop = true;
         try { _signal?.Set(); } catch { }
         try { _thread?.Join(1500); } catch { }
-        try { _client?.Stop(); } catch { }
-        try { if (_client is not null) Marshal.ReleaseComObject(_client); } catch { }
-        try { if (_capture is not null) Marshal.ReleaseComObject(_capture); } catch { }
+
+        // 进程回环的对象是在 MTA 里激活的，释放也得回 MTA：从 STA 调它的方法会再走一次编组，
+        // 又可能撞上同样的 E_NOINTERFACE（Stop 抛异常倒无所谓，ReleaseComObject 漏了会漏引用）。
+        void ComCleanup()
+        {
+            try { _client?.Stop(); } catch { }
+            try { if (_client is not null) Marshal.ReleaseComObject(_client); } catch { }
+            try { if (_capture is not null) Marshal.ReleaseComObject(_capture); } catch { }
+        }
+
+        if (_kind == AudioSourceKind.GameProcess)
+        {
+            try
+            {
+                var t = new Thread(ComCleanup) { IsBackground = true, Name = "wasapi-release" };
+                t.SetApartmentState(ApartmentState.MTA);
+                t.Start();
+                t.Join(2000);
+            }
+            catch { ComCleanup(); }
+        }
+        else ComCleanup();
+
         if (_format != IntPtr.Zero) { try { Marshal.FreeCoTaskMem(_format); } catch { } _format = IntPtr.Zero; }
         _signal?.Dispose();
     }

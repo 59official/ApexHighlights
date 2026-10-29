@@ -101,6 +101,18 @@ internal static class Program
             }
 
             // 进程回环（只录游戏）的自检：把探针挂在自己进程上，播一声自己的提示音看抓不抓得到
+            // STA 复现：托盘窗口线程是 STA，进程回环在这类线程上激活会不会失败要单独验
+            if (args.Any(a => a == "--audio-probe-sta"))
+            {
+                int rc = 1;
+                var t = new Thread(() => { rc = AudioProbe.Run(1500); });
+                t.SetApartmentState(ApartmentState.STA);
+                t.IsBackground = true;
+                t.Start();
+                t.Join(20000);
+                return rc;
+            }
+
             if (args.Any(a => a.StartsWith("--audio-probe", StringComparison.Ordinal)))
             {
                 var probeMs = args.Where(a => a.StartsWith("--audio-probe=", StringComparison.Ordinal))
