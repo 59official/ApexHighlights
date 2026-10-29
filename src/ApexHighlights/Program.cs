@@ -8,6 +8,17 @@ internal static class Program
     {
         try
         {
+            // 打包用：把 AppIcon 渲染成多尺寸 .ico。放在最前面——生成一张图标不该
+            // 顺带创建数据目录（Paths 是懒初始化的，越早碰越容易踩）。
+            var iconArg = args.FirstOrDefault(a => a.StartsWith("--make-icon=", StringComparison.OrdinalIgnoreCase));
+            if (iconArg is not null)
+            {
+                var outPath = iconArg[12..];
+                AppIcon.SaveIco(outPath);
+                Console.WriteLine($"[icon] 已写入 {Path.GetFullPath(outPath)}");
+                return 0;
+            }
+
             string game = "apex";
             string? logPath = null, title = null, offline = null;
             int fps = 60, gop = 0, fakeHit = 0, bitrate = 20_000_000, dump = 0, duration = 0, traySelfTest = 0;

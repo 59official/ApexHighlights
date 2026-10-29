@@ -10,6 +10,7 @@ obj/
 
 # 发布产物（由 CI 重新构建，不进仓库）
 dist/
+release/
 dist_new/
 dist2/
 dist3/
