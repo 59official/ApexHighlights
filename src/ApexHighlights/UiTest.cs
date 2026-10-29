@@ -325,6 +325,25 @@ internal static class UiTest
                 { Console.WriteLine($"    BAD 全选后 {list.CheckedCount}/{list.RowCount}"); fail++; }
                 else Console.WriteLine($"    ok  全选 → {list.CheckedCount}/{list.RowCount} 片全勾上");
 
+                // 表头上那格「全选」走的是 NativeWindow（表头是子窗口，消息不会冒到 ListView），
+                // 这条路径光靠 ToggleAll 的自检是盖不住的 —— 用户就是在这里点了没反应。
+                // 所以这里真往表头发一条 WM_LBUTTONDOWN，连「钩子挂没挂上」一起验。
+                // 此时 35 片已全勾上，所以第一次点表头应当是「全取消」。
+                if (!list.HeaderHooked)
+                { Console.WriteLine("    BAD 表头钩子没挂上（点「全选」会没反应）"); fail++; }
+                list.TestHeaderClick(20);
+                if (list.CheckedCount != 0)
+                { Console.WriteLine($"    BAD 点表头「全选」没把全勾的取消掉，Count={list.CheckedCount}"); fail++; }
+                else Console.WriteLine("    ok  点表头「全选」→ 全取消（35 → 0）");
+                list.TestHeaderClick(20);
+                if (list.CheckedCount != list.RowCount)
+                { Console.WriteLine($"    BAD 再点表头「全选」没全勾上，{list.CheckedCount}/{list.RowCount}"); fail++; }
+                else Console.WriteLine($"    ok  再点表头「全选」→ {list.CheckedCount}/{list.RowCount} 片全勾上");
+                list.TestHeaderClick(400);
+                if (list.CheckedCount != list.RowCount)
+                { Console.WriteLine($"    BAD 点表头「时间」那一列也动了勾选，Count={list.CheckedCount}"); fail++; }
+                else Console.WriteLine("    ok  点表头别处（时间列）不算全选");
+
                 list.ToggleAll();
                 if (list.CheckedCount != 0 || del.Enabled)
                 { Console.WriteLine($"    BAD 再点全选没清空，Count={list.CheckedCount} 可用={del.Enabled}"); fail++; }

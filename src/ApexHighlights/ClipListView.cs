@@ -1,5 +1,6 @@
 using System.Drawing.Drawing2D;
 using System.Globalization;
+using System.Runtime.InteropServices;
 
 namespace ApexHighlights;
 
@@ -44,6 +45,16 @@ internal sealed class ClipListView : ListView
     // 勾选态按路径存，不按行下标：重建行之后下标会变，路径不会。
     private readonly HashSet<string> _checked = new(StringComparer.OrdinalIgnoreCase);
     private bool _selectMode;
+
+    // 表头是 ListView 的一个子窗口（SysHeader32），点它的消息**不会**冒到 ListView 的
+    // OnMouseDown —— 所以「全选」那一格必须单独挂个 NativeWindow 才点得着。
+    private HeaderHook? _headerHook;
+    private const int LVM_GETHEADER = 0x1000 + 31;
+    private const int WM_LBUTTONDOWN = 0x0201;
+    private const int WM_LBUTTONDBLCLK = 0x0203;
+
+    [DllImport("user32.dll", CharSet = CharSet.Auto)]
+    private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
 
     /// <summary>
     /// 一列的全部定义：表头文字、宽度、对齐、格子取什么文本、什么颜色、悬停说明什么。
@@ -178,7 +189,7 @@ internal sealed class ClipListView : ListView
         // 只让 40 而不是整个 CheckSpan：多让出来的都是文件名列的钱，批量态本来也不用看清名字。
         Columns[0].Width = Cols[0].Width + (on ? 40 : 0);
         FitNameColumn();
-        Invalidate();
+        Invalidate(true);   // 连表头一起刷（「全选」那格是自己画的）
         CheckedChanged?.Invoke();
     }
 
@@ -201,7 +212,7 @@ internal sealed class ClipListView : ListView
         if (!all)
             foreach (ListViewItem it in Items)
                 if (it.Tag is ClipInfo c) _checked.Add(c.Path);
-        Invalidate();
+        Invalidate(true);   // 表头的「全选」框也要跟着变
         CheckedChanged?.Invoke();
     }
 
@@ -295,14 +306,80 @@ internal sealed class ClipListView : ListView
     /// <summary>表头高度（没有行时算 0，此时不响应点击）。</summary>
     private int HeaderHeight => Items.Count > 0 ? GetItemRect(0).Top : 0;
 
-    /// <summary>这一下点的是不是勾选框（或表头的「全选」）。</summary>
+    /// <summary>这一下点的是不是勾选框（行里的；表头那格走 HeaderHook）。</summary>
     private bool IsCheckHit(Point p)
     {
         if (!_selectMode) return false;
         int headerH = HeaderHeight;
         if (headerH <= 0) return false;
-        if (p.Y < headerH) return p.X >= 2 && p.X < CheckSpan + 44;   // 勾选框 + 「全选」两个字
+        if (p.Y < headerH) return p.X >= 2 && p.X < CheckSpan + 44;   // 兜底：真收到表头点击时也算
         return p.X >= 2 && p.X < CheckSpan + 2 && GetItemAt(p.X, p.Y) is not null;
+    }
+
+    protected override void OnHandleCreated(EventArgs e)
+    {
+        base.OnHandleCreated(e);
+        // 句柄建好才有表头；换句柄（改 Style/重建）时要重挂
+        _headerHook?.ReleaseHandle();
+        _headerHook = null;
+        var hdr = SendMessage(Handle, LVM_GETHEADER, IntPtr.Zero, IntPtr.Zero);
+        if (hdr != IntPtr.Zero)
+        {
+            _headerHook = new HeaderHook(this);
+            _headerHook.AssignHandle(hdr);
+        }
+    }
+
+    protected override void OnHandleDestroyed(EventArgs e)
+    {
+        _headerHook?.ReleaseHandle();
+        _headerHook = null;
+        base.OnHandleDestroyed(e);
+    }
+
+    /// <summary>
+    /// 表头被点了一下（坐标是表头客户区）。只有「全选」那一格算数，
+    /// 其它位置返回 false 让表头自己处理（拖动列宽之类）。
+    /// </summary>
+    internal bool HandleHeaderClick(int x)
+    {
+        if (!_selectMode) return false;
+        if (x < 2 || x >= CheckSpan + 44) return false;
+        ToggleAll();
+        return true;
+    }
+
+    /// <summary>表头子窗口的壳：拦下「全选」那一下，其余原样放行。</summary>
+    private sealed class HeaderHook : NativeWindow
+    {
+        private readonly ClipListView _owner;
+        public HeaderHook(ClipListView owner) => _owner = owner;
+
+        protected override void WndProc(ref Message m)
+        {
+            if (m.Msg is WM_LBUTTONDOWN or WM_LBUTTONDBLCLK)
+            {
+                long lp = m.LParam.ToInt64();
+                int x = (short)(lp & 0xFFFF);
+                if (_owner.HandleHeaderClick(x)) return;   // 吞掉：别让表头顺手开始拖列宽
+            }
+            base.WndProc(ref m);
+        }
+    }
+
+    /// <summary>表头句柄拿到了没有（自检用：拿不到说明钩子没挂上）。</summary>
+    internal bool HeaderHooked => _headerHook?.Handle is { } h && h != IntPtr.Zero;
+
+    /// <summary>
+    /// 自检用：真往表头窗口发一条 WM_LBUTTONDOWN，把 HeaderHook.WndProc 那条路走通。
+    /// 直接调 HandleHeaderClick 只能验判断，验不到「钩子到底挂没挂上」——
+    /// 用户报的正是「点不动」，那是挂不上，不是判断错。
+    /// </summary>
+    internal void TestHeaderClick(int x)
+    {
+        var h = _headerHook?.Handle ?? IntPtr.Zero;
+        if (h == IntPtr.Zero) return;
+        SendMessage(h, WM_LBUTTONDOWN, IntPtr.Zero, (IntPtr)((10 << 16) | (x & 0xFFFF)));
     }
 
     protected override void OnMouseDown(MouseEventArgs e)
