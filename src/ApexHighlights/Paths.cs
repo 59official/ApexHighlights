@@ -138,8 +138,8 @@ internal static class Paths
     }
 
     /// <summary>
-    /// 把内嵌的游戏配置释放到数据目录（存在就不覆盖，用户改过的配置不能丢）。
-    /// 返回释放/已存在的配置根目录，供 GameProfile 搜索。
+    /// 把内嵌的游戏配置释放到数据目录（存在就不覆盖，用户改过的配置不能丢），
+    /// 释放完再把新版配置里「新增的模板」并进用户那份 json。
     /// </summary>
     public static void EnsureGames()
     {
@@ -158,10 +158,81 @@ internal static class Paths
                 using var outFile = File.Create(dst);
                 src.CopyTo(outFile);
             }
+
+            MergeNewTemplates(asm);
         }
         catch (Exception ex)
         {
             Console.WriteLine("[!] 释放内嵌游戏配置失败: " + ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// 把内嵌配置里**新增的模板**追加到用户已有的那份 &lt;game&gt;.json。
+    ///
+    /// 为什么必须有这一步（2026-10-29 真机事故）：释放规则是「文件已存在就不覆盖」，
+    /// 于是 0.8.4 加的繁中模板、0.8.5 加的简中模板——图片是释放进去了（新文件名），
+    /// 但注册模板的那几行写在 apex.json 里，而老用户的 apex.json 从第一次安装起就没再动过。
+    /// 结果就是：程序升级了，模板还是只有英文那一条，中文局一次都认不出来，
+    /// 而且版本号看着是新的，极容易被当成「识别坏了」。
+    ///
+    /// 只追加不覆盖：用户改过的 band、阈值、自己加的模板一律原样保留。
+    /// </summary>
+    private static void MergeNewTemplates(System.Reflection.Assembly asm)
+    {
+        var opts = new System.Text.Json.JsonSerializerOptions { WriteIndented = true };
+        foreach (var name in asm.GetManifestResourceNames())
+        {
+            if (!name.StartsWith("games/", StringComparison.OrdinalIgnoreCase)) continue;
+            if (!name.EndsWith(".json", StringComparison.OrdinalIgnoreCase)) continue;
+
+            var rel = name["games/".Length..];
+            var dst = Path.Combine(Games, rel);
+            if (!File.Exists(dst)) continue;
+
+            try
+            {
+                using var src = asm.GetManifestResourceStream(name);
+                if (src is null) continue;
+                using var reader = new StreamReader(src);
+                if (System.Text.Json.Nodes.JsonNode.Parse(reader.ReadToEnd()) is not System.Text.Json.Nodes.JsonObject bundled) continue;
+                if (System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(dst)) is not System.Text.Json.Nodes.JsonObject local) continue;
+                if (bundled["templates"] is not System.Text.Json.Nodes.JsonArray bundledTemplates) continue;
+
+                if (local["templates"] is not System.Text.Json.Nodes.JsonArray localTemplates)
+                {
+                    localTemplates = new System.Text.Json.Nodes.JsonArray();
+                    local["templates"] = localTemplates;
+                }
+
+                // 「已经有了」同时看 id 和图片路径：老版本的英文模板 id 叫 knock，
+                // 新版改成 knock_en，只比 id 会把同一张图追加两遍（分数一样，纯浪费）。
+                var have = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var t in localTemplates)
+                {
+                    if (t?["id"]?.GetValue<string>() is { } id) have.Add(id);
+                    if (t?["file"]?.GetValue<string>() is { } file) have.Add(file);
+                }
+
+                var added = new List<string>();
+                foreach (var t in bundledTemplates)
+                {
+                    var id = t?["id"]?.GetValue<string>();
+                    var file = t?["file"]?.GetValue<string>();
+                    if (id is null || have.Contains(id)) continue;
+                    if (file is not null && have.Contains(file)) continue;
+                    localTemplates.Add(t.DeepClone());
+                    added.Add(id);
+                }
+                if (added.Count == 0) continue;
+
+                File.WriteAllText(dst, local.ToJsonString(opts));
+                Log.Write($"[games] {rel} 补进 {added.Count} 个新模板：{string.Join(", ", added)}（其余设置保持原样）");
+            }
+            catch (Exception ex)
+            {
+                Log.Write($"[games] 合并 {rel} 的模板失败（保持原样）: {ex.Message}");
+            }
         }
     }
 }

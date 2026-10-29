@@ -190,6 +190,10 @@ internal sealed class Capture : IDisposable
     public string? DiagPath { get; set; }
     private StreamWriter? _diag;
 
+    /// <summary>诊断模式下留存的「分数最高的几帧」条带，退出时写成 bmp 供人事后看图。</summary>
+    private readonly List<(float Score, int X, int Y, byte[] Band)> _diagTop = new();
+    private const int DiagTopN = 5;
+
     private void Diag(long ms, float score, int x, int y)
     {
         if (DiagPath is null) return;
@@ -197,8 +201,42 @@ internal sealed class Capture : IDisposable
         {
             _diag ??= new StreamWriter(DiagPath, append: false) { AutoFlush = false };
             _diag.WriteLine($"{ms},{score:F4},{x},{y}");
+            KeepTopBand(score, x, y);
         }
         catch { DiagPath = null; }
+    }
+
+    /// <summary>留住当前分数最高的几帧条带（最多 5 张）。诊断才用，正常跑不碰。</summary>
+    private void KeepTopBand(float score, int x, int y)
+    {
+        if (score <= 0) return;
+        if (_diagTop.Count >= DiagTopN)
+        {
+            var worst = _diagTop.MinBy(t => t.Score);
+            if (score <= worst.Score) return;
+            _diagTop.Remove(worst);
+        }
+        _diagTop.Add((score, x, y, (byte[])_band.Clone()));
+    }
+
+    /// <summary>退出时把留存的条带写成 bmp（文件名带分数和坐标）。</summary>
+    private void DumpDiagBands()
+    {
+        if (DiagPath is null || _diagTop.Count == 0) return;
+        try
+        {
+            var dir = Path.GetDirectoryName(Path.GetFullPath(DiagPath));
+            if (string.IsNullOrEmpty(dir)) return;
+            var ordered = _diagTop.OrderByDescending(t => t.Score).ToList();
+            for (int i = 0; i < ordered.Count; i++)
+            {
+                var t = ordered[i];
+                var name = $"diag_top{i + 1}_{t.Score:F2}_x{t.X}_y{t.Y}.bmp";
+                DiagReport.WriteGrayBmp(Path.Combine(dir, name), t.Band, _prof.Band.W, _prof.Band.H);
+            }
+            Log.Write($"[diag] 存了 {ordered.Count} 张最高分条带到 {dir}");
+        }
+        catch (Exception ex) { Log.Write("[diag] 写条带图失败: " + ex.Message); }
     }
 
     public Capture(IntPtr hwnd, BannerEngine engine)
@@ -1278,6 +1316,7 @@ internal sealed class Capture : IDisposable
         try { _session?.Dispose(); } catch { }
         try { _pool?.Dispose(); } catch { }
         try { _diag?.Flush(); _diag?.Dispose(); } catch { }
+        DumpDiagBands();
         try { _wcap?.Dispose(); } catch { }
         try { _mic?.Dispose(); } catch { }
         try { _ring?.Flush(); } catch { }
