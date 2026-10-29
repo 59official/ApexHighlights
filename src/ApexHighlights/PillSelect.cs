@@ -1,4 +1,4 @@
-﻿using System.Drawing.Drawing2D;
+using System.Drawing.Drawing2D;
 
 namespace ApexHighlights;
 
@@ -138,7 +138,7 @@ internal sealed class PillSelect : Control
             menu.Region = new Region(rp);
 
         var settled = menu.Location;
-        Animate(menu, settled, -SlideDist, 0, OpenMs, null);
+        Animate(menu, settled, -SlideDist, 0, OpenMs, null, Ease.OutBack);
         WatchLeave(menu, settled);
         return menu;
     }
@@ -147,10 +147,32 @@ internal sealed class PillSelect : Control
     private System.Windows.Forms.Timer? _watch;
     private bool _closing;
 
-    private const int OpenMs = 330;      // 滑出总时长：原来 84ms，用户要“慢 0.25 秒”
-    private const int CloseMs = 200;     // 收起比打开快一点，像被吸回去
-    private const int SlideDist = 16;    // 行程：始终从胶囊底边往上 16px 处滑进来
+    private const int OpenMs = 380;      // 滑出总时长：原来 84ms“太生硬”，后来 330ms，用户又要“再柔一点”
+    private const int CloseMs = 220;     // 收起比打开快一点，像被吸回去
+    private const int SlideDist = 10;    // 行程：用户嫌原来 16px 幅度太大，收小一档
     private const int LeaveDelayMs = 1000;
+
+    /// <summary>
+    /// 缓动曲线。原来只有 ease-out cubic 一条，走到终点是「刹住」而不是「落定」，
+    /// 用户说不够柔、不够弹。这里换成：
+    /// - 打开用 back（冲过终点再回来），靠那一下回弹给出弹性，行程只有 10px 所以回弹约 2px，不会晃眼；
+    /// - 收起用 in-cubic（越走越快），像被吸回去，而不是匀速平移。
+    /// </summary>
+    private enum Ease { OutCubic, OutQuint, OutBack, InCubic }
+
+    /// <summary>
+    /// 回弹强度：c 越大冲得越远。2.0 在 10px 行程上过冲约 2px（一帧两像素，看得见但不吵）。
+    /// 再大就会在末尾「悬」在 1px 上不动 —— 那是整数取整的锅，不是曲线不够弹。
+    /// </summary>
+    private const double Backness = 2.0;
+
+    private static double EaseAt(Ease k, double p) => k switch
+    {
+        Ease.OutQuint => 1 - Math.Pow(1 - p, 5),
+        Ease.OutBack => 1 + (Backness + 1) * Math.Pow(p - 1, 3) + Backness * Math.Pow(p - 1, 2),
+        Ease.InCubic => p * p * p,
+        _ => 1 - Math.Pow(1 - p, 3),
+    };
 
     /// <summary>菜单落定后盯鼠标：离开胶囊和菜单满 1 秒就滑回去收掉。</summary>
     private void WatchLeave(ContextMenuStrip menu, Point settled)
@@ -180,7 +202,7 @@ internal sealed class PillSelect : Control
                 if (_closing)      // 收到一半又挪回来：停手，回原位
                 {
                     _closing = false;
-                    Animate(menu, settled, menu.Location.Y - settled.Y, 0, 90, null);
+                    Animate(menu, settled, menu.Location.Y - settled.Y, 0, 180, null, Ease.OutCubic);
                 }
                 return;
             }
@@ -193,17 +215,17 @@ internal sealed class PillSelect : Control
             {
                 _closing = false;
                 if (!menu.IsDisposed) menu.Close();
-            });
+            }, Ease.InCubic);
         };
         _watch = t;
         t.Start();
     }
 
     /// <summary>
-    /// 把菜单从 settled + fromDy 动画到 settled + toDy（ease-out cubic，逐帧改窗口位置）。
+    /// 把菜单从 settled + fromDy 动画到 settled + toDy（曲线见 Ease），逐帧改窗口位置。
     /// 只动位置不做透明度：不引入分层窗口，省掉一类渲染风险。
     /// </summary>
-    private void Animate(ContextMenuStrip menu, Point settled, int fromDy, int toDy, int ms, Action? done)
+    private void Animate(ContextMenuStrip menu, Point settled, int fromDy, int toDy, int ms, Action? done, Ease ease = Ease.OutCubic)
     {
         StopAnim();
         if (ms <= 0 || fromDy == toDy)
@@ -213,6 +235,7 @@ internal sealed class PillSelect : Control
             return;
         }
 
+        // 15ms 一步 ≈ 60fps；步数按总时长算，所以改时长不会改手感
         int steps = Math.Max(2, ms / 15);
         int interval = Math.Max(10, ms / steps);
         int step = 0;
@@ -231,7 +254,7 @@ internal sealed class PillSelect : Control
 
             step++;
             double p = step / (double)steps;
-            double e = 1 - Math.Pow(1 - p, 3);
+            double e = EaseAt(ease, p);
             int dy = (int)Math.Round(fromDy + (toDy - fromDy) * e);
             menu.Location = new Point(settled.X, settled.Y + dy);
 

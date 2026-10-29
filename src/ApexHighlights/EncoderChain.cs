@@ -72,8 +72,15 @@ public sealed class EncoderChain : IDisposable
     public void Dispose()
     {
         _disposed = true;
-        _cur.Dispose();
-        try { _next?.Wait(500); } catch { }
-        _next?.Result?.Dispose();
+        try { _cur.Dispose(); } catch { }
+
+        // 预建的那台可能还在后台线程里造（或造失败了）：原先直接 _next?.Result 取结果，
+        // 任务没跑完时会阻塞，抛异常时会把整个 Dispose 带崩 —— 运行期换码率就会撞上。
+        // 先等一会儿，拿到结果再释放；任务失败就丢掉，交给 GC。
+        var pending = _next;
+        _next = null;
+        if (pending is null) return;
+        try { if (pending.Wait(500) && pending.Status == TaskStatus.RanToCompletion) pending.Result.Dispose(); }
+        catch { }
     }
 }

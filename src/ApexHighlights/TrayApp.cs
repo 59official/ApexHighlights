@@ -15,6 +15,7 @@ internal sealed class TrayApp : ApplicationContext
     private readonly GameProfile _profile;
     private readonly QuotaPolicy _policy;
     private readonly DetectPolicy _detect;
+    private readonly CapturePolicy _capture;
     private readonly string _cfgPath;
     private readonly NotifyIcon _icon;
     private readonly Form _marshal = new();      // 只用来做线程封送，从没显示过
@@ -27,10 +28,8 @@ internal sealed class TrayApp : ApplicationContext
     private readonly ToolStripMenuItem _libraryItem = new("打开回顾库");
 
     private int _fps;
-    private int _bitrate;
     private string _title;
     private readonly bool _openUiFirst;
-    private readonly bool _audio;
     private readonly bool _beep;
     private readonly bool _ocr;
     private readonly int _fakeHit;
@@ -57,17 +56,16 @@ internal sealed class TrayApp : ApplicationContext
     /// <summary>捕获成功后控制台再保持可见多久（毫秒）。</summary>
     private const int KeepVisibleAfterCaptureMs = 5_000;
 
-    public TrayApp(GameProfile profile, QuotaPolicy policy, DetectPolicy detect, string cfgPath, string title, int fps, int bitrate, bool openUiFirst, bool audio, bool beep, int fakeHit = 0, int selfTest = 0, bool ocr = true)
+    public TrayApp(GameProfile profile, QuotaPolicy policy, DetectPolicy detect, CapturePolicy capture, string cfgPath, string title, int fps, bool openUiFirst, bool beep, int fakeHit = 0, int selfTest = 0, bool ocr = true)
     {
         _profile = profile;
         _policy = policy;
         _detect = detect;
+        _capture = capture;
         _cfgPath = cfgPath;
         _title = title;
         _fps = fps;
-        _bitrate = bitrate;
         _openUiFirst = openUiFirst;
-        _audio = audio;
         _beep = beep;
         _ocr = ocr;
         _fakeHit = fakeHit;
@@ -90,6 +88,8 @@ internal sealed class TrayApp : ApplicationContext
         menu.Items.Add(config);
         menu.Items.Add(BuildSensitivityMenu());
         menu.Items.Add(BuildMergeMenu());
+        menu.Items.Add(BuildBitrateMenu());
+        menu.Items.Add(BuildAudioMenu());
         menu.Items.Add(new ToolStripSeparator());
         var quit = new ToolStripMenuItem("退出");
         quit.Click += (_, _) => Quit();
@@ -162,6 +162,21 @@ internal sealed class TrayApp : ApplicationContext
                             (File.Exists(_cfgPath) ? string.Join(" ", File.ReadAllLines(_cfgPath)) : "(没写)"));
                         ClickMerge(8);
                         say($"点回 8s 之后 = {EffectiveMergeSec}s");
+                        // 画质码率 + 音轨：走同一条点击路径，验证「立刻生效 + 落盘 + 不冲掉阈值/合并窗口」
+                        say($"码率菜单 = {FindBitrateRoot()?.Text ?? "找不到"}");
+                        say($"改前码率 = {EffectiveBitrateMbps}Mbps");
+                        ClickBitrate(40);
+                        say($"点 40Mbps 之后 = {EffectiveBitrateMbps}Mbps，采集器里 Bitrate = {(_cap?.Bitrate.ToString() ?? "无采集")}");
+                        say($"音轨菜单 = {FindAudioRoot()?.Text ?? "找不到"}，改前 = {(EffectiveAudio ? "开" : "关")}，实际在录 = {(_cap?.AudioOn.ToString() ?? "无采集")}");
+                        ClickAudio(false);
+                        say($"点「关」之后 = {(EffectiveAudio ? "开" : "关")}，实际在录 = {(_cap?.AudioOn.ToString() ?? "无采集")}");
+                        say("config.json 现在是 " +
+                            (File.Exists(_cfgPath) ? string.Join(" ", File.ReadAllLines(_cfgPath)) : "(没写)"));
+                        // 再开回来：验证 StopAudio/StartAudio 往返没问题（这是最容易踩坑的一条路径）
+                        ClickAudio(true);
+                        say($"点回「开」之后 = {(EffectiveAudio ? "开" : "关")}，实际在录 = {(_cap?.AudioOn.ToString() ?? "无采集")}");
+                        ClickBitrate(20);
+                        say($"点回 20Mbps 之后 = {EffectiveBitrateMbps}Mbps");
                         break;
                     case 4:
                         say($"点「暂停录制」→ {_pauseItem.Text}");
@@ -231,11 +246,11 @@ internal sealed class TrayApp : ApplicationContext
                 DiagPath = null,
                 TargetFps = _fps,
                 EncodedFps = _fps,
-                Bitrate = _bitrate,
+                Bitrate = _capture.BitrateBps,
             };
             _cap.GopFrames = _fps;
             _cap.Quota = _policy;
-            _cap.AudioEnabled = _audio;
+            _cap.AudioEnabled = _capture.Audio;
             _cap.BeepOnSave = _beep;
             _cap.OcrEnabled = _ocr;
             _cap.MergeMs = _detect.MergeSec * 1000;
@@ -244,7 +259,7 @@ internal sealed class TrayApp : ApplicationContext
             _cap.EnableEncoding(90);
             var rep = _cap.RunQuotaCheck();
 
-            Log.Write($"[tray] 采集已启动 {_cap.Width}x{_cap.Height} @{_fps}fps {_bitrate / 1_000_000}Mbps，" +
+            Log.Write($"[tray] 采集已启动 {_cap.Width}x{_cap.Height} @{_fps}fps {_capture.BitrateMbps}Mbps，" +
                       $"条带 {_profile.Band.W}x{_profile.Band.H}@{_profile.Band.X},{_profile.Band.Y}，" +
                       $"模板 {string.Join(",", _profile.Templates.Select(t => t.Id))}，阈值 {_cap.Threshold:F2}，库 {_cap.ClipDir}" +
                       (rep is null ? "" : $"（{rep}）"));
@@ -530,6 +545,110 @@ internal sealed class TrayApp : ApplicationContext
         RefreshStatus();
     }
 
+    /// <summary>
+    /// 「画质码率」子菜单：用户反馈 20Mbps 快速转视角时糊，所以把档位铺开到 10–100。
+    /// 码率不是越小越省事——掉到 15 以下 Apex 的草和树叶会糊成一片，剪出来没法看；
+    /// 但调太高硬盘也撑不住，所以每档都写清楚代价。
+    /// </summary>
+    private ToolStripMenuItem BuildBitrateMenu()
+    {
+        var root = new ToolStripMenuItem("画质码率");
+        var items = new List<ToolStripMenuItem>();
+
+        void Refresh()
+        {
+            var cur = EffectiveBitrateMbps;
+            foreach (var it in items)
+                it.Checked = (int)it.Tag! == cur;
+            // 命令行给的 -b 25 这种不在档位上的值也要显示出来，否则菜单看起来像没生效
+            var offGrid = !CapturePolicy.BitratePresets.Contains(cur);
+            root.Text = offGrid ? $"画质码率（{cur}Mbps 自定义）" : $"画质码率（{cur}Mbps）";
+        }
+
+        foreach (var mbps in CapturePolicy.BitratePresets)
+        {
+            var it = new ToolStripMenuItem($"{mbps} Mbps   {CapturePolicy.HintForBitrate(mbps)}")
+            { Tag = mbps };
+            var v = mbps;
+            it.Click += (_, _) => ApplyBitrate(v, Refresh);
+            root.DropDownItems.Add(it);
+            items.Add(it);
+        }
+
+        root.DropDownOpening += (_, _) => Refresh();
+        Refresh();
+        return root;
+    }
+
+    /// <summary>当前码率（Mbps）：运行中问采集器，没在录看配置。</summary>
+    private int EffectiveBitrateMbps =>
+        _cap is not null ? Math.Max(1, _cap.Bitrate / 1_000_000) : _capture.BitrateMbps;
+
+    /// <summary>改码率：内存配置 → 换掉正在跑的编码器 → 落盘。</summary>
+    private void ApplyBitrate(int mbps, Action? after = null)
+    {
+        var p = CapturePolicy.Clamp(new CapturePolicy { BitrateMbps = mbps, Audio = _capture.Audio });
+        _capture.BitrateMbps = p.BitrateMbps;
+        try { _cap?.SetBitrate(_capture.BitrateBps); }
+        catch (Exception ex) { Log.Write("[tray] 改码率失败: " + ex.Message); }
+
+        var ok = _capture.Save(_cfgPath);
+        Log.Write($"[bitrate] 码率设为 {_capture.BitrateMbps}Mbps" +
+                  $"（保存到 {_cfgPath}：{(ok ? "成功" : "失败")}）");
+        after?.Invoke();
+        RefreshStatus();
+    }
+
+    /// <summary>
+    /// 「音轨」子菜单：录制前忘了加 --no-audio 就只能重开，所以给个能随时拨的开关。
+    /// 关掉之后已经在录的环形里那些带声音的片段不受影响，只有之后的片段变无声。
+    /// </summary>
+    private ToolStripMenuItem BuildAudioMenu()
+    {
+        var root = new ToolStripMenuItem("音轨");
+        var items = new List<ToolStripMenuItem>();
+
+        void Refresh()
+        {
+            var on = EffectiveAudio;
+            foreach (var it in items)
+                it.Checked = (bool)it.Tag! == on;
+            // 想开但没开成（没有默认播放设备之类）时得让用户看得出来
+            var broken = on && _cap is not null && !_cap.AudioOn;
+            root.Text = on ? $"音轨（开{(broken ? "·异常" : "")}）" : "音轨（关）";
+        }
+
+        var onItem = new ToolStripMenuItem("开  录游戏声音（系统回环，不碰麦克风）") { Tag = true };
+        onItem.Click += (_, _) => ApplyAudio(true, Refresh);
+        var offItem = new ToolStripMenuItem("关  片段为无声 mp4，省一点体积") { Tag = false };
+        offItem.Click += (_, _) => ApplyAudio(false, Refresh);
+        root.DropDownItems.Add(onItem);
+        root.DropDownItems.Add(offItem);
+        items.Add(onItem);
+        items.Add(offItem);
+
+        root.DropDownOpening += (_, _) => Refresh();
+        Refresh();
+        return root;
+    }
+
+    /// <summary>音轨该不该开：运行中问采集器，没在录看配置。</summary>
+    private bool EffectiveAudio => _cap is not null ? _cap.AudioEnabled : _capture.Audio;
+
+    /// <summary>改音轨开关：内存配置 → 就地起停采集器里的音轨 → 落盘。</summary>
+    private void ApplyAudio(bool on, Action? after = null)
+    {
+        _capture.Audio = on;
+        try { _cap?.SetAudioEnabled(on); }
+        catch (Exception ex) { Log.Write("[tray] 切音轨失败: " + ex.Message); }
+
+        var ok = _capture.Save(_cfgPath);
+        Log.Write($"[audio] 音轨设为{(on ? "开" : "关")}" +
+                  $"（保存到 {_cfgPath}：{(ok ? "成功" : "失败")}）");
+        after?.Invoke();
+        RefreshStatus();
+    }
+
     /// <summary>改阈值：写进内存配置 → 立刻套到正在跑的采集上 → 落盘记住。</summary>
     private void ApplyThreshold(float v, Action? after = null)
     {
@@ -571,6 +690,36 @@ internal sealed class TrayApp : ApplicationContext
         var hit = root?.DropDownItems.OfType<ToolStripMenuItem>()
             .FirstOrDefault(i => i.Tag is int s && s == sec);
         if (hit is null) { Log.Write($"[t] 找不到合并窗口档位 {sec}s"); return; }
+        hit.PerformClick();
+    }
+
+    /// <summary>自检用：找到「画质码率」根菜单项。</summary>
+    private ToolStripMenuItem? FindBitrateRoot() =>
+        _icon.ContextMenuStrip?.Items.OfType<ToolStripMenuItem>()
+            .FirstOrDefault(i => i.Text.StartsWith("画质码率", StringComparison.Ordinal));
+
+    /// <summary>自检用：等价于点了一下某个码率档位。</summary>
+    private void ClickBitrate(int mbps)
+    {
+        var root = FindBitrateRoot();
+        var hit = root?.DropDownItems.OfType<ToolStripMenuItem>()
+            .FirstOrDefault(i => i.Tag is int v && v == mbps);
+        if (hit is null) { Log.Write($"[t] 找不到码率档位 {mbps}Mbps"); return; }
+        hit.PerformClick();
+    }
+
+    /// <summary>自检用：找到「音轨」根菜单项。</summary>
+    private ToolStripMenuItem? FindAudioRoot() =>
+        _icon.ContextMenuStrip?.Items.OfType<ToolStripMenuItem>()
+            .FirstOrDefault(i => i.Text.StartsWith("音轨", StringComparison.Ordinal));
+
+    /// <summary>自检用：等价于点了一下音轨开关。</summary>
+    private void ClickAudio(bool on)
+    {
+        var root = FindAudioRoot();
+        var hit = root?.DropDownItems.OfType<ToolStripMenuItem>()
+            .FirstOrDefault(i => i.Tag is bool b && b == on);
+        if (hit is null) { Log.Write($"[t] 找不到音轨项 {(on ? "开" : "关")}"); return; }
         hit.PerformClick();
     }
 

@@ -1,4 +1,4 @@
-﻿using System.Diagnostics;
+using System.Diagnostics;
 
 namespace ApexHighlights;
 
@@ -14,6 +14,7 @@ internal static class Program
             bool encode = true;
             bool audio = true;
             bool beep = true;
+            bool bitrateGiven = false;   // --bitrate= 给了就要覆盖 config.json 里的值
             bool ocr = true;     // 横幅 OCR 分类 + 去重；--no-ocr 关掉（没装语言包时用）
             bool tray = true;    // 默认常驻托盘（用户要的形态）；--no-tray 退回纯控制台
             bool ui = false;     // --ui：先把库窗口打开再开始录
@@ -32,7 +33,7 @@ internal static class Program
                 else if (a.StartsWith("--log=", StringComparison.OrdinalIgnoreCase)) logPath = a[6..];
                 else if (a.StartsWith("--title=", StringComparison.OrdinalIgnoreCase)) title = a[8..];
                 else if (a.StartsWith("--fps=", StringComparison.OrdinalIgnoreCase)) fps = int.Parse(a[6..]);
-                else if (a.StartsWith("--bitrate=", StringComparison.OrdinalIgnoreCase)) bitrate = int.Parse(a[10..]) * 1_000_000;
+                else if (a.StartsWith("--bitrate=", StringComparison.OrdinalIgnoreCase)) { bitrate = int.Parse(a[10..]) * 1_000_000; bitrateGiven = true; }
                 else if (a == "--no-encode") encode = false;
                 else if (a == "--no-audio") audio = false;
                 else if (a == "--no-beep") beep = false;
@@ -146,11 +147,23 @@ internal static class Program
                 detect = DetectPolicy.Clamp(new DetectPolicy { Threshold = thv });
             engine.Apply(detect);
 
+            // 录制参数（码率 + 音轨）：config.json 里的值先当底，命令行只覆盖它给过的那一项，
+            // 然后把这个「最终生效值」同时喂给采集器和托盘菜单 —— 两边显示必须一致。
+            var capture = CapturePolicy.Load(cfgPath);
+            if (bitrateGiven && bitrate > 0) capture.BitrateMbps = Math.Max(1, bitrate / 1_000_000);
+            if (!audio) capture.Audio = false;
+            capture = CapturePolicy.Clamp(capture);
+            bitrate = capture.BitrateBps;
+            audio = capture.Audio;
+            Console.WriteLine($"[2d] 画质码率 {capture.BitrateMbps}Mbps（config.json 的 BitrateMbps，托盘「画质码率」可调）");
+            Console.WriteLine($"[2e] 音轨 {(capture.Audio ? "开" : "关")}（config.json 的 Audio，托盘「音轨」可调）");
+
             return offline is not null
                 ? Offline(engine, offline.Length == 0 ? Path.Combine(Paths.DataRoot, "probe", "bands.bin") : offline)
                 : Live(engine, dump, title ?? (profile.WindowTitles.Length > 0 ? profile.WindowTitles[0] : profile.Name), logPath, fps, bitrate, encode, gop, fakeHit, duration, audio, beep, quota, tray, ui, traySelfTest, detect, cfgPath, ocr,
                        int.TryParse(args.FirstOrDefault(a => a.StartsWith("--fake-repeat=", StringComparison.OrdinalIgnoreCase))?[14..], out var fr) && fr > 0 ? fr : 1,
-                       int.TryParse(args.FirstOrDefault(a => a.StartsWith("--fake-gap=", StringComparison.OrdinalIgnoreCase))?[11..], out var fg) && fg > 0 ? fg : 700);
+                       int.TryParse(args.FirstOrDefault(a => a.StartsWith("--fake-gap=", StringComparison.OrdinalIgnoreCase))?[11..], out var fg) && fg > 0 ? fg : 700,
+                       capture);
         }
         catch (Exception ex)
         {
@@ -453,7 +466,7 @@ internal static class Program
     /// WinForms 要求 STA —— 但主线程已经被采集/COM 用掉了，所以单独起一个 STA 线程跑
     /// Application.Run，主线程 join 住。这样不用给 Main 加 [STAThread] 去动已有的 COM 路径。
     /// </summary>
-    private static int RunTray(GameProfile prof, QuotaPolicy quota, DetectPolicy detect, string cfgPath, string title, int fps, int bitrate, bool ui, bool audio, bool beep, int fakeHit = 0, int selfTest = 0, bool ocr = true)
+    private static int RunTray(GameProfile prof, QuotaPolicy quota, DetectPolicy detect, CapturePolicy capture, string cfgPath, string title, int fps, bool ui, bool beep, int fakeHit = 0, int selfTest = 0, bool ocr = true)
     {
         // 单实例：托盘常驻意味着用户完全可能双击好几次（黑框一闪就没，很容易以为没起来）。
         // 多开会各自采一份、抢同一个 captures\ring 目录，几小时后配额和分片全乱。
@@ -471,12 +484,14 @@ internal static class Program
         }
 
         // 这些启动行也用 Log.Write：托盘模式控制台会被藏掉，只有写进日志才能事后核对
-        Log.Write($"[1] 托盘常驻：目标 \"{title}\"，{fps}fps {bitrate / 1_000_000}Mbps，音轨{(audio ? "开" : "关")}，提示音{(beep ? "开" : "关")}，横幅分类{(ocr ? "开" : "关")}");
+        Log.Write($"[1] 托盘常驻：目标 \"{title}\"，{fps}fps {capture.BitrateMbps}Mbps，音轨{(capture.Audio ? "开" : "关")}，提示音{(beep ? "开" : "关")}，横幅分类{(ocr ? "开" : "关")}");
         Log.Write($"[2] 配额 {quota.QuotaGb}GB / 保留 {(quota.RetainDays == 0 ? "永久" : quota.RetainDays + " 天")} / 水位 {quota.WatermarkGb}GB");
         var thShown = detect.Threshold > 0 ? detect.Threshold : prof.Templates[0].Threshold;
         Log.Write($"[2b] 命中阈值 {thShown:F2}（config.json 的 Threshold 字段，托盘菜单「检测灵敏度」里可调）");
         Log.Write($"[2c] 合并窗口 {(detect.MergeSec == 0 ? "关（每次命中各出一段）" : detect.MergeSec + "s")}" +
                   "（config.json 的 MergeSec 字段，托盘菜单「合并窗口」里可调）");
+        Log.Write($"[2d] 画质码率 {capture.BitrateMbps}Mbps（config.json 的 BitrateMbps 字段，托盘菜单「画质码率」里可调）");
+        Log.Write($"[2e] 音轨 {(capture.Audio ? "开（系统回环，不碰麦克风）" : "关（片段无声）")}（config.json 的 Audio 字段，托盘菜单「音轨」里可调）");
         Log.Write("[3] 右键托盘图标可以打开回顾库；关掉这个窗口也不影响录制。");
 
         // 托盘模式下把控制台藏掉：双击 exe 时那个黑窗口没必要一直开着。
@@ -491,7 +506,7 @@ internal static class Program
                 Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
                 Application.EnableVisualStyles();
                 Application.SetCompatibleTextRenderingDefault(false);
-                using var app = new TrayApp(prof, quota, detect, cfgPath, title, fps, bitrate, ui, audio, beep, fakeHit, selfTest, ocr);
+                using var app = new TrayApp(prof, quota, detect, capture, cfgPath, title, fps, ui, beep, fakeHit, selfTest, ocr);
                 Application.Run(app);
             }
             catch (Exception ex)
@@ -509,12 +524,15 @@ internal static class Program
         return exit;
     }
 
-    private static int Live(BannerEngine engine, int dumpAtSec, string title, string? logPath, int fps, int bitrate, bool encode, int gop, int fakeHit, int durationSec, bool audio = true, bool beep = true, QuotaPolicy? quotaPolicy = null, bool tray = true, bool ui = false, int traySelfTest = 0, DetectPolicy? detectPolicy = null, string? cfgPath = null, bool ocr = true, int fakeRepeat = 1, int fakeGap = 700)
+    private static int Live(BannerEngine engine, int dumpAtSec, string title, string? logPath, int fps, int bitrate, bool encode, int gop, int fakeHit, int durationSec, bool audio = true, bool beep = true, QuotaPolicy? quotaPolicy = null, bool tray = true, bool ui = false, int traySelfTest = 0, DetectPolicy? detectPolicy = null, string? cfgPath = null, bool ocr = true, int fakeRepeat = 1, int fakeGap = 700, CapturePolicy? capturePolicy = null)
     {
         var prof = engine.Profile;
         var quota = quotaPolicy ?? new QuotaPolicy();
         var detect = detectPolicy ?? new DetectPolicy { Threshold = 0 };
         var cfg = cfgPath ?? Paths.ConfigFile;
+        // 托盘菜单要显示/落盘这些值，所以得把「最终生效值」原样带进去；
+        // 别的调用方（测试入口）不传就当从 bitrate/audio 参数推出来。
+        var capture = capturePolicy ?? new CapturePolicy { BitrateMbps = Math.Max(1, bitrate / 1_000_000), Audio = audio };
 
         // 日志必须在托盘分支之前开 —— 托盘模式会把控制台藏起来，
         // 要是跟以前一样放在分支后面，托盘模式就一个字节都不写，
@@ -526,7 +544,7 @@ internal static class Program
         // 托盘模式：没有控制台窗口可看，走 ApplicationContext 常驻
         if (tray && encode && durationSec == 0)
         {
-            try { return RunTray(prof, quota, detect, cfg, title, fps, bitrate, ui, audio, beep, fakeHit, traySelfTest, ocr); }
+            try { return RunTray(prof, quota, detect, capture, cfg, title, fps, ui, beep, fakeHit, traySelfTest, ocr); }
             finally { Log.Close(); }
         }
 

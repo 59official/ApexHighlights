@@ -46,6 +46,8 @@ internal sealed class Capture : IDisposable
     private const int MaxInFlight = 8;
 
     private EncoderChain? _enc;
+    /// <summary>换编码器（运行期改码率）时的互斥：编码线程持锁提交，换引用的那一方也持锁，避免提交到已释放的实例。</summary>
+    private readonly object _encSwap = new();
     private SegmentRing? _ring;
     private Thread? _encThread;
     private readonly BlockingCollection<(ID3D11Texture2D tex, long pts100)> _queue = new(new ConcurrentQueue<(ID3D11Texture2D, long)>(), 4);
@@ -65,6 +67,10 @@ internal sealed class Capture : IDisposable
     private string _audioName = "";
     private string _audioErr = "";
     private long _audioBytes;
+    /// <summary>静音补齐线程的开关。不能复用 _stop —— 那个一关就再也开不起来了。</summary>
+    private volatile bool _audioFillRun;
+    /// <summary>环形容量（秒）：运行期重开音轨时要按同样的容量重建 AudioRing。</summary>
+    private int _ringCapacitySec = 90;
     public bool AudioEnabled = true;
     public int AudioRate = 48000;
     public int AudioChannels = 2;
@@ -225,41 +231,137 @@ internal sealed class Capture : IDisposable
     public void EnableEncoding(int capacitySec)
     {
         var dir = RingDir ?? Path.Combine(OutDir, "ring");
+        _ringCapacitySec = capacitySec;
         _converter = new GpuConverter(_dev!, _ctx!, Width, Height, EncodedFps);
         _enc = new EncoderChain(Width, Height, Bitrate, GopFrames, EncodedFps, _dev);
         _ring = new SegmentRing(dir, Width, Height, capacitySec);
         _lib = new ClipLibrary(ClipDir);
 
         // 音轨：顺手起了系统回环采集；麦克风不碰（用户只要游戏声）。
-        // 编码器构造失败不该让视频也停掉，所以整段兜住。
-        if (AudioEnabled)
-        {
-            try
-            {
-                _aac = new AacEncoder(AudioRate, AudioChannels, AudioBitrate);
-                _aRing = new AudioRing(_aac.SampleRate, _aac.Channels, capacitySec) { Asc = _aac.Asc };
-                _wcap = new LoopbackCapture();
-                _wcap.Start(OnPcm);
-                _audioName = _wcap.DeviceName;
-            }
-            catch (Exception ex)
-            {
-                _audioErr = "音频启动失败: " + ex.Message;
-                _aac = null;
-                _aRing = null;
-            }
-        }
+        // 编码器构造失败不该让视频也停掉，所以整段兜住（StartAudio 内部已经兜了）。
+        if (AudioEnabled) StartAudio();
 
         _encThread = new Thread(EncodeLoop) { IsBackground = true, Name = "encode", Priority = ThreadPriority.AboveNormal };
         _encThread.Start();
+    }
 
-        // 静音补齐：WASAPI 在完全安静时不送包，靠这个线程按壁钟把音频时间轴推上去
-        if (_aac is not null)
+    /// <summary>
+    /// 起音轨：AAC 编码器 + 音频环形 + WASAPI 回环 + 静音补齐线程。
+    /// 启动时和「用户把音轨从关拨到开」时都走这里，两条路径不能有第二份实现。
+    /// </summary>
+    private void StartAudio()
+    {
+        if (_aac is not null) return;
+        try
         {
+            _aac = new AacEncoder(AudioRate, AudioChannels, AudioBitrate);
+            _aRing = new AudioRing(_aac.SampleRate, _aac.Channels, _ringCapacitySec) { Asc = _aac.Asc };
+            _wcap = new LoopbackCapture();
+            _wcap.Start(OnPcm);
+            _audioName = _wcap.DeviceName;
+
+            // 重开音轨必须把时间轴归零：Pump 用 _audioStart100 推算「壁钟上该有多少样本」，
+            // 不重置的话第一帧就会一次性补进整场录制时长的静音（几百兆 PCM）。
+            lock (_audioFeedGate)
+            {
+                _audioStart100 = long.MinValue;
+                _audioFedFrames = 0;
+                _silenceFilled = 0;
+            }
+
+            _audioFillRun = true;
             _audioFill = new Thread(AudioFillLoop) { IsBackground = true, Name = "audiofill" };
             _audioFill.Start();
+            _audioErr = "";
+            // 端点 id 偶尔会退化成 "{0.0.0.00000000}" 这种没有信息量的串（虚拟声卡/驱动怪癖），
+            // 那种时候写「默认播放设备」比写一串花括号有用。
+            var dev = string.IsNullOrWhiteSpace(_audioName) || _audioName.StartsWith("{0.0.0.", StringComparison.Ordinal)
+                ? "默认播放设备" : _audioName;
+            Log.Write($"[audio] 音轨已开启（{dev}，{_aac.SampleRate}Hz/{_aac.Channels}ch）");
+        }
+        catch (Exception ex)
+        {
+            _audioErr = "音频启动失败: " + ex.Message;
+            _aac = null;
+            _aRing = null;
+            Log.Write("[audio] " + _audioErr);
         }
     }
+
+    /// <summary>
+    /// 关音轨：先停回环（Dispose 内部会 Join 采集线程并 Stop 客户端），再放编码器和环形。
+    /// 之后 WriteClip 传 null 的 AudioRing，Ring.Prepare 会自动退回「只有视频轨」的封装。
+    /// </summary>
+    private void StopAudio()
+    {
+        _audioFillRun = false;
+
+        var wcap = _wcap;
+        _wcap = null;
+        try { wcap?.Dispose(); } catch { }
+
+        lock (_audioFeedGate)
+        {
+            try { _aac?.Dispose(); } catch { }
+            _aac = null;
+            _aRing = null;
+        }
+        _audioName = "";
+        Log.Write("[audio] 音轨已关闭（后续片段为无声 mp4）");
+    }
+
+    /// <summary>音轨当前是不是真的在录（关掉或启动失败都为 false）。</summary>
+    public bool AudioOn => _aac is not null;
+
+    /// <summary>
+    /// 运行中开关音轨：不重开录制、不重建视频链路，正在写的环形照常。
+    /// 已经在目标状态的直接返回（用户连点两下「开」不会重建编码器）。
+    /// </summary>
+    public void SetAudioEnabled(bool on)
+    {
+        AudioEnabled = on;
+        if (on == AudioOn) return;
+        try
+        {
+            if (on) StartAudio();
+            else StopAudio();
+        }
+        catch (Exception ex) { _audioErr = "切换音轨失败: " + ex.Message; }
+    }
+
+    /// <summary>
+    /// 运行中改码率：EncoderChain 的码率是 readonly（NVENC 的初始化参数），
+    /// 所以只能换一台新的 —— 先建好再原子换引用，编码线程的每一次提交都在这把锁里，
+    /// 换完才释放旧的，绝不会有帧提交到已 Dispose 的编码器上。
+    ///
+    /// 注意：新编码器吐出的 SPS/PPS 会被 SegmentRing 丢掉（它只记第一份），
+    /// 因为分辨率/profile 没变，两份参数集完全一样，所以无害；
+    /// 哪天允许改分辨率了，这里就是第一个要动的地方。
+    /// </summary>
+    public void SetBitrate(int bps)
+    {
+        Bitrate = Math.Clamp(bps, 2_000_000, 200_000_000);
+        var old = _enc;
+        if (old is null) return;          // 还没起编码：EnableEncoding 时会用新 Bitrate
+
+        EncoderChain fresh;
+        try { fresh = new EncoderChain(Width, Height, Bitrate, GopFrames, EncodedFps, _dev); }
+        catch (Exception ex)
+        {
+            _encErr = "改码率失败: " + ex.Message;
+            Log.Write("[bitrate] " + _encErr);
+            return;
+        }
+
+        lock (_encSwap)
+        {
+            old = _enc;
+            _enc = fresh;
+        }
+        try { old?.Dispose(); } catch { }
+        Log.Write($"[bitrate] 码率改为 {Bitrate / 1_000_000}Mbps（已重建编码器，环形继续写）");
+    }
+
 
     /// <summary>配额策略（外部可改，线程安全地换引用即可）。</summary>
     public QuotaPolicy Quota
@@ -413,9 +515,10 @@ internal sealed class Capture : IDisposable
     /// <summary>静音补齐线程：WASAPI 不送包的时候也得让音频时间轴往前走。</summary>
     private void AudioFillLoop()
     {
-        while (!_stop)
+        while (!_stop && _audioFillRun)
         {
             Thread.Sleep(20);
+            if (!_audioFillRun) break;
             Pump(null, 0, _clock.ElapsedMilliseconds * 10_000L);
         }
     }
@@ -436,8 +539,16 @@ internal sealed class Capture : IDisposable
             if (item.tex is null) continue;
             try
             {
-                _enc!.SubmitSurface(item.pts100, item.tex, (data, cbPts) => _ring!.Append(cbPts / 10, data));
-                _encoded++;
+                // 持锁提交：改码率时换引用的那一方也拿这把锁，所以这里拿到的实例一定还没被 Dispose。
+                lock (_encSwap)
+                {
+                    var enc = _enc;
+                    if (enc is not null)
+                    {
+                        enc.SubmitSurface(item.pts100, item.tex, (data, cbPts) => _ring!.Append(cbPts / 10, data));
+                        _encoded++;
+                    }
+                }
             }
             catch (Exception ex) { if (_encErr.Length == 0) _encErr = ex.Message; }
             finally
@@ -859,17 +970,19 @@ internal sealed class Capture : IDisposable
     {
         var s = $"帧={_frames} 采样={_samples} 事件={_hits} 近失={_nearCount}";
         if (_samples > 0) s += $" 检测={(_totalMs / (double)_samples):F1}ms";
-        if (_enc is not null)
+        var enc = _enc;                       // 改码率会换实例，只读一次，免得拼出半个旧半个新
+        if (enc is not null)
         {
-            s += $" 编码={_encoded} 丢帧={_droppedFrames}(限{_limiterDrops}/池{_capDrops}/队{_queueDrops}) 建池={_poolCreated} 编码器丢={_enc.Dropped}";
+            s += $" 编码={_encoded} 丢帧={_droppedFrames}(限{_limiterDrops}/池{_capDrops}/队{_queueDrops}) 建池={_poolCreated} 编码器丢={enc.Dropped}";
             if (_ring is not null) s += $" 环={_ring.Segments.Count}段/{_ring.Coverage()}";
-            s += $" 编码={_enc.Name} 旋={_enc.Rotations} gop[{NvEncoder.GopInfo}]";
+            s += $" 码率={Bitrate / 1_000_000}Mbps 编码={enc.Name} 旋={enc.Rotations} gop[{NvEncoder.GopInfo}]";
         }
         if (_aRing is not null)
         {
             var ac = _aRing.Coverage();
             s += $" 音频={_aRing.TotalFrames}帧/{_aRing.DiskBytes() / 1024}KB 覆盖({ac.From / 1000},{ac.To / 1000})ms";
         }
+        else if (!AudioEnabled) s += " 音频=关";
         if (OcrEnabled && _ocrCount > 0)
             s += $" OCR={_ocrCount}次/{_ocrMs}ms 合并={_merged}次";
         if (_ocr.Err.Length > 0) s += $"  ocrErr={_ocr.Err}";
@@ -884,6 +997,7 @@ internal sealed class Capture : IDisposable
     public void Dispose()
     {
         _stop = true;
+        _audioFillRun = false;      // 静音补齐线程自己会退出（它每 20ms 看一次这个标志）
         try { _queue.CompleteAdding(); } catch { }
         // 退出前把还没切完的片段切掉（后摇可能没录满，但前摇画面不能浪费）
         try { FlushPending(); } catch { }
@@ -895,6 +1009,7 @@ internal sealed class Capture : IDisposable
         try { _enc?.Dispose(); } catch { }
         try { _aac?.Dispose(); } catch { }
         try { _encThread?.Join(2000); } catch { }
+        try { _audioFill?.Join(1000); } catch { }
         try { _clipThread?.Join(2000); } catch { }
         _converter?.Dispose();
         foreach (var t in _texPool) try { t.Dispose(); } catch { }
