@@ -1,3 +1,11 @@
+; dist 没 publish 过就别编译，省得装出个空目录。
+; 这一步必须放在**编译期**：安装时的机器上没有 ../dist 这回事。
+; 之前用 InitializeSetup 在安装时查，结果从别的目录启动安装包时 {src} 指向当前目录，
+; FileExists 一假就静默退出，表现成「双击没反应」。
+#if !FileExists(AddBackslash(SourcePath) + "..\dist\ApexHighlights.exe")
+  #error 没找到 ..\dist\ApexHighlights.exe —— 先跑 dotnet publish 或 packaging/pack-release.sh
+#endif
+
 ; ApexHighlights 安装包脚本（Inno Setup 6）
 ;
 ; 为什么要有安装包：便携 zip 解压出 266 个文件，普通玩家看到会以为下错了东西；
@@ -129,18 +137,5 @@ begin
     if MsgBox('录下的片段还留在：' + #13#10 + Dir + #13#10#13#10 +
               '要一起删掉吗？删了没法恢复。', mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES then
       DelTree(Dir, True, True, True);
-  end;
-end;
-
-// 装之前友好的提醒：dist 没 publish 过的话这里会明确报错，而不是装出个空目录
-function InitializeSetup(): Boolean;
-begin
-  Result := True;
-  if not FileExists(ExpandConstant('{src}\..\dist\{#AppExe}')) then
-  begin
-    MsgBox('没找到 ..\dist\{#AppExe}。' + #13#10 +
-           '先跑一次 dotnet publish（或 packaging\pack-release.sh）再来编译安装包。',
-           mbError, MB_OK);
-    Result := False;
   end;
 end;
