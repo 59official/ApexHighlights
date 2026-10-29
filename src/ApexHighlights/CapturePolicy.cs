@@ -61,7 +61,7 @@ public sealed class CapturePolicy
     /// H.264 在运动块多的时候会把树/草糊成一片。30–40 是这台机器实测的清晰度拐点，
     /// 所以菜单里把 30/40 标成推荐，但默认值保持不变。
     /// </summary>
-    public int BitrateMbps { get; set; } = 20;
+    public int BitrateMbps { get; set; } = 28;
 
     /// <summary>
     /// 音轨来源，见 <see cref="AudioMode"/>。默认「只录游戏」。
@@ -80,6 +80,18 @@ public sealed class CapturePolicy
     /// <summary>要不要音轨：只有「不录声音」这一档没有。</summary>
     [JsonIgnore]
     public bool AnyAudio => Audio != AudioMode.None;
+
+    /// <summary>
+    /// 命中之前往回录多少秒（用户 2026-10-29 要的滑杆，默认 15）。
+    /// 以前这个是写在游戏档案里的 30 秒常量，没人能动——每段 35 秒里有 30 秒是跑图画面。
+    /// </summary>
+    public int PreRollSec { get; set; } = 15;
+
+    /// <summary>
+    /// 命中之后继续录多少秒（默认 15）。它同时也决定「一段什么时候算结束」：
+    /// 最后一次命中之后安静满这个时长才收尾。
+    /// </summary>
+    public int PostRollSec { get; set; } = 15;
 
     /// <summary>只录游戏进程时，托盘菜单里显示「已回退系统」——进程回环没起来过。</summary>
     [JsonIgnore]
@@ -197,6 +209,8 @@ public sealed class CapturePolicy
             else root = new JsonObject();
 
             root["BitrateMbps"] = BitrateMbps;
+            root["PreRollSec"] = PreRollSec;
+            root["PostRollSec"] = PostRollSec;
             root["AudioMode"] = Audio.ToString();
             root["Notice"] = Notice.ToString();
             // 老字段已经没人读了，代码里留着只会让手改配置的人以为它还有效
@@ -218,8 +232,12 @@ public sealed class CapturePolicy
     /// <summary>夹到有意义的范围：5–200 Mbps（再低没法看，再高硬盘撑不住），枚举值不认识就回默认档。</summary>
     public static CapturePolicy Clamp(CapturePolicy p)
     {
-        if (p.BitrateMbps < 5) p.BitrateMbps = 5;
-        if (p.BitrateMbps > 200) p.BitrateMbps = 200;
+        if (p.BitrateMbps < BitrateMin) p.BitrateMbps = BitrateMin;
+        if (p.BitrateMbps > BitrateMax) p.BitrateMbps = BitrateMax;
+        if (p.PreRollSec < 0) p.PreRollSec = 0;
+        if (p.PreRollSec > RollMax) p.PreRollSec = RollMax;
+        if (p.PostRollSec < 0) p.PostRollSec = 0;
+        if (p.PostRollSec > RollMax) p.PostRollSec = RollMax;
         if (!Enum.IsDefined(p.Audio)) p.Audio = AudioMode.GameOnly;
         if (!Enum.IsDefined(p.Notice)) p.Notice = NoticeMode.Toast;
         // 去重，并丢掉本版本已经没有的种类（老配置里可能留着 Kill/Knocked）
@@ -230,19 +248,10 @@ public sealed class CapturePolicy
         return p;
     }
 
-    /// <summary>菜单上给的档位。10–100 覆盖「省空间」到「几乎无损」，中间 20→30→40 是主战场。</summary>
-    public static readonly int[] BitratePresets = { 10, 15, 20, 30, 40, 60, 80, 100 };
-
-    /// <summary>每档一句人话：让用户知道多点一档要付出多少硬盘。</summary>
-    public static string HintForBitrate(int mbps) => mbps switch
-    {
-        <= 15 => "省空间，1080p60 转视角会明显糊",
-        <= 20 => "默认：以前一直用的档，快速转视角有点糊",
-        <= 30 => "推荐：清晰度和体积的平衡点",
-        <= 40 => "推荐：细节明显更清楚，体积约 1.5 倍",
-        <= 60 => "很清晰，一小时约 20GB",
-        _ => "近乎无损，硬盘吃得快",
-    };
+    // 滑杆范围（面板和 Clamp 共用一套数，免得两处各写一半对不上）
+    public const int BitrateMin = 4;
+    public const int BitrateMax = 60;
+    public const int RollMax = 30;
 
     /// <summary>音轨档位在菜单里的顺序（默认档排第一，用户从上往下看就是推荐顺序）。</summary>
     public static readonly AudioMode[] AudioModes =

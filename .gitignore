@@ -48,3 +48,6 @@ config.json
 packaging/.secrets/
 packaging/identity/out/
 packaging/identity/stage/
+
+# 一次性脚本与自检临时目录
+tmp-*/

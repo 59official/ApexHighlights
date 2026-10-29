@@ -81,6 +81,14 @@ internal sealed class Capture : IDisposable
     /// 不要直接摸那几个采集源。
     /// </summary>
     public AudioMode Mode = AudioMode.GameOnly;
+    /// <summary>命中前录多少秒。-1 = 用游戏档案里的值（老行为）。</summary>
+    public int PreRollSec = -1;
+    /// <summary>命中后录多少秒。-1 = 用游戏档案里的值。</summary>
+    public int PostRollSec = -1;
+
+    private long PreRollUs => (PreRollSec >= 0 ? PreRollSec : _prof.PreRollSec) * 1_000_000L;
+    private long PostRollUs => (PostRollSec >= 0 ? PostRollSec : _prof.PostRollSec) * 1_000_000L;
+
     public int AudioRate = 48000;
     public int AudioChannels = 2;
     public int AudioBitrate = 160000;
@@ -1017,14 +1025,14 @@ internal sealed class Capture : IDisposable
                 if (_ring is not null)
                 {
                     var (_, coverTo) = _ring.Coverage();
-                    ringReady = coverTo >= lastMs * 1000L + _prof.PostRollSec * 1_000_000L;
+                    ringReady = coverTo >= lastMs * 1000L + PostRollUs;
                 }
                 long quiet = _clock.ElapsedMilliseconds - lastMs;
 
                 // 后摇录满了、并且安静够一个合并窗口，才算这一场结束
                 if (ringReady && quiet >= MergeMs) break;
                 // 兜底：环形已经滑过足够远（比如命中后立刻暂停/退出），不再干等
-                if (_clock.ElapsedMilliseconds - started > MergeMs + 3000 + _prof.PostRollSec * 1000L) break;
+                if (_clock.ElapsedMilliseconds - started > MergeMs + 3000 + PostRollUs / 1000) break;
 
                 Thread.Sleep(80);
             }
@@ -1115,8 +1123,8 @@ internal sealed class Capture : IDisposable
         {
             var (coverFrom, coverTo) = _ring.Coverage();
             long endUs = coverTo;
-            long startUs = Math.Max(coverFrom, firstMs * 1000L - _prof.PreRollSec * 1_000_000L);
-            long stopUs = Math.Min(endUs, lastMs * 1000L + _prof.PostRollSec * 1_000_000L);
+            long startUs = Math.Max(coverFrom, firstMs * 1000L - PreRollUs);
+            long stopUs = Math.Min(endUs, lastMs * 1000L + PostRollUs);
             if (stopUs - startUs < 500_000) return (null, 0);
 
             Directory.CreateDirectory(ClipDir);

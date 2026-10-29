@@ -46,6 +46,9 @@ public sealed class LibraryForm : Form
     private readonly RoundButton _btnDir = new("选择目录", 118);
     private readonly RoundButton _btnDel = new("删除", 88);
     private readonly RoundButton _btnCancel = new("取消", 88) { Visible = false };
+    private readonly RoundButton _btnParams = new("录制参数", 118);
+    /// <summary>头部那行小灰字：说清「录的是窗口尺寸」这件事，免得有人拿它跟游戏内分辨率较真。</summary>
+    private readonly Label _sizeNote = new();
     private Panel? _searchPill, _thPill, _kindPill, _timePill;
     private SurfaceCard? _listCard;
     private bool _bandsReady;
@@ -156,8 +159,15 @@ public sealed class LibraryForm : Form
         _searchPill = PillHost(_search, 250);
         ((Pill)_searchPill).Fill = UiKit.PillFill;
 
+        _sizeNote.Text = "录制尺寸跟随游戏窗口（非游戏内渲染分辨率）";
+        _sizeNote.Font = UiKit.F9;
+        _sizeNote.ForeColor = Color.FromArgb(120, 124, 136);
+        _sizeNote.AutoSize = true;
+        _sizeNote.BackColor = UiKit.Bg;
+
         _head.Controls.Add(_title);
         _head.Controls.Add(_count);
+        _head.Controls.Add(_sizeNote);
         _head.Controls.Add(_thLabel);
         _head.Controls.Add(_thPill);
         _head.Controls.Add(_searchPill);
@@ -171,6 +181,7 @@ public sealed class LibraryForm : Form
         _btnPlay.Click += (_, _) => OpenSelected();
         _btnReveal.Click += (_, _) => RevealSelected();
         _btnDir.Click += (_, _) => PickClipsDir();
+        _btnParams.Click += (_, _) => OnParamsRequested?.Invoke();
         _btnDel.Style = RoundButton.Look.Danger;
         _btnDel.Click += (_, _) =>
         {
@@ -197,6 +208,7 @@ public sealed class LibraryForm : Form
         _bar.Controls.Add(_btnPlay);
         _bar.Controls.Add(_btnReveal);
         _bar.Controls.Add(_btnDir);
+        _bar.Controls.Add(_btnParams);
         _bar.Controls.Add(_btnDel);
         _bar.Controls.Add(_btnCancel);
         _bar.Controls.Add(_kindPill);
@@ -303,6 +315,8 @@ public sealed class LibraryForm : Form
         var thPill = _thPill!;
         search.SetBounds(hw - search.Width, 8, search.Width, 38);
         thPill.SetBounds(search.Left - 8 - thPill.Width, 8, thPill.Width, 38);
+        // 和「22 片 · 合计 2.44GB」同一行，靠右收边
+        _sizeNote.Location = new Point(Math.Max(0, _head.Width - _sizeNote.Width), _count.Top);
         _thLabel.Text = "灵敏度";
         int thLabelW = TextRenderer.MeasureText(_thLabel.Text, _thLabel.Font).Width;
         _thLabel.SetBounds(thPill.Left - 10 - thLabelW, 8 + (38 - _thLabel.Height) / 2, thLabelW, _thLabel.Height);
@@ -313,7 +327,8 @@ public sealed class LibraryForm : Form
         _btnReveal.SetBounds(112, btnY, 118, 38);
         _btnDir.SetBounds(238, btnY, 118, 38);
         _btnDel.SetBounds(364, btnY, _list.SelectMode ? 124 : 88, 38);
-        _btnCancel.SetBounds(_btnDel.Right + 10, btnY, 88, 38);
+        _btnParams.SetBounds(_btnDel.Right + 10, btnY, 118, 38);
+        _btnCancel.SetBounds(_btnParams.Right + 10, btnY, 88, 38);
         var timePill = _timePill!;
         var kindPill = _kindPill!;
         timePill.SetBounds(_bar.Width - timePill.Width, btnY, timePill.Width, 38);
@@ -469,6 +484,9 @@ public sealed class LibraryForm : Form
 
     /// <summary>改配额/保留天数的出口：库窗口只负责「问」，真正落到 policy + config.json 由宿主做。</summary>
     public Action<long, int>? OnQuotaChanged { get; set; }
+
+    /// <summary>用户点了工具条上的「录制参数」。宿主（托盘）负责把面板弹出来。</summary>
+    public Action? OnParamsRequested;
 
     /// <summary>状态栏这一行的「点开就能改」菜单：两个子项组，和托盘里那套档位一致。</summary>
     private void ShowQuotaMenu()

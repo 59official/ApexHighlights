@@ -1,13 +1,60 @@
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 
 namespace ApexHighlights;
 
 internal static class Program
 {
+    /// <summary>
+    /// 程序现在是 GUI 子系统（WinExe），双击和开机自启都不会再弹黑框。
+    /// 但自检是命令行跑的，那些 [ok]/[X] 输出得有人接收——所以启动时先试着挂回父进程的控制台：
+    /// 从终端启动就照常看得见，从资源管理器/快捷方式启动则根本没有父控制台，AttachConsole 返回 false，
+    /// 这时接一次 stdout/stderr 也是空的，无害。只在检测到父控制台时接管输出。
+    /// </summary>
+    private const int ATTACH_PARENT_PROCESS = -1;
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool AttachConsole(int processId);
+
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr GetStdHandle(int handle);
+
+    private const int STD_OUTPUT_HANDLE = -11;
+    private const int STD_ERROR_HANDLE = -12;
+
+    /// <summary>把 Console 的输出接回父终端。返回 false 表示没有父控制台（正常双击启动）。</summary>
+    private static bool AttachParentConsole()
+    {
+        try
+        {
+            // 先把原来的句柄记下来：`program > log.txt` 这种重定向本来就是有效的，
+            // 那时候千万别去"修"它，否则日志会被我们改到控制台上、文件里一个字都不剩。
+            var hadOut = GetStdHandle(STD_OUTPUT_HANDLE);
+            var hadErr = GetStdHandle(STD_ERROR_HANDLE);
+            bool validOut = hadOut != IntPtr.Zero && hadOut != new IntPtr(-1);
+            bool validErr = hadErr != IntPtr.Zero && hadErr != new IntPtr(-1);
+
+            if (!AttachConsole(ATTACH_PARENT_PROCESS)) return false;
+            if (validOut && validErr) return true;          // 已经被重定向过，原样用
+
+            // AttachConsole 之后 .NET 的 Console.Out 还指着原来的空句柄，重建一次才写得出去
+            var stdout = GetStdHandle(STD_OUTPUT_HANDLE);
+            var stderr = GetStdHandle(STD_ERROR_HANDLE);
+            if (stdout != IntPtr.Zero && stdout != new IntPtr(-1))
+                Console.SetOut(new StreamWriter(Console.OpenStandardOutput()) { AutoFlush = true });
+            if (stderr != IntPtr.Zero && stderr != new IntPtr(-1))
+                Console.SetError(new StreamWriter(Console.OpenStandardError()) { AutoFlush = true });
+            return true;
+        }
+        catch { return false; }
+    }
+
     private static int Main(string[] args)
     {
         try
         {
+            // 挂回父终端只对「有人在看」的场景有意义：命令行参数一个都没有时就是双击启动，省掉这次调用
+            if (args.Length > 0) AttachParentConsole();
             // 打包用：把 AppIcon 渲染成多尺寸 .ico。放在最前面——生成一张图标不该
             // 顺带创建数据目录（Paths 是懒初始化的，越早碰越容易踩）。
             var iconArg = args.FirstOrDefault(a => a.StartsWith("--make-icon=", StringComparison.OrdinalIgnoreCase));
@@ -21,6 +68,10 @@ internal static class Program
 
             // 打包用：身份包（sparse MSIX）要的那几张 png 从同一份绘制代码出，
             // 免得商店资产和 exe 图标是两张脸。
+            // 录制参数面板的截图：面板没有宿主窗口，单独一个口子
+            var shotParamsArg = args.FirstOrDefault(a => a.StartsWith("--shot-params=", StringComparison.OrdinalIgnoreCase));
+            if (shotParamsArg is not null) return ShotParams(shotParamsArg[14..]);
+
             var assetsArg = args.FirstOrDefault(a => a.StartsWith("--make-assets=", StringComparison.OrdinalIgnoreCase));
             if (assetsArg is not null)
             {
@@ -219,10 +270,11 @@ internal static class Program
             audio = capture.Audio != AudioMode.None;
             // 成片目录：必须在 Capture 构造之前定下来（Capture.ClipDir 的默认值读 Paths.Clips）
             Paths.SetClipsRoot(capture.ClipsDir);
-            Console.WriteLine($"[2d] 画质码率 {capture.BitrateMbps}Mbps（config.json 的 BitrateMbps，托盘「画质码率」可调）");
+            Console.WriteLine($"[2d] 画质码率 {capture.BitrateMbps}Mbps（config.json 的 BitrateMbps，托盘「录制参数…」里可调）");
             Console.WriteLine($"[2e] 音轨 {AudioSummary(capture)}，提示 {CapturePolicy.NoticeLabel(capture.Notice)}" +
                               $"（config.json 的 AudioMode / Notice，托盘里可调）");
             Console.WriteLine($"[2f] 成片目录 {Paths.Clips}{(capture.ClipsDir.Length == 0 ? "（默认）" : "")}（config.json 的 ClipsDir，托盘「片段目录」可改）");
+            Console.WriteLine($"[2g] 击杀前 {capture.PreRollSec}s / 击杀后 {capture.PostRollSec}s（config.json 的 PreRollSec / PostRollSec，托盘「录制参数…」可调）");
 
             return offline is not null
                 ? Offline(engine, offline.Length == 0 ? Path.Combine(Paths.DataRoot, "probe", "bands.bin") : offline)
@@ -580,11 +632,12 @@ internal static class Program
         var thShown = detect.Threshold > 0 ? detect.Threshold : prof.Templates[0].Threshold;
         Log.Write($"[2b] 命中阈值 {thShown:F2}（config.json 的 Threshold 字段，托盘菜单「检测灵敏度」里可调）");
         Log.Write($"[2c] 合并窗口 {(detect.MergeSec == 0 ? "关（每次命中各出一段）" : detect.MergeSec + "s")}" +
-                  "（config.json 的 MergeSec 字段，托盘菜单「合并窗口」里可调）");
-        Log.Write($"[2d] 画质码率 {capture.BitrateMbps}Mbps（config.json 的 BitrateMbps 字段，托盘菜单「画质码率」里可调）");
+                  "（config.json 的 MergeSec 字段，托盘「录制参数…」里可调）");
+        Log.Write($"[2d] 画质码率 {capture.BitrateMbps}Mbps（config.json 的 BitrateMbps 字段，托盘「录制参数…」里可调）");
         Log.Write($"[2e] 音轨 {AudioSummary(capture)}，提示{CapturePolicy.NoticeLabel(capture.Notice)}" +
                   $"（config.json 的 AudioMode / Notice 字段，托盘菜单里可调）");
         Log.Write($"[2f] 成片目录 {Paths.Clips}{(capture.ClipsDir.Length == 0 ? "（默认）" : "（自定义）")}（config.json 的 ClipsDir 字段，托盘菜单「片段目录」里可改）");
+        Log.Write($"[2g] 击杀前 {capture.PreRollSec}s / 击杀后 {capture.PostRollSec}s（config.json 的 PreRollSec / PostRollSec 字段，托盘「录制参数…」里可调）");
         Log.Write("[3] 右键托盘图标可以打开回顾库；关掉这个窗口也不影响录制。");
 
         // 托盘模式下把控制台藏掉：双击 exe 时那个黑窗口没必要一直开着。
@@ -711,4 +764,40 @@ internal static class Program
         Out($"[end {sw.ElapsedMilliseconds / 1000.0:F1}s] {cap.Stats()}");
         return 0;
     }
+
+    /// <summary>把录制参数面板画到一张 png 里（临时挪到屏幕角上截，截完就还回去），只用于看外观。</summary>
+    private static int ShotParams(string path)
+    {
+        Application.EnableVisualStyles();
+        Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
+
+        var f = new ParamsForm(bitrate: 28, preRoll: 15, postRoll: 15, merge: 8)
+        {
+            StartPosition = FormStartPosition.Manual,
+            Location = new Point(80, 80),
+            ShowInTaskbar = false,
+        };
+        f.Shown += (_, _) =>
+        {
+            // 等自绘/圆角/阴影落定再截
+            var t = new System.Windows.Forms.Timer { Interval = 400 };
+            t.Tick += (_, _) =>
+            {
+                t.Stop();
+                var full = Path.GetFullPath(path);
+                Directory.CreateDirectory(Path.GetDirectoryName(full)!);
+                using var bmp = new Bitmap(f.Width, f.Height);
+                using (var g = Graphics.FromImage(bmp))
+                    g.CopyFromScreen(f.Location, Point.Empty, f.Size);
+                bmp.Save(full, System.Drawing.Imaging.ImageFormat.Png);
+                Console.WriteLine($"[shot] {full}  {f.Width}x{f.Height}");
+                f.Close();
+                Application.ExitThread();
+            };
+            t.Start();
+        };
+        Application.Run(f);
+        return 0;
+    }
 }
+

@@ -77,6 +77,7 @@ internal static class UiTest
         // ---- 批量删除：勾选框、全选、按钮跟着勾选数走 ----
         fail += BatchCheck(lib);
         fail += QuotaMenuCheck(lib);
+        fail += ParamsCheck();
 
         Console.WriteLine(fail == 0 ? "[ok] 界面层自检全过" : $"[!] {fail} 项失败");
         return fail == 0 ? 0 : 9;
@@ -549,5 +550,49 @@ internal static class UiTest
         var mean = (double)sum / cnt;
         var vari = (double)sum2 / cnt - mean * mean;
         return new Px(mean, Math.Sqrt(Math.Max(0, vari)), uniq.Count);
+    }
+
+    /// <summary>
+    /// 录制参数面板：默认值、拖完立刻外报、超范围被夹住、恢复默认。
+    /// 面板本身是离屏建的 —— 没人点它，只验「值 ↔ 回调 ↔ 范围」这条链。
+    /// </summary>
+    private static int ParamsCheck()
+    {
+        int bad = 0;
+        var t = new Thread(() =>
+        {
+            var f = new ParamsForm(bitrate: 28, preRoll: 15, postRoll: 15, merge: 8)
+            {
+                StartPosition = FormStartPosition.Manual,
+                Location = new Point(-4000, -4000),
+                ShowInTaskbar = false,
+            };
+            (int, int, int, int)? got = null;
+            f.Changed = (b, pre, post, merge) => got = (b, pre, post, merge);
+            f.Show();
+            Application.DoEvents();
+
+            if (f.Values == (28, 15, 15, 8)) Console.WriteLine("    ok  面板四根滑杆拿到当前值（28/15/15/8）");
+            else { Console.WriteLine($"    NG  面板初始值 {f.Values}，应为 (28,15,15,8)"); bad++; }
+
+            f.TestSet(45, 20, 10, 12);
+            if (got == (45, 20, 10, 12)) Console.WriteLine("    ok  拖完滑杆 → 回调收到 (45,20,10,12)，不用点保存");
+            else { Console.WriteLine($"    NG  回调收到 {got}，应为 (45,20,10,12)"); bad++; }
+
+            // 面板自身不做夹取，夹取在托盘那层（CapturePolicy.Clamp）；这里只确认超范围会被
+            // 滑杆夹到自己的 min/max 上，值不会跑到 200 那种地方
+            f.TestSet(999, 999, -5, 999);
+            var (b, pre, post, mg) = f.Values;
+            if (b == CapturePolicy.BitrateMax && pre == CapturePolicy.RollMax && post == 0 && mg == CapturePolicy.RollMax)
+                Console.WriteLine($"    ok  超出范围被夹住（{b}/{pre}/{post}/{mg}）");
+            else { Console.WriteLine($"    NG  超范围没夹住：{b}/{pre}/{post}/{mg}"); bad++; }
+
+            f.Close();
+            f.Dispose();
+        });
+        t.SetApartmentState(ApartmentState.STA);
+        t.Start();
+        if (!t.Join(10_000)) { Console.WriteLine("    NG  参数面板用例卡住"); bad++; }
+        return bad;
     }
 }

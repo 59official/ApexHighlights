@@ -88,8 +88,7 @@ internal sealed class TrayApp : ApplicationContext
         config.Click += (_, _) => OpenConfig();
         menu.Items.Add(config);
         menu.Items.Add(BuildSensitivityMenu());
-        menu.Items.Add(BuildMergeMenu());
-        menu.Items.Add(BuildBitrateMenu());
+        menu.Items.Add(BuildParamsItem());
         menu.Items.Add(BuildAudioMenu());
         menu.Items.Add(BuildNoticeMenu());
         menu.Items.Add(BuildKindsMenu());
@@ -97,6 +96,7 @@ internal sealed class TrayApp : ApplicationContext
         menu.Items.Add(new ToolStripSeparator());
         var quit = new ToolStripMenuItem("退出");
         quit.Click += (_, _) => Quit();
+        menu.Items.Add(BuildLogItem());
         menu.Items.Add(quit);
 
         _icon = new NotifyIcon
@@ -157,20 +157,13 @@ internal sealed class TrayApp : ApplicationContext
                         var back = DetectPolicy.Presets.First(v => Math.Abs(v - 0.70f) < 0.001f);
                         ClickSensitivity(back);
                         say($"点回 {back:F2} 之后 = {EffectiveThreshold:F2}");
-                        // 合并窗口：同样走菜单点击，验证「立刻生效 + 落盘记住 + 不影响阈值」
-                        say($"合并菜单 = {FindMergeRoot()?.Text ?? "找不到"}");
-                        say($"改前合并窗口 = {EffectiveMergeSec}s");
-                        ClickMerge(3);
-                        say($"点 3s 之后 = {EffectiveMergeSec}s，采集器里 MergeMs = {(_cap?.MergeMs.ToString() ?? "无采集")}");
+                        // 录制参数：面板现在管码率/前摇/后摇/合并四个值，走的是面板回调那条路
+                        say($"改前：码率 {EffectiveBitrateMbps}Mbps，前 {EffectivePreRollSec}s，后 {EffectivePostRollSec}s，合并 {EffectiveMergeSec}s");
+                        ApplyParams(40, 12, 9, 6);
+                        say($"拖完：码率 {EffectiveBitrateMbps}Mbps，前 {EffectivePreRollSec}s，后 {EffectivePostRollSec}s，合并 {EffectiveMergeSec}s，" +
+                            $"采集器 Bitrate={(_cap?.Bitrate.ToString() ?? "无采集")} 前={(_cap?.PreRollSec.ToString() ?? "无采集")} 后={(_cap?.PostRollSec.ToString() ?? "无采集")} 合并={(_cap?.MergeMs.ToString() ?? "无采集")}ms");
                         say("config.json 现在是 " +
                             (File.Exists(_cfgPath) ? string.Join(" ", File.ReadAllLines(_cfgPath)) : "(没写)"));
-                        ClickMerge(8);
-                        say($"点回 8s 之后 = {EffectiveMergeSec}s");
-                        // 画质码率 + 音轨：走同一条点击路径，验证「立刻生效 + 落盘 + 不冲掉阈值/合并窗口」
-                        say($"码率菜单 = {FindBitrateRoot()?.Text ?? "找不到"}");
-                        say($"改前码率 = {EffectiveBitrateMbps}Mbps");
-                        ClickBitrate(40);
-                        say($"点 40Mbps 之后 = {EffectiveBitrateMbps}Mbps，采集器里 Bitrate = {(_cap?.Bitrate.ToString() ?? "无采集")}");
                         say($"音轨菜单 = {FindAudioRoot()?.Text ?? "找不到"}，改前 = {CapturePolicy.AudioLabel(_capture.Audio)}，实际在录 = {(_cap?.AudioOn.ToString() ?? "无采集")}");
                         ClickAudio(AudioMode.None);
                         say($"「不录声音」之后 = {FindAudioRoot()?.Text}，实际在录 = {(_cap?.AudioOn.ToString() ?? "无采集")}");
@@ -198,8 +191,8 @@ internal sealed class TrayApp : ApplicationContext
                         say($"点「不提示」之后 = {FindNoticeRoot()?.Text}，配置 Notice = {_capture.Notice}");
                         ClickNotice(NoticeMode.Toast);
                         say($"点回「滑出提示」之后 = {FindNoticeRoot()?.Text}，配置 Notice = {_capture.Notice}");
-                        ClickBitrate(20);
-                        say($"点回 20Mbps 之后 = {EffectiveBitrateMbps}Mbps");
+                        ApplyParams(28, 15, 15, 8);
+                        say($"恢复默认之后：码率 {EffectiveBitrateMbps}Mbps，前 {EffectivePreRollSec}s，后 {EffectivePostRollSec}s，合并 {EffectiveMergeSec}s");
                         // 种类开关：关掉「助攻击倒」，看闸门真的不切片，再开回来
                         say($"种类菜单 = {FindKindsRoot()?.Text ?? "找不到"}");
                         ClickKind(ClipKind.AssistKnock, false);
@@ -319,6 +312,8 @@ internal sealed class TrayApp : ApplicationContext
             _cap.Mode = _capture.Audio;
             _cap.OcrEnabled = _ocr;
             _cap.MergeMs = _detect.MergeSec * 1000;
+            _cap.PreRollSec = _capture.PreRollSec;     // 面板改的「击杀前录多久」
+            _cap.PostRollSec = _capture.PostRollSec;   // 面板改的「击杀后录多久」
             // 种类开关：闭包捕获的是同一个 CapturePolicy 实例，所以托盘里再关/开也立刻生效，
             // 不用回头动 _cap（Capture 的闸门每次切片都会问一次）
             _cap.KindFilter = k => _capture.Records(k);
@@ -486,6 +481,7 @@ internal sealed class TrayApp : ApplicationContext
             OnThresholdChanged = v => ApplyThreshold(v),
             // 库窗口状态栏里那行「配额 / 保留」点开就能改，和托盘菜单共用同一个出口
             OnQuotaChanged = (gb, days) => ApplyQuota(gb, days),
+            OnParamsRequested = OpenParams,
         };
         // 库窗口里的「选择目录」：搬家询问 + 改采集器 + 落盘都由托盘这侧做（它有 _capture 和配置路径），
         // 但**别关窗口**——用户正站在里面点按钮，关掉等于把他甩出来。
@@ -574,42 +570,6 @@ internal sealed class TrayApp : ApplicationContext
     /// 「合并窗口」子菜单：决定相邻多近的命中算同一场交火。
     /// 横幅停留 2–3 秒会反复触发，窗口太小一次击倒就出好几条视频；太大会把两次独立击倒并成一条。
     /// </summary>
-    private ToolStripMenuItem BuildMergeMenu()
-    {
-        var root = new ToolStripMenuItem("合并窗口");
-        var items = new List<ToolStripMenuItem>();
-
-        void Refresh()
-        {
-            var cur = EffectiveMergeSec;
-            foreach (var it in items)
-                it.Checked = (int)it.Tag! == cur;
-            root.Text = cur == 0 ? "合并窗口（关）" : $"合并窗口（{cur}s）";
-        }
-
-        foreach (var sec in MergePresets)
-        {
-            var it = new ToolStripMenuItem(sec == 0 ? "关（每次命中各出一段）" : $"{sec} 秒   {HintForMerge(sec)}")
-            { Tag = sec };
-            var v = sec;
-            it.Click += (_, _) => ApplyMerge(v, Refresh);
-            root.DropDownItems.Add(it);
-            items.Add(it);
-        }
-
-        root.DropDownOpening += (_, _) => Refresh();
-        Refresh();
-        return root;
-    }
-
-    private static string HintForMerge(int sec) => sec switch
-    {
-        0 => "一条横幅可能出好几段",
-        <= 5 => "出片快，连击倒可能拆成两段",
-        <= 12 => "推荐：一场交火一段",
-        _ => "很宽容，独立击倒也可能并在一起",
-    };
-
     /// <summary>当前合并窗口（秒）：运行中问采集器，没在录看配置。</summary>
     private int EffectiveMergeSec =>
         _cap is not null ? _cap.MergeMs / 1000 : _detect.MergeSec;
@@ -627,41 +587,6 @@ internal sealed class TrayApp : ApplicationContext
                   $"（保存到 {_cfgPath}：{(ok ? "成功" : "失败")}）");
         after?.Invoke();
         RefreshStatus();
-    }
-
-    /// <summary>
-    /// 「画质码率」子菜单：用户反馈 20Mbps 快速转视角时糊，所以把档位铺开到 10–100。
-    /// 码率不是越小越省事——掉到 15 以下 Apex 的草和树叶会糊成一片，剪出来没法看；
-    /// 但调太高硬盘也撑不住，所以每档都写清楚代价。
-    /// </summary>
-    private ToolStripMenuItem BuildBitrateMenu()
-    {
-        var root = new ToolStripMenuItem("画质码率");
-        var items = new List<ToolStripMenuItem>();
-
-        void Refresh()
-        {
-            var cur = EffectiveBitrateMbps;
-            foreach (var it in items)
-                it.Checked = (int)it.Tag! == cur;
-            // 命令行给的 -b 25 这种不在档位上的值也要显示出来，否则菜单看起来像没生效
-            var offGrid = !CapturePolicy.BitratePresets.Contains(cur);
-            root.Text = offGrid ? $"画质码率（{cur}Mbps 自定义）" : $"画质码率（{cur}Mbps）";
-        }
-
-        foreach (var mbps in CapturePolicy.BitratePresets)
-        {
-            var it = new ToolStripMenuItem($"{mbps} Mbps   {CapturePolicy.HintForBitrate(mbps)}")
-            { Tag = mbps };
-            var v = mbps;
-            it.Click += (_, _) => ApplyBitrate(v, Refresh);
-            root.DropDownItems.Add(it);
-            items.Add(it);
-        }
-
-        root.DropDownOpening += (_, _) => Refresh();
-        Refresh();
-        return root;
     }
 
     /// <summary>当前码率（Mbps）：运行中问采集器，没在录看配置。</summary>
@@ -682,6 +607,104 @@ internal sealed class TrayApp : ApplicationContext
                   $"（保存到 {_cfgPath}：{(ok ? "成功" : "失败")}）");
         after?.Invoke();
         RefreshStatus();
+    }
+
+    private ParamsForm? _paramsForm;
+
+    /// <summary>
+    /// 托盘里的「录制参数…」。面板是独立的小窗（菜单里塞不下滑杆），
+    /// 同一个时刻只留一个：再点一次就把已经开着的那个提到前面，别开出一摞。
+    /// </summary>
+    private void OpenParams()
+    {
+        if (_paramsForm is { IsDisposed: false })
+        {
+            _paramsForm.Activate();
+            return;
+        }
+
+        var f = new ParamsForm(
+            EffectiveBitrateMbps,
+            EffectivePreRollSec,
+            EffectivePostRollSec,
+            EffectiveMergeSec)
+        {
+            Changed = (bitrate, pre, post, merge) => ApplyParams(bitrate, pre, post, merge),
+        };
+        f.FormClosed += (_, _) => _paramsForm = null;
+
+        // 放在屏幕中间偏上一点：滑杆面板不高，居中会显得悬空
+        var wa = Screen.FromPoint(Cursor.Position).WorkingArea;
+        f.Location = new Point(wa.Left + (wa.Width - f.Width) / 2, wa.Top + (wa.Height - f.Height) / 2 - 40);
+        _paramsForm = f;
+        f.Show();
+        f.Activate();
+    }
+
+    /// <summary>当前「击杀前」秒数：运行中问采集器（-1 表示还在用游戏档案的值），没在录看配置。</summary>
+    private int EffectivePreRollSec =>
+        _cap is not null && _cap.PreRollSec >= 0 ? _cap.PreRollSec : _capture.PreRollSec;
+
+    /// <summary>当前「击杀后」秒数，同上。</summary>
+    private int EffectivePostRollSec =>
+        _cap is not null && _cap.PostRollSec >= 0 ? _cap.PostRollSec : _capture.PostRollSec;
+
+    /// <summary>
+    /// 面板拖完一根滑杆就走到这里：改内存配置 → 套到正在跑的采集器上 → 两份 config 落盘。
+    /// 四个值互不依赖，所以一次全写，不搞增量。
+    /// </summary>
+    private void ApplyParams(int bitrate, int preRoll, int postRoll, int merge)
+    {
+        _capture.BitrateMbps = Math.Clamp(bitrate, CapturePolicy.BitrateMin, CapturePolicy.BitrateMax);
+        _capture.PreRollSec = Math.Clamp(preRoll, 0, CapturePolicy.RollMax);
+        _capture.PostRollSec = Math.Clamp(postRoll, 0, CapturePolicy.RollMax);
+        _detect.MergeSec = Math.Clamp(merge, 0, CapturePolicy.RollMax);
+
+        try { _cap?.SetBitrate(_capture.BitrateBps); }
+        catch (Exception ex) { Log.Write("[tray] 改码率失败: " + ex.Message); }
+
+        if (_cap is not null)
+        {
+            _cap.PreRollSec = _capture.PreRollSec;
+            _cap.PostRollSec = _capture.PostRollSec;
+        }
+
+        try { _cap?.SetMergeMs(_detect.MergeSec * 1000); }
+        catch (Exception ex) { Log.Write("[tray] 改合并窗口失败: " + ex.Message); }
+
+        var ok1 = _capture.Save(_cfgPath);
+        var ok2 = _detect.Save(_cfgPath);
+        Log.Write($"[params] 码率 {_capture.BitrateMbps}Mbps，击杀前 {_capture.PreRollSec}s，" +
+                  $"击杀后 {_capture.PostRollSec}s，合并 {_detect.MergeSec}s" +
+                  $"（保存到 {_cfgPath}：{(ok1 && ok2 ? "成功" : "失败")}）");
+        RefreshStatus();
+    }
+
+    private ToolStripMenuItem BuildParamsItem()
+    {
+        var it = new ToolStripMenuItem("录制参数…");
+        it.Click += (_, _) => OpenParams();
+        return it;
+    }
+
+    /// <summary>「查看日志」：用默认程序打开 live.log（没有就打开数据目录，别弹个错误框）。</summary>
+    private ToolStripMenuItem BuildLogItem()
+    {
+        var it = new ToolStripMenuItem("查看日志");
+        it.Click += (_, _) =>
+        {
+            try
+            {
+                var log = Path.Combine(Paths.DataRoot, "live.log");
+                var target = File.Exists(log) ? log : Paths.DataRoot;
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(target)
+                {
+                    UseShellExecute = true,
+                });
+            }
+            catch (Exception ex) { Log.Write("[tray] 打开日志失败: " + ex.Message); }
+        };
+        return it;
     }
 
     /// <summary>
@@ -1220,36 +1243,6 @@ internal sealed class TrayApp : ApplicationContext
         var hit = root?.DropDownItems.OfType<ToolStripMenuItem>()
             .FirstOrDefault(i => i.Tag is float f && Math.Abs(f - v) < 0.001f);
         if (hit is null) { Log.Write($"[t] 找不到阈值档位 {v:F2}"); return; }
-        hit.PerformClick();
-    }
-
-    /// <summary>自检用：找到「合并窗口」根菜单项。</summary>
-    private ToolStripMenuItem? FindMergeRoot() =>
-        _icon.ContextMenuStrip?.Items.OfType<ToolStripMenuItem>()
-            .FirstOrDefault(i => i.Text.StartsWith("合并窗口", StringComparison.Ordinal));
-
-    /// <summary>自检用：等价于点了一下某个合并窗口档位。</summary>
-    private void ClickMerge(int sec)
-    {
-        var root = FindMergeRoot();
-        var hit = root?.DropDownItems.OfType<ToolStripMenuItem>()
-            .FirstOrDefault(i => i.Tag is int s && s == sec);
-        if (hit is null) { Log.Write($"[t] 找不到合并窗口档位 {sec}s"); return; }
-        hit.PerformClick();
-    }
-
-    /// <summary>自检用：找到「画质码率」根菜单项。</summary>
-    private ToolStripMenuItem? FindBitrateRoot() =>
-        _icon.ContextMenuStrip?.Items.OfType<ToolStripMenuItem>()
-            .FirstOrDefault(i => i.Text.StartsWith("画质码率", StringComparison.Ordinal));
-
-    /// <summary>自检用：等价于点了一下某个码率档位。</summary>
-    private void ClickBitrate(int mbps)
-    {
-        var root = FindBitrateRoot();
-        var hit = root?.DropDownItems.OfType<ToolStripMenuItem>()
-            .FirstOrDefault(i => i.Tag is int v && v == mbps);
-        if (hit is null) { Log.Write($"[t] 找不到码率档位 {mbps}Mbps"); return; }
         hit.PerformClick();
     }
 

@@ -1,7 +1,12 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <OutputType>Exe</OutputType>
+    <!--
+      WinExe：双击/开机自启一律不弹黑框（用户 2026-10-29：「这个黑色的 cmd 窗口默认不弹出」）。
+      代价是程序自己不再有控制台；自检仍然要在终端里看输出，所以 Program.Main 开头会
+      AttachConsole(ATTACH_PARENT_PROCESS) 挂回调用者的终端。
+    -->
+    <OutputType>WinExe</OutputType>
     <TargetFramework>net8.0-windows10.0.22621.0</TargetFramework>
     <SupportedOSPlatformVersion>10.0.19041.0</SupportedOSPlatformVersion>
     <Nullable>enable</Nullable>
@@ -18,7 +23,7 @@
     <!-- 资源管理器 / 快捷方式 / 安装包看到的图标。由 `ApexHighlights.exe` 的 make-icon
          开关从 AppIcon.Render 生成（16 到 256 七个尺寸），换图标只要重跑那条命令 -->
     <ApplicationIcon>..\..\packaging\ApexHighlights.ico</ApplicationIcon>
-    <Version>0.8.1</Version>
+    <Version>0.8.2</Version>
     <!-- 应用清单：把 exe 和「身份包」绑到一起（见 app.manifest 里的注释） -->
     <ApplicationManifest>app.manifest</ApplicationManifest>
   </PropertyGroup>
