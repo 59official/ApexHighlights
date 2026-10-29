@@ -19,7 +19,7 @@ namespace ApexHighlights;
 /// </summary>
 public sealed class LibraryForm : Form
 {
-    private readonly ClipLibrary _lib;
+    private ClipLibrary _lib;   // 换过目录就换一个（不是 readonly）
     private QuotaPolicy _policy;
 
     private readonly ClipListView _list = new();
@@ -43,7 +43,9 @@ public sealed class LibraryForm : Form
     private readonly Panel _foot = new();
     private readonly RoundButton _btnPlay = new("播放", 104);
     private readonly RoundButton _btnReveal = new("打开目录", 118);
+    private readonly RoundButton _btnDir = new("选择目录", 118);
     private readonly RoundButton _btnDel = new("删除", 88);
+    private readonly RoundButton _btnCancel = new("取消", 88) { Visible = false };
     private Panel? _searchPill, _thPill, _kindPill, _timePill;
     private SurfaceCard? _listCard;
     private bool _bandsReady;
@@ -65,6 +67,12 @@ public sealed class LibraryForm : Form
     }
     /// <summary>用户在库里改了灵敏度后通知托盘（托盘负责落盘 + 套到运行中的采集上）。</summary>
     public Action<float>? OnThresholdChanged { get; set; }
+
+    /// <summary>
+    /// 用户在库里点了「选择目录」。返回 false = 宿主否决（比如用户在「要不要搬走旧片段」上点了取消），
+    /// 窗口就什么都不改。没有挂宿主（单开回顾库看片时）就自己切。
+    /// </summary>
+    public Func<string, bool>? OnClipsDirRequested { get; set; }
 
     private List<ClipInfo> _all = new();
     private List<ClipInfo> _shown = new();
@@ -94,6 +102,7 @@ public sealed class LibraryForm : Form
         {
             if (e.KeyCode == Keys.F5) { Reload(); e.Handled = true; }
             else if (e.Control && e.KeyCode == Keys.F) { _search.Focus(); _search.SelectAll(); e.Handled = true; }
+            else if (e.KeyCode == Keys.Escape && _list.SelectMode) { EndBatch(); e.Handled = true; }
         };
 
         WireTips();
@@ -161,8 +170,15 @@ public sealed class LibraryForm : Form
         _btnPlay.Style = RoundButton.Look.Primary;
         _btnPlay.Click += (_, _) => OpenSelected();
         _btnReveal.Click += (_, _) => RevealSelected();
+        _btnDir.Click += (_, _) => PickClipsDir();
         _btnDel.Style = RoundButton.Look.Danger;
-        _btnDel.Click += (_, _) => DeleteSelected();
+        _btnDel.Click += (_, _) =>
+        {
+            if (_list.SelectMode) DeleteChecked();
+            else BeginBatch();
+        };
+        _btnCancel.Click += (_, _) => EndBatch();
+        _list.CheckedChanged += UpdateBatchButtons;
 
         // 种类列表跟着 ClipKinds.All 走：以前手写的这份多出「击杀」「被击倒」，
         // BannerKind 判不出这两种，选它们永远是空列表，白让人以为录漏了。
@@ -180,7 +196,9 @@ public sealed class LibraryForm : Form
 
         _bar.Controls.Add(_btnPlay);
         _bar.Controls.Add(_btnReveal);
+        _bar.Controls.Add(_btnDir);
         _bar.Controls.Add(_btnDel);
+        _bar.Controls.Add(_btnCancel);
         _bar.Controls.Add(_kindPill);
         _bar.Controls.Add(_timePill);
     }
@@ -286,11 +304,13 @@ public sealed class LibraryForm : Form
         int thLabelW = TextRenderer.MeasureText(_thLabel.Text, _thLabel.Font).Width;
         _thLabel.SetBounds(thPill.Left - 10 - thLabelW, 8 + (38 - _thLabel.Height) / 2, thLabelW, _thLabel.Height);
 
-        // ---- 工具条：左三个动作、右两个筛选 ----
+        // ---- 工具条：左四个动作、右两个筛选 ----
         const int btnY = (barH - 38) / 2;
         _btnPlay.SetBounds(0, btnY, 104, 38);
         _btnReveal.SetBounds(112, btnY, 118, 38);
-        _btnDel.SetBounds(238, btnY, 88, 38);
+        _btnDir.SetBounds(238, btnY, 118, 38);
+        _btnDel.SetBounds(364, btnY, _list.SelectMode ? 124 : 88, 38);
+        _btnCancel.SetBounds(_btnDel.Right + 10, btnY, 88, 38);
         var timePill = _timePill!;
         var kindPill = _kindPill!;
         timePill.SetBounds(_bar.Width - timePill.Width, btnY, timePill.Width, 38);
@@ -461,6 +481,7 @@ public sealed class LibraryForm : Form
             : "这个筛选下没有片段\r\n\r\n把「种类/时间」调回全部，或清空搜索";
 
         if (_list.RowCount == 0) ShowSelection();
+        if (_list.SelectMode) UpdateBatchButtons();   // 重建行会清空勾选，按钮文字得跟着回零
         UpdateStatus();
     }
 
@@ -481,6 +502,12 @@ public sealed class LibraryForm : Form
         _count.Text = _all.Count == 0
             ? "还没有片段"
             : $"{_all.Count} 片 · 合计 {QuotaReport.Mb(total)}";
+
+        // 批量态时状态栏兼作提示：不然勾了 5 片却只看到「35 / 35 片」
+        if (_list.SelectMode)
+            _status.Text = _list.CheckedCount == 0
+                ? "批量删除：勾选要删的片段（表头「全选」= 一次全勾）"
+                : $"批量删除：已勾选 {_list.CheckedCount} 片，点「删除选中」确认";
     }
 
     private void OpenSelected()
@@ -505,6 +532,95 @@ public sealed class LibraryForm : Form
     private void DeleteSelected()
     {
         var sel = _list.SelectedItems.Cast<ListViewItem>().Select(i => (ClipInfo)i.Tag!).ToList();
+        DeleteMany(sel);
+    }
+
+    // ------------------------------------------------------------------ 批量删除
+
+    /// <summary>
+    /// 进批量态：清单左边冒出勾选框、表头冒出「全选」，删除按钮变成「删除选中」。
+    /// 为什么先点「删除」再出勾选框，而不是一直显示：这窗口平时是拿来翻片的，
+    /// 每行前面常驻一个方框会把它变成「文件管理器」，看一眼片还得先无视一堆框。
+    /// </summary>
+    private void BeginBatch()
+    {
+        if (_shown.Count == 0)
+        {
+            MessageBox.Show(this, "这个筛选下没有片段，没有可删的。", "批量删除");
+            return;
+        }
+        _list.SetSelectMode(true);
+        UpdateBatchButtons();
+        LayoutBands();
+        UpdateStatus();   // 状态栏在批量态会换成「勾选要删的片段…」
+    }
+
+    private void EndBatch()
+    {
+        if (!_list.SelectMode) return;
+        _list.SetSelectMode(false);
+        UpdateBatchButtons();
+        LayoutBands();
+        UpdateStatus();
+    }
+
+    /// <summary>按钮文字跟着勾选数走；一片没勾时按钮是灰的（点它没有意义）。</summary>
+    private void UpdateBatchButtons()
+    {
+        if (!_list.SelectMode)
+        {
+            _btnDel.Text = "删除";
+            _btnDel.Enabled = true;
+            _btnCancel.Visible = false;
+            _btnCancel.Enabled = false;
+            return;
+        }
+        int n = _list.CheckedCount;
+        _btnDel.Text = n == 0 ? "删除选中" : $"删除选中（{n}）";
+        _btnDel.Enabled = n > 0;
+        _btnCancel.Visible = true;
+        _btnCancel.Enabled = true;
+        if (_bandsReady) UpdateStatus();   // 「已勾选 N 片」跟着勾选走
+    }
+
+    private void DeleteChecked()
+    {
+        var checkedClips = _list.CheckedClips;
+        if (checkedClips.Count == 0)
+        {
+            MessageBox.Show(this, "还没勾选片段：点片段前面的方框，或点表头的「全选」。", "批量删除");
+            return;
+        }
+        var ask = $"删掉勾选的 {checkedClips.Count} 片？\r\n\r\n" +
+                  "文件会直接从磁盘删除，不进回收站。";
+        if (MessageBox.Show(this, ask, "确认删除", MessageBoxButtons.OKCancel, MessageBoxIcon.Warning) != DialogResult.OK)
+            return;
+
+        int ok = 0;
+        foreach (var c in checkedClips) if (_lib.Delete(c)) ok++;
+        if (ok != checkedClips.Count)
+            MessageBox.Show(this, $"{checkedClips.Count} 片里删成功 {ok} 片，其余可能被占用。", "ApexHighlights");
+        EndBatch();
+        Reload();
+    }
+
+    /// <summary>自检/截图用：直接进批量态并勾上前几片（点按钮要真鼠标，截图脚本没法点）。</summary>
+    internal void EnterBatchForShot(int checkCount = 3)
+    {
+        Reload();                       // 截图那会儿 Load 还没跑过，_shown 是空的
+        if (_list.RowCount == 0) return; // 空库别弹「没有可删的」把截图脚本卡住
+        if (!_list.SelectMode)
+        {
+            _list.SetSelectMode(true);
+            UpdateBatchButtons();
+            LayoutBands();
+        }
+        int n = Math.Min(checkCount, _list.RowCount);
+        for (int i = 0; i < n; i++) _list.ToggleChecked(i);
+    }
+
+    private void DeleteMany(List<ClipInfo> sel)
+    {
         if (sel.Count == 0) return;
         var ask = sel.Count == 1
             ? $"删掉这一片？\r\n\r\n{sel[0].Name}\r\n\r\n文件会直接从磁盘删除，不进回收站。"
@@ -517,6 +633,59 @@ public sealed class LibraryForm : Form
         if (ok != sel.Count)
             MessageBox.Show(this, $"{sel.Count} 片里删成功 {ok} 片，其余可能被占用。", "ApexHighlights");
         Reload();
+    }
+
+    // ------------------------------------------------------------------ 目录
+
+    /// <summary>
+    /// 点「选择目录」：挑一个文件夹当回顾库。
+    /// 「要不要把现有片段搬过去」由宿主（托盘）问，见 OnClipsDirRequested —— 单开这个窗口看片时
+    /// 没有采集器也没有配置可落，就只切显示。
+    /// </summary>
+    private void PickClipsDir()
+    {
+        var old = _lib.Dir;
+        using var dlg = new FolderBrowserDialog
+        {
+            Description = "选择回顾库文件夹（以后录的片段存在这里）",
+            UseDescriptionForTitle = true,
+            ShowNewFolderButton = true,
+            SelectedPath = Directory.Exists(old) ? old : Paths.DataRoot,
+        };
+        if (dlg.ShowDialog(this) != DialogResult.OK) return;
+
+        var target = Paths.NormalizeDir(dlg.SelectedPath);
+        if (target.Length == 0)
+        {
+            MessageBox.Show(this, "这个路径不能用：要绝对路径，且不能带 < > | \" ? * 这些字符。", "回顾库目录");
+            return;
+        }
+        if (SameDir(old, target)) return;
+        if (OnClipsDirRequested is { } ask && !ask(target)) return;
+
+        // 宿主（托盘）通常已经在回调里把库换好了，SetClipsDir 发现目录没变就什么都不做
+        Paths.SetClipsRoot(target);
+        SetClipsDir(target);
+    }
+
+    /// <summary>宿主（托盘）把目录改好之后，让本窗口跟着换一份库。</summary>
+    public void SetClipsDir(string dir)
+    {
+        var full = Paths.NormalizeDir(dir);
+        if (SameDir(_lib.Dir, full.Length == 0 ? Paths.DefaultClips : full)) return;
+        _lib = new ClipLibrary(full.Length == 0 ? Paths.DefaultClips : full);
+        Reload();
+    }
+
+    private static bool SameDir(string a, string b)
+    {
+        try
+        {
+            var x = Path.GetFullPath(a).TrimEnd('\\', '/');
+            var y = Path.GetFullPath(b).TrimEnd('\\', '/');
+            return string.Equals(x, y, StringComparison.OrdinalIgnoreCase);
+        }
+        catch { return false; }
     }
 
     protected override void Dispose(bool disposing)

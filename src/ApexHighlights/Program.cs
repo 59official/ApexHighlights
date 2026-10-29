@@ -349,6 +349,16 @@ internal static class Program
 
         Console.WriteLine($"[1] 回顾库 {dir}");
         var form = new LibraryForm(new ClipLibrary(dir), policy);
+        // 单开回顾库时没有托盘/采集器，但配置文件还在：改了目录就把 ClipsDir 写回去，下次托盘起来才认。
+        var capture = CapturePolicy.Load(cfgPath);
+        form.OnClipsDirRequested = d =>
+        {
+            capture.ClipsDir = d;
+            Paths.SetClipsRoot(d);
+            var saved = capture.Save(cfgPath);
+            Console.WriteLine($"[2] 回顾库目录改为 {Paths.Clips}（写入 {cfgPath}：{(saved ? "成功" : "失败")}）");
+            return true;
+        };
 
         if (shot is null)
         {
@@ -357,6 +367,16 @@ internal static class Program
         }
 
         var menuField = args.FirstOrDefault(a => a.StartsWith("--shot-menu=", StringComparison.OrdinalIgnoreCase))?[12..];
+        // 批量删除态：截图时先点进批量态并勾上前几片（真去点按钮得有人握着鼠标）
+        var batchArg = args.FirstOrDefault(a => a.StartsWith("--shot-batch", StringComparison.OrdinalIgnoreCase));
+        if (batchArg is not null)
+        {
+            int n = 3;
+            var eq = batchArg.IndexOf('=');
+            if (eq > 0 && int.TryParse(batchArg[(eq + 1)..], out var parsed)) n = parsed;
+            // 必须等 Shown：Load 里还会 Reload 一次，那会把先勾上的全清掉
+            form.Shown += (_, _) => form.EnterBatchForShot(n);
+        }
         // 菜单有 330ms 的滑出动画：想抓中间帧就传 --shot-menu-delay=120
         var delayArg = args.FirstOrDefault(a => a.StartsWith("--shot-menu-delay=", StringComparison.OrdinalIgnoreCase))?[18..];
         var menuDelay = int.TryParse(delayArg, out var d) ? d : 250;

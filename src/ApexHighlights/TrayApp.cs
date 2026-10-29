@@ -199,6 +199,21 @@ internal sealed class TrayApp : ApplicationContext
                         ClickClipsDefault();
                         say($"点了「恢复默认位置」之后 = {EffectiveClipsDir}，采集器 ClipDir = {(_cap?.ClipDir ?? "无采集")}，菜单 = {FindClipsRoot()?.Text}");
                         break;
+                    case 13:
+                        // 库窗口里点「选择目录」：回调得改采集器 + 落盘，但**不能把用户正站着的窗口关掉**
+                        if (_libForm is not { IsDisposed: false } libOpen || libOpen.OnClipsDirRequested is not { } req)
+                        { say("库窗口没开，跳过「库窗口里改目录」这条"); break; }
+                        var libDir = Path.Combine(Paths.DataRoot, "clips-lib");
+                        var okReq = req(libDir);
+                        say($"库窗口里改目录 → 回调返回 {okReq}，窗口还在 = {_libForm is { IsDisposed: false }}，" +
+                            $"采集器 ClipDir = {(_cap?.ClipDir ?? "无采集")}，菜单 = {FindClipsRoot()?.Text}");
+                        say("config.json 现在是 " +
+                            (File.Exists(_cfgPath) ? string.Join(" ", File.ReadAllLines(_cfgPath)) : "(没写)"));
+                        ClickClipsDefault();
+                        // 托盘菜单改目录时库窗口会被关掉（它缓存的是旧库），这是设计如此；
+                        // 只有从库窗口自己改才留窗，所以这一行对不上也别当成回归。
+                        say($"从托盘恢复默认之后 = {EffectiveClipsDir}，库窗口还在 = {_libForm is { IsDisposed: false }}（托盘改的，关窗是对的）");
+                        break;
                     case 4:
                         say($"点「暂停录制」→ {_pauseItem.Text}");
                         TogglePause();
@@ -437,6 +452,16 @@ internal sealed class TrayApp : ApplicationContext
         }
         var dir = _cap?.ClipDir ?? Paths.Clips;
         _libForm = new LibraryForm(new ClipLibrary(dir), _policy) { Threshold = EffectiveThreshold, OnThresholdChanged = v => ApplyThreshold(v) };
+        // 库窗口里的「选择目录」：搬家询问 + 改采集器 + 落盘都由托盘这侧做（它有 _capture 和配置路径），
+        // 但**别关窗口**——用户正站在里面点按钮，关掉等于把他甩出来。
+        _libForm.OnClipsDirRequested = target =>
+        {
+            var from = EffectiveClipsDir;
+            if (SameDir(from, target)) return false;
+            if (!AskMoveClips(from, target)) return false;
+            ApplyClipsDir(target, closeLibrary: false);
+            return true;
+        };
         _libForm.FormClosed += (_, _) => _libForm = null;
         _libForm.Show();
     }
@@ -877,7 +902,7 @@ internal sealed class TrayApp : ApplicationContext
     }
 
     /// <summary>改目录：内存配置 → Paths → 就地换采集器的成片目录 → 落盘 → 回顾库跟着换。</summary>
-    private void ApplyClipsDir(string? dir, Action? after = null)
+    private void ApplyClipsDir(string? dir, Action? after = null, bool closeLibrary = true)
     {
         var full = Paths.NormalizeDir(dir);
         _capture.ClipsDir = full;
@@ -889,11 +914,19 @@ internal sealed class TrayApp : ApplicationContext
         Log.Write($"[dir] 成片目录设为 {Paths.Clips}{(full.Length == 0 ? "（默认位置）" : "")}" +
                   $"（保存到 {_cfgPath}：{(ok ? "成功" : "失败")}）");
 
-        // 回顾库窗口缓存着自己那份 ClipLibrary，换完直接关掉，下次打开读新目录
+        // 回顾库窗口缓存着自己那份 ClipLibrary，换完目录它就指向旧库了。
+        // 从托盘改的：直接关掉，下次打开读新目录；从库窗口自己改的：让它就地换库（关掉等于把用户甩出去）。
         if (_libForm is { IsDisposed: false })
         {
-            try { _libForm.Close(); } catch { }
-            _libForm = null;
+            if (closeLibrary)
+            {
+                try { _libForm.Close(); } catch { }
+                _libForm = null;
+            }
+            else
+            {
+                try { _libForm.SetClipsDir(Paths.Clips); } catch { }
+            }
         }
 
         RefreshClipsDirMenu();

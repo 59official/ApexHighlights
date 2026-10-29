@@ -74,6 +74,9 @@ internal static class UiTest
         // ---- 成片目录：能改、能记住、不冲掉别的配置 ----
         fail += ClipsDirCheck();
 
+        // ---- 批量删除：勾选框、全选、按钮跟着勾选数走 ----
+        fail += BatchCheck(lib);
+
         Console.WriteLine(fail == 0 ? "[ok] 界面层自检全过" : $"[!] {fail} 项失败");
         return fail == 0 ? 0 : 9;
     }
@@ -265,6 +268,104 @@ internal static class UiTest
 
     internal static object? Field(object o, string name) =>
         o.GetType().GetField(name, System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)?.GetValue(o);
+
+    /// <summary>
+    /// 批量删除的勾选态：进批量态才有方框、勾了几片按钮就写几片、全选能一反一正切回零。
+    ///
+    /// 为什么必须代码验：勾选框是自绘的、点它的命中区也是手算的（x &lt; CheckSpan），
+    /// 这东西没有控件实体，靠手点只会验「点中了」，验不出「勾选数和按钮文字对不对」。
+    /// 另外勾选是按路径存的 —— 重建行之后下标全变，所以这里连 SetClips 之后的重建也一并盯着。
+    /// </summary>
+    private static int BatchCheck(ClipLibrary lib)
+    {
+        int fail = 0;
+        var t = new Thread(() =>
+        {
+            try
+            {
+                using var form = new LibraryForm(lib, new QuotaPolicy());
+                // 必须真 Show 一次：Control.Visible 在没显示过的窗口上一律是 false（连子控件都算在内），
+                // 只用 Handle 验不出「取消按钮有没有冒出来」。挪到屏幕外，别在桌面上闪一下。
+                form.StartPosition = FormStartPosition.Manual;
+                form.Location = new Point(-4000, -4000);
+                form.ShowInTaskbar = false;
+                form.Show();
+                Application.DoEvents();
+                var list = (ClipListView)Field(form, "_list")!;
+                var del = (RoundButton)Field(form, "_btnDel")!;
+                var cancel = (RoundButton)Field(form, "_btnCancel")!;
+                form.Reload();
+
+                if (list.SelectMode || del.Text != "删除" || cancel.Visible)
+                { Console.WriteLine($"    BAD 平时不该有勾选框（mode={list.SelectMode} 按钮={del.Text} 取消={cancel.Visible}）"); fail++; }
+                else Console.WriteLine("    ok  平时没有勾选框，按钮就是「删除」");
+
+                list.SetSelectMode(true);
+                Application.DoEvents();
+                if (!list.SelectMode || del.Text != "删除选中" || del.Enabled || !cancel.Visible)
+                { Console.WriteLine($"    BAD 进批量态不对：按钮={del.Text} 可用={del.Enabled} 取消={cancel.Visible}"); fail++; }
+                else Console.WriteLine("    ok  点删除 → 进批量态，按钮变「删除选中」（一片没勾时不可用）");
+
+                list.ToggleChecked(0);
+                list.ToggleChecked(1);
+                Application.DoEvents();
+                if (list.CheckedCount != 2 || list.CheckedClips.Count != 2)
+                { Console.WriteLine($"    BAD 勾两片后 Count={list.CheckedCount} Clips={list.CheckedClips.Count}"); fail++; }
+                else if (del.Text != "删除选中（2）" || !del.Enabled)
+                { Console.WriteLine($"    BAD 勾两片后按钮文字={del.Text} 可用={del.Enabled}"); fail++; }
+                else Console.WriteLine($"    ok  勾两片 → 按钮「{del.Text}」可用，CheckedClips 命中 {list.CheckedClips[0].Name} / {list.CheckedClips[1].Name}");
+
+                list.ToggleChecked(1);   // 同一行再点一次要取消
+                if (list.CheckedCount != 1)
+                { Console.WriteLine($"    BAD 再点同一行没取消，Count={list.CheckedCount}"); fail++; }
+                else Console.WriteLine("    ok  同一行再点一次 → 取消勾选");
+
+                list.ToggleAll();
+                if (list.CheckedCount != list.RowCount)
+                { Console.WriteLine($"    BAD 全选后 {list.CheckedCount}/{list.RowCount}"); fail++; }
+                else Console.WriteLine($"    ok  全选 → {list.CheckedCount}/{list.RowCount} 片全勾上");
+
+                list.ToggleAll();
+                if (list.CheckedCount != 0 || del.Enabled)
+                { Console.WriteLine($"    BAD 再点全选没清空，Count={list.CheckedCount} 可用={del.Enabled}"); fail++; }
+                else Console.WriteLine("    ok  再点全选 → 全清空、按钮回灰");
+
+                // 勾选按路径存：重建行（SetClips）之后旧的勾选必须清掉，不能按旧下标串到别的片上
+                list.ToggleChecked(0);
+                list.SetClips(lib.Scan());
+                list.SetClips(lib.Scan());
+                if (list.CheckedCount != 0)
+                { Console.WriteLine($"    BAD 重建行后勾选没清掉，Count={list.CheckedCount}"); fail++; }
+                else Console.WriteLine("    ok  重建行 → 勾选清空（按路径存，不会串到别的片）");
+
+                list.SetSelectMode(false);
+                Application.DoEvents();
+                if (list.SelectMode || del.Text != "删除" || cancel.Visible)
+                { Console.WriteLine($"    BAD 退出批量态没复原：按钮={del.Text} 取消={cancel.Visible}"); fail++; }
+                else Console.WriteLine("    ok  退出批量态 → 按钮复原、取消消失");
+
+                // 换库：SetClipsDir 之后列表要读新目录（空目录 → 空态文案）
+                var empty = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "apex-batch-" + Guid.NewGuid().ToString("N")[..6]);
+                Directory.CreateDirectory(empty);
+                form.SetClipsDir(empty);
+                var countLabel = (Label)Field(form, "_count")!;
+                if (list.RowCount != 0 || !countLabel.Text.Contains("还没有片段"))
+                { Console.WriteLine($"    BAD 换到空目录后 RowCount={list.RowCount} 计数=\"{countLabel.Text}\""); fail++; }
+                else Console.WriteLine("    ok  换库 → 列表读新目录、空目录显示「还没有片段」");
+                try { Directory.Delete(empty, true); } catch { }
+                form.Hide();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"    BAD 批量勾选抛出 {ex.GetType().Name}: {ex.Message}");
+                fail++;
+            }
+        });
+        t.SetApartmentState(ApartmentState.STA);
+        t.Start();
+        t.Join();
+        return fail;
+    }
 
     /// <summary>
     /// 胶囊下拉的开关：点一下弹出，弹出期间再点一下只收起、不再弹第二个。
