@@ -148,6 +148,9 @@ internal static class Program
 
             if (args.Any(a => a == "--mic-test")) return MicTest.Run();
 
+            // 横幅分类的多语言回归（简中/繁中/英文原文）
+            if (args.Any(a => a == "--ocr-parse-test")) return OcrParseTest.Run();
+
             // 浮层提示的视觉自检：弹出来，在滑入/停留/滑出三个时刻各截一张图
             if (args.Any(a => a.StartsWith("--toast-test", StringComparison.Ordinal)))
             {

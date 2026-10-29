@@ -17,9 +17,15 @@
   "postRollSec": 5,
   "templates": [
     {
-      "id": "knock",
-      "label": "击倒",
+      "id": "knock_en",
+      "label": "击倒（英文横幅）",
       "file": "apex/knock.png",
+      "threshold": 0.6
+    },
+    {
+      "id": "knock_zhtw",
+      "label": "击倒（繁中横幅）",
+      "file": "apex/knock-zhtw.png",
       "threshold": 0.6
     }
   ]

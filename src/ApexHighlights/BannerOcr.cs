@@ -40,7 +40,8 @@ public enum BannerKind
 /// </summary>
 public sealed class BannerOcr
 {
-    private OcrEngine? _engine;
+    private readonly List<(OcrEngine Engine, string Tag)> _engines = new();
+    private bool _enginesReady;
     private string _err = "";
 
     /// <summary>识别次数（用于 Stats 诊断）。</summary>
@@ -51,33 +52,82 @@ public sealed class BannerOcr
     public string EngineName { get; private set; } = "未初始化";
     public string Err => _err;
 
-    /// <summary>读一张条带图并判定横幅种类。任何异常都吞掉并返回 Unknown（检测不该拖垮录制）。</summary>
+    /// <summary>
+    /// 读一张条带图并判定横幅种类。任何异常都吞掉并返回 Unknown（检测不该拖垮录制）。
+    ///
+    /// 为什么要「换引擎再试一次」：游戏内语言是简中/繁中/英文，而 OCR 引擎是按语言包建的。
+    /// 只拿用户 Windows 语言建一个引擎，繁中局就会用简体引擎硬读繁体字，错字一多关键词就没了。
+    /// 所以按 zh-Hant → zh-Hans → en 的顺序建一串引擎，第一个认出来的算数；
+    /// 认不出（Unknown）才换下一个，正常情况下只跑一次。
+    /// </summary>
     public (BannerKind Kind, string Text) Classify(string bmpPath)
     {
         var sw = Stopwatch.StartNew();
         try
         {
-            if (_engine is null)
+            EnsureEngines();
+            if (_engines.Count == 0)
             {
-                _engine = OcrEngine.TryCreateFromUserProfileLanguages();
-                if (_engine is null)
-                {
-                    if (_err.Length == 0) _err = "系统没有可用的 OCR 语言包";
-                    return (BannerKind.Unknown, "");
-                }
-                EngineName = _engine.RecognizerLanguage.LanguageTag;
+                if (_err.Length == 0) _err = "系统没有可用的 OCR 语言包";
+                return (BannerKind.Unknown, "");
             }
 
-            var text = Recognize(bmpPath);
+            string firstText = "";
+            foreach (var (engine, tag) in _engines)
+            {
+                var text = Recognize(engine, bmpPath);
+                var kind = Parse(text);
+                if (firstText.Length == 0) firstText = text;
+                if (kind == BannerKind.Unknown) continue;      // 这个语言读不出横幅，换下一个
+                EngineName = tag;
+                Count++;
+                TotalMs += sw.ElapsedMilliseconds;
+                return (kind, text);
+            }
+
+            EngineName = _engines[0].Tag;
             Count++;
             TotalMs += sw.ElapsedMilliseconds;
-            return (Parse(text), text);
+            return (BannerKind.Unknown, firstText);
         }
         catch (Exception ex)
         {
             if (_err.Length == 0) _err = $"{ex.GetType().Name}: {ex.Message}";
             return (BannerKind.Unknown, "");
         }
+    }
+
+    /// <summary>按「繁中 → 简中 → 英文」的顺序，把本机真装了的语言各建一个引擎。</summary>
+    private void EnsureEngines()
+    {
+        if (_engines.Count > 0 || _enginesReady) return;
+        _enginesReady = true;
+        try
+        {
+            // 顺序就是优先级：繁中引擎读简体也能读个大概，反过来更差，所以繁中排前面
+            var wanted = new[] { "zh-Hant", "zh-Hans", "en" };
+            var available = OcrEngine.AvailableRecognizerLanguages;
+
+            foreach (var family in wanted)
+            {
+                foreach (var lang in available)
+                {
+                    if (!lang.LanguageTag.StartsWith(family, StringComparison.OrdinalIgnoreCase)) continue;
+                    if (_engines.Any(e => e.Tag == lang.LanguageTag)) continue;
+                    var eng = OcrEngine.TryCreateFromLanguage(lang);
+                    if (eng is not null) _engines.Add((eng, lang.LanguageTag));
+                }
+            }
+
+            // 一个都没建起来（语言包都没装）：退回用户配置语言，至少不比以前差
+            if (_engines.Count == 0 && OcrEngine.TryCreateFromUserProfileLanguages() is { } up)
+                _engines.Add((up, up.RecognizerLanguage.LanguageTag));
+
+            if (_engines.Count == 0) _err = "系统没有可用的 OCR 语言包";
+            else if (!_engines.Any(e => e.Tag.StartsWith("zh-Hant", StringComparison.OrdinalIgnoreCase)))
+                _err = "没装繁体中文语言包，繁中局靠简中引擎读（错字会多）；装「中文(繁体,台湾)」后更准";
+        }
+        catch (Exception ex) { _err = "建 OCR 引擎失败: " + ex.Message; }
     }
 
     /// <summary>列出本机装了哪些 OCR 语言包（诊断用：识别不了多半是这里缺）。</summary>
@@ -95,7 +145,7 @@ public sealed class BannerOcr
         catch (Exception ex) { return "读不到 OCR 语言列表: " + ex.Message; }
     }
 
-    private string Recognize(string path)
+    private static string Recognize(OcrEngine engine, string path)
     {
         // 同步等异步：调用方在普通后台线程上，没有同步上下文，不会死锁。
         var file = StorageFile.GetFileFromPathAsync(Path.GetFullPath(path)).AsTask().GetAwaiter().GetResult();
@@ -104,7 +154,7 @@ public sealed class BannerOcr
         using var bmp = decoder
             .GetSoftwareBitmapAsync(BitmapPixelFormat.Bgra8, BitmapAlphaMode.Premultiplied)
             .AsTask().GetAwaiter().GetResult();
-        var r = _engine!.RecognizeAsync(bmp).AsTask().GetAwaiter().GetResult();
+        var r = engine.RecognizeAsync(bmp).AsTask().GetAwaiter().GetResult();
         return r.Text.Replace('\n', ' ').Trim();
     }
 
@@ -119,11 +169,70 @@ public sealed class BannerOcr
     {
         if (string.IsNullOrWhiteSpace(text)) return BannerKind.Unknown;
 
+        // ① 英文：只留 A-Z（OCR 对空格/标点完全不可靠，见下面 ParseEnglish 的注释）
         var n = new StringBuilder(text.Length);
         foreach (var ch in text.ToUpperInvariant())
             if (ch is >= 'A' and <= 'Z') n.Append(ch);
         var u = n.ToString();
-        if (u.Length == 0) return BannerKind.Unknown;
+        if (u.Length > 0)
+        {
+            var en = ParseEnglish(u);
+            if (en != BannerKind.Unknown) return en;
+        }
+
+        // ② 中文：游戏语言是简中/繁中时横幅上全是汉字，上面那步什么也留不下
+        return ParseChinese(text);
+    }
+
+    /// <summary>
+    /// 中文横幅：先归一成一类字形（把简体字换成繁体写法），再按「助攻 → 淘汰 → 击倒」的
+    /// 从长到短顺序判。用户 2026-10-29 的局里横幅是「擊倒 一點不舒服 + 50」，
+    /// 名字和数字都可能被认错，所以只认动词，不看名字。
+    /// </summary>
+    public static BannerKind ParseChinese(string text)
+    {
+        var sb = new StringBuilder(text.Length);
+        foreach (var raw in text)
+        {
+            if (raw is < '一' or > '鿿') continue;      // 只留汉字
+            sb.Append(Normalize(raw));
+        }
+        var z = sb.ToString();
+        if (z.Length == 0) return BannerKind.Unknown;
+
+        bool assist = z.Contains("助攻");
+        // 只认「倒」这一个字：OCR 把「擊」认成「擎/繫/撃」很常见（实测就有「擎倒」），
+        // 而「倒」在横幅里只出现在击倒那一行，认它最稳。这和英文那边「只剩 DOWN 也算击倒」
+        // 是同一个思路：宁可抓住半边，也别因为一个字读错就整条丢掉。
+        bool knock = z.Contains("倒");
+        bool elim = z.Contains("淘汰") || z.Contains("消滅");
+        // 「再次擊倒」在繁中/简中都是「再次」开头；OCR 常把它读成「再夫」，容一个字的错
+        bool again = z.Contains("再次") || z.Contains("再女") || z.Contains("再夫");
+
+        if (again && knock) return BannerKind.ReKnock;
+        if (assist && elim) return BannerKind.AssistElim;
+        if (assist && knock) return BannerKind.AssistKnock;
+        if (elim) return BannerKind.Elim;
+        if (knock) return BannerKind.Knock;
+        return BannerKind.Unknown;
+    }
+
+    /// <summary>简体字 → 繁体写法。两张表不如一张，判关键词时只看繁体字形。</summary>
+    private static char Normalize(char c) => c switch
+    {
+        '击' => '擊',
+        '队' => '隊',
+        '灭' => '滅',
+        '杀' => '殺',
+        '奖' => '獎',
+        '勋' => '勳',
+        '动' => '動',
+        '败' => '敗',
+        _ => c,
+    };
+
+    private static BannerKind ParseEnglish(string u)
+    {
 
         // 顺序有意义：RE-KNOCKED 也含 KNOCK，必须抢先判定。
         if (u.Contains("REKNOCK") || u.Contains("REKNO")) return BannerKind.ReKnock;
