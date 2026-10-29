@@ -22,6 +22,17 @@ internal static class Log
     private static StreamWriter? _writer;
     private static bool _console = true;
 
+    /// <summary>
+    /// 日志文件打开之前写的那几行先攒着。
+    ///
+    /// 为什么需要：启动最前面那几步（释放 games/、合并新模板、读配置）比日志初始化还早，
+    /// 那时候 <see cref="Write"/> 没有文件可写，消息就静默蒸发了 —— 用户升级后问
+    /// 「日志里怎么没有『补进 2 个新模板』那行」，其实合并做了，只是这句被丢在半路上。
+    /// 现在先存下，Init 之后补写进去（容量设个上限，免得异常情况下无限攒）。
+    /// </summary>
+    private static readonly List<string> Pending = new();
+    private const int PendingMax = 200;
+
     /// <summary>正在写的日志文件，没开就是 null。</summary>
     public static string? Path { get; private set; }
 
@@ -46,6 +57,13 @@ internal static class Log
                 Path = path;
                 _writer.WriteLine();
                 _writer.WriteLine($"===== {DateTime.Now:yyyy-MM-dd HH:mm:ss} 启动 =====");
+                // 初始化之前攒下的那几行（释放 games/、合并模板…）补写进来，
+                // 否则用户升级后在日志里看不到「补进 N 个新模板」，会以为没生效。
+                if (Pending.Count > 0)
+                {
+                    foreach (var line in Pending) _writer.WriteLine($"        {line}");
+                    Pending.Clear();
+                }
             }
             catch (Exception ex)
             {
@@ -61,7 +79,13 @@ internal static class Log
         lock (Gate)
         {
             if (_console) Console.WriteLine(s);
-            try { _writer?.WriteLine($"{DateTime.Now:HH:mm:ss.fff} {s}"); }
+            if (_writer is null)
+            {
+                // 还没 Init：攒下来等 Init 补写，别让启动早期的消息凭空消失
+                if (Pending.Count < PendingMax) Pending.Add($"{DateTime.Now:HH:mm:ss.fff} {s}");
+                return;
+            }
+            try { _writer.WriteLine($"{DateTime.Now:HH:mm:ss.fff} {s}"); }
             catch { /* 磁盘满/被删也不该拖垮录制 */ }
         }
     }
