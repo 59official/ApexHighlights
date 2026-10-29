@@ -17,8 +17,11 @@ internal sealed class ParamsForm : Form
     private readonly ParamSlider _post = new();
     private readonly ParamSlider _merge = new();
 
-    /// <summary>值变了（已经落盘、采集器也已经改过）。参数：码率 / 前摇秒 / 后摇秒 / 合并秒。</summary>
+    /// <summary>拖动中值变了：只该拿去改采集器（立刻看到效果），别写盘。参数：码率 / 前摇 / 后摇 / 合并。</summary>
     public Action<int, int, int, int>? Changed;
+
+    /// <summary>松手了（或键盘调完、点了恢复默认）：这时候才写盘。</summary>
+    public Action<int, int, int, int>? Committed;
 
     private readonly int _defBitrate, _defPre, _defPost, _defMerge;
 
@@ -54,7 +57,7 @@ internal sealed class ParamsForm : Form
         _post.Format = v => v == 0 ? "0s（事件后立即结束）" : v + "s";
 
         _merge.Label = "合并窗口（多久算同一场）";
-        _merge.Min = 0; _merge.Max = CapturePolicy.RollMax; _merge.Step = 1; _merge.Value = merge;
+        _merge.Min = 0; _merge.Max = CapturePolicy.MergeMax; _merge.Step = 1; _merge.Value = merge;
         _merge.Format = v => v == 0 ? "0s（每次命中各出一段）" : v + "s";
 
         var sliders = new[] { _bitrate, _pre, _post, _merge };
@@ -62,7 +65,8 @@ internal sealed class ParamsForm : Form
         {
             var s = sliders[i];
             s.SetBounds(PadX, TitleH + 10 + i * 60, W - PadX * 2, 58);
-            s.Committed += Fire;
+            s.Dragged += Fire;          // 拖动中：实时改采集器
+            s.Committed += Commit;      // 松手：落盘
             Controls.Add(s);
         }
 
@@ -74,6 +78,7 @@ internal sealed class ParamsForm : Form
             _post.Value = _defPost;
             _merge.Value = _defMerge;
             Fire();
+            Commit();          // 恢复默认是明确动作，立刻落盘
         };
         reset.SetBounds(PadX, H - 56, 104, 38);
         Controls.Add(reset);
@@ -104,8 +109,13 @@ internal sealed class ParamsForm : Form
         Fire();
     }
 
+    /// <summary>自检用：模拟「松手」这一刻。</summary>
+    internal void TestCommit() => Commit();
+
     /// <summary>拖完一根滑杆就往外报一次，立刻生效（用户说了实时生效，不要「保存」按钮）。</summary>
     private void Fire() => Changed?.Invoke(_bitrate.Value, _pre.Value, _post.Value, _merge.Value);
+
+    private void Commit() => Committed?.Invoke(_bitrate.Value, _pre.Value, _post.Value, _merge.Value);
 
     protected override void OnPaint(PaintEventArgs e)
     {

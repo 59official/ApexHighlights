@@ -39,7 +39,13 @@ internal sealed class ParamSlider : Control
     /// <summary>右侧数值怎么写。默认就是数字。</summary>
     public Func<int, string>? Format;
 
-    /// <summary>拖完/键盘调完才触发一次——写盘和改采集器都挂在它上面，别在拖动过程中刷盘。</summary>
+    /// <summary>
+    /// 拖动中就已经变了（还没松手）。调用方只该拿它去改采集器——
+    /// 「拖一下就看到效果」，不能挂写盘，否则一次拖动能刷几百次配置文件。
+    /// </summary>
+    public event Action? Dragged;
+
+    /// <summary>拖完/键盘调完才触发一次 —— 写盘挂在这里。</summary>
     public event Action? Committed;
 
     public ParamSlider()
@@ -119,7 +125,10 @@ internal sealed class ParamSlider : Control
     protected override void OnMouseMove(MouseEventArgs e)
     {
         base.OnMouseMove(e);
-        if (_drag) Value = XToValue(e.X);
+        if (!_drag) return;
+        int before = _value;
+        Value = XToValue(e.X);
+        if (_value != before) Dragged?.Invoke();
     }
 
     protected override void OnMouseUp(MouseEventArgs e)

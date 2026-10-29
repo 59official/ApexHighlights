@@ -563,51 +563,13 @@ internal sealed class TrayApp : ApplicationContext
     private float EffectiveThreshold =>
         _cap?.Threshold ?? (_detect.Threshold > 0 ? _detect.Threshold : _profile.Templates[0].Threshold);
 
-    /// <summary>合并窗口的候选秒数。0 = 不合并。</summary>
-    private static readonly int[] MergePresets = { 0, 3, 5, 8, 12, 20 };
-
-    /// <summary>
-    /// 「合并窗口」子菜单：决定相邻多近的命中算同一场交火。
-    /// 横幅停留 2–3 秒会反复触发，窗口太小一次击倒就出好几条视频；太大会把两次独立击倒并成一条。
-    /// </summary>
     /// <summary>当前合并窗口（秒）：运行中问采集器，没在录看配置。</summary>
     private int EffectiveMergeSec =>
         _cap is not null ? _cap.MergeMs / 1000 : _detect.MergeSec;
 
-    /// <summary>改合并窗口：内存配置 → 套到正在跑的采集上 → 落盘。</summary>
-    private void ApplyMerge(int seconds, Action? after = null)
-    {
-        var p = DetectPolicy.Clamp(new DetectPolicy { MergeSec = seconds });
-        _detect.MergeSec = p.MergeSec;
-        try { _cap?.SetMergeMs(_detect.MergeSec * 1000); }
-        catch (Exception ex) { Log.Write("[tray] 改合并窗口失败: " + ex.Message); }
-
-        var ok = _detect.Save(_cfgPath);
-        Log.Write($"[merge] 合并窗口设为 {(_detect.MergeSec == 0 ? "关" : _detect.MergeSec + "s")}" +
-                  $"（保存到 {_cfgPath}：{(ok ? "成功" : "失败")}）");
-        after?.Invoke();
-        RefreshStatus();
-    }
-
     /// <summary>当前码率（Mbps）：运行中问采集器，没在录看配置。</summary>
     private int EffectiveBitrateMbps =>
         _cap is not null ? Math.Max(1, _cap.Bitrate / 1_000_000) : _capture.BitrateMbps;
-
-    /// <summary>改码率：内存配置 → 换掉正在跑的编码器 → 落盘。</summary>
-    private void ApplyBitrate(int mbps, Action? after = null)
-    {
-        // 直接在现有 policy 上改：以前这里 new 了一个新 CapturePolicy 再 Clamp，
-        // 结果种类开关那几项会被悄悄清空（新对象是默认值）
-        _capture.BitrateMbps = Math.Clamp(mbps, 5, 200);
-        try { _cap?.SetBitrate(_capture.BitrateBps); }
-        catch (Exception ex) { Log.Write("[tray] 改码率失败: " + ex.Message); }
-
-        var ok = _capture.Save(_cfgPath);
-        Log.Write($"[bitrate] 码率设为 {_capture.BitrateMbps}Mbps" +
-                  $"（保存到 {_cfgPath}：{(ok ? "成功" : "失败")}）");
-        after?.Invoke();
-        RefreshStatus();
-    }
 
     private ParamsForm? _paramsForm;
 
@@ -629,7 +591,9 @@ internal sealed class TrayApp : ApplicationContext
             EffectivePostRollSec,
             EffectiveMergeSec)
         {
-            Changed = (bitrate, pre, post, merge) => ApplyParams(bitrate, pre, post, merge),
+            // 拖动中只改采集器（save:false），松手才写盘 —— 一次拖动不该刷几百次配置文件
+            Changed = (bitrate, pre, post, merge) => ApplyParams(bitrate, pre, post, merge, save: false),
+            Committed = (bitrate, pre, post, merge) => ApplyParams(bitrate, pre, post, merge),
         };
         f.FormClosed += (_, _) => _paramsForm = null;
 
@@ -653,12 +617,12 @@ internal sealed class TrayApp : ApplicationContext
     /// 面板拖完一根滑杆就走到这里：改内存配置 → 套到正在跑的采集器上 → 两份 config 落盘。
     /// 四个值互不依赖，所以一次全写，不搞增量。
     /// </summary>
-    private void ApplyParams(int bitrate, int preRoll, int postRoll, int merge)
+    private void ApplyParams(int bitrate, int preRoll, int postRoll, int merge, bool save = true)
     {
         _capture.BitrateMbps = Math.Clamp(bitrate, CapturePolicy.BitrateMin, CapturePolicy.BitrateMax);
         _capture.PreRollSec = Math.Clamp(preRoll, 0, CapturePolicy.RollMax);
         _capture.PostRollSec = Math.Clamp(postRoll, 0, CapturePolicy.RollMax);
-        _detect.MergeSec = Math.Clamp(merge, 0, CapturePolicy.RollMax);
+        _detect.MergeSec = Math.Clamp(merge, 0, CapturePolicy.MergeMax);
 
         try { _cap?.SetBitrate(_capture.BitrateBps); }
         catch (Exception ex) { Log.Write("[tray] 改码率失败: " + ex.Message); }
@@ -672,11 +636,14 @@ internal sealed class TrayApp : ApplicationContext
         try { _cap?.SetMergeMs(_detect.MergeSec * 1000); }
         catch (Exception ex) { Log.Write("[tray] 改合并窗口失败: " + ex.Message); }
 
-        var ok1 = _capture.Save(_cfgPath);
-        var ok2 = _detect.Save(_cfgPath);
-        Log.Write($"[params] 码率 {_capture.BitrateMbps}Mbps，击杀前 {_capture.PreRollSec}s，" +
-                  $"击杀后 {_capture.PostRollSec}s，合并 {_detect.MergeSec}s" +
-                  $"（保存到 {_cfgPath}：{(ok1 && ok2 ? "成功" : "失败")}）");
+        if (save)
+        {
+            var ok1 = _capture.Save(_cfgPath);
+            var ok2 = _detect.Save(_cfgPath);
+            Log.Write($"[params] 码率 {_capture.BitrateMbps}Mbps，击杀前 {_capture.PreRollSec}s，" +
+                      $"击杀后 {_capture.PostRollSec}s，合并 {_detect.MergeSec}s" +
+                      $"（保存到 {_cfgPath}：{(ok1 && ok2 ? "成功" : "失败")}）");
+        }
         RefreshStatus();
     }
 

@@ -94,11 +94,14 @@ public sealed class DetectPolicy
         catch { return false; }
     }
 
-    /// <summary>把用户输入夹到有意义的范围：0（按模板）或 0.30–0.95；合并窗口 0–60 秒。</summary>
+    /// <summary>
+    /// 把用户输入夹到有意义的范围：0（按模板）或 0.30–0.95；合并窗口 0–<see cref="CapturePolicy.MergeMax"/> 秒
+    /// （上限跟录制参数面板共用同一个常量，不然面板写 30、这里认 60，用户会看到「填了 45 却变成 30」）。
+    /// </summary>
     public static DetectPolicy Clamp(DetectPolicy p)
     {
         if (p.MergeSec < 0) p.MergeSec = 0;
-        if (p.MergeSec > 60) p.MergeSec = 60;
+        if (p.MergeSec > CapturePolicy.MergeMax) p.MergeSec = CapturePolicy.MergeMax;
         if (p.Threshold <= 0) { p.Threshold = 0; return p; }
         if (p.Threshold < 0.30f) p.Threshold = 0.30f;
         if (p.Threshold > 0.95f) p.Threshold = 0.95f;

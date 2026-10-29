@@ -25,6 +25,25 @@ internal static class PolicyTest
             fail += Check("新配置默认「只录游戏」", fresh.Audio == AudioMode.GameOnly);
             fail += Check("新配置默认「滑出提示」", fresh.Notice == NoticeMode.Toast);
             fail += Check("新配置有音轨", fresh.AnyAudio);
+            // 0.8.2 起这四项是滑杆的默认值，写错就是「新用户录出来的片段长度不对」——
+            // 而且 4–60 / 0–30 这两个范围以前在别处是 5–200 / 0–60，必须钉住
+            fail += Check($"新配置默认码率 28（实际 {fresh.BitrateMbps}）", fresh.BitrateMbps == 28);
+            fail += Check($"新配置默认击杀前 15s（实际 {fresh.PreRollSec}）", fresh.PreRollSec == 15);
+            fail += Check($"新配置默认击杀后 15s（实际 {fresh.PostRollSec}）", fresh.PostRollSec == 15);
+
+            // ⑨ 超范围：夹到 4–60 / 0–30，并且要在 LoadNote 里说出来（不能静默改数）
+            var wide = Path.Combine(dir, "wide.json");
+            File.WriteAllText(wide, """{ "BitrateMbps": 80, "PreRollSec": 45, "PostRollSec": -5 }""");
+            var clamped = CapturePolicy.Load(wide);
+            fail += Check($"码率 80 夹到 60（实际 {clamped.BitrateMbps}）", clamped.BitrateMbps == 60);
+            fail += Check($"击杀前 45 夹到 30（实际 {clamped.PreRollSec}）", clamped.PreRollSec == 30);
+            fail += Check($"击杀后 -5 夹到 0（实际 {clamped.PostRollSec}）", clamped.PostRollSec == 0);
+            fail += Check($"夹取说明里有码率（{clamped.LoadNote}）", clamped.LoadNote.Contains("码率"));
+            fail += Check($"夹取说明里有击杀前（{clamped.LoadNote}）", clamped.LoadNote.Contains("击杀前"));
+
+            File.WriteAllText(wide, """{ "BitrateMbps": 1 }""");
+            fail += Check($"码率 1 抬到 4（实际 {CapturePolicy.Load(wide).BitrateMbps}）", CapturePolicy.Load(wide).BitrateMbps == 4);
+
 
             // ② 老配置（Audio/Mic 两个布尔）折算成语义相同的档
             var legacyPath = Path.Combine(dir, "legacy.json");

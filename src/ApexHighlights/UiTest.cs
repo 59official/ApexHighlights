@@ -567,8 +567,10 @@ internal static class UiTest
                 Location = new Point(-4000, -4000),
                 ShowInTaskbar = false,
             };
-            (int, int, int, int)? got = null;
+            (int, int, int, int)? got = null;        // 拖动中（实时生效，不落盘）
+            (int, int, int, int)? saved = null;      // 松手（落盘）
             f.Changed = (b, pre, post, merge) => got = (b, pre, post, merge);
+            f.Committed = (b, pre, post, merge) => saved = (b, pre, post, merge);
             f.Show();
             Application.DoEvents();
 
@@ -576,8 +578,14 @@ internal static class UiTest
             else { Console.WriteLine($"    NG  面板初始值 {f.Values}，应为 (28,15,15,8)"); bad++; }
 
             f.TestSet(45, 20, 10, 12);
-            if (got == (45, 20, 10, 12)) Console.WriteLine("    ok  拖完滑杆 → 回调收到 (45,20,10,12)，不用点保存");
-            else { Console.WriteLine($"    NG  回调收到 {got}，应为 (45,20,10,12)"); bad++; }
+            if (got == (45, 20, 10, 12)) Console.WriteLine("    ok  拖动中 → 实时回调收到 (45,20,10,12)");
+            else { Console.WriteLine($"    NG  实时回调收到 {got}，应为 (45,20,10,12)"); bad++; }
+            if (saved is null) Console.WriteLine("    ok  拖动中没触发落盘（saved 仍是 null）");
+            else { Console.WriteLine($"    NG  拖动中就落盘了：{saved}"); bad++; }
+
+            f.TestCommit();
+            if (saved == (45, 20, 10, 12)) Console.WriteLine("    ok  松手 → 落盘回调收到 (45,20,10,12)");
+            else { Console.WriteLine($"    NG  落盘回调收到 {saved}，应为 (45,20,10,12)"); bad++; }
 
             // 面板自身不做夹取，夹取在托盘那层（CapturePolicy.Clamp）；这里只确认超范围会被
             // 滑杆夹到自己的 min/max 上，值不会跑到 200 那种地方

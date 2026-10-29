@@ -80,6 +80,21 @@ public sealed class BannerOcr
         }
     }
 
+    /// <summary>列出本机装了哪些 OCR 语言包（诊断用：识别不了多半是这里缺）。</summary>
+    public static string LanguageList()
+    {
+        try
+        {
+            var langs = OcrEngine.AvailableRecognizerLanguages;
+            var tags = new List<string>();
+            foreach (var l in langs) tags.Add($"{l.LanguageTag}({l.DisplayName})");
+            var cur = OcrEngine.TryCreateFromUserProfileLanguages();
+            return $"可用 {tags.Count} 种：" + string.Join(" / ", tags) + "；当前用于识别的：" +
+                   (cur?.RecognizerLanguage.LanguageTag ?? "（无）");
+        }
+        catch (Exception ex) { return "读不到 OCR 语言列表: " + ex.Message; }
+    }
+
     private string Recognize(string path)
     {
         // 同步等异步：调用方在普通后台线程上，没有同步上下文，不会死锁。

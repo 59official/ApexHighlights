@@ -87,7 +87,8 @@ public sealed class LibraryForm : Form
 
         Text = "ApexHighlights — 回顾库";
         StartPosition = FormStartPosition.CenterScreen;
-        MinimumSize = new Size(1000, 600);
+        // 1000 宽时，批量态多出来的「取消」会顶到右侧筛选胶囊上（量过：重叠 100 多个像素）
+        MinimumSize = new Size(1120, 600);
         Size = new Size(1360, 760);
         Font = UiKit.F95;
         Icon = AppIcon.Shared;

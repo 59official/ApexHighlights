@@ -140,6 +140,12 @@ internal static class Program
 
             if (args.Any(a => a == "--policy-test")) return PolicyTest.Run();
 
+            if (args.Any(a => a == "--ocr-langs"))
+            {
+                Console.WriteLine("[ocr] " + BannerOcr.LanguageList());
+                return 0;
+            }
+
             if (args.Any(a => a == "--mic-test")) return MicTest.Run();
 
             // 浮层提示的视觉自检：弹出来，在滑入/停留/滑出三个时刻各截一张图
@@ -271,6 +277,7 @@ internal static class Program
             // 成片目录：必须在 Capture 构造之前定下来（Capture.ClipDir 的默认值读 Paths.Clips）
             Paths.SetClipsRoot(capture.ClipsDir);
             Console.WriteLine($"[2d] 画质码率 {capture.BitrateMbps}Mbps（config.json 的 BitrateMbps，托盘「录制参数…」里可调）");
+            if (capture.LoadNote.Length > 0) Console.WriteLine("[2d!] " + capture.LoadNote);
             Console.WriteLine($"[2e] 音轨 {AudioSummary(capture)}，提示 {CapturePolicy.NoticeLabel(capture.Notice)}" +
                               $"（config.json 的 AudioMode / Notice，托盘里可调）");
             Console.WriteLine($"[2f] 成片目录 {Paths.Clips}{(capture.ClipsDir.Length == 0 ? "（默认）" : "")}（config.json 的 ClipsDir，托盘「片段目录」可改）");
@@ -634,6 +641,7 @@ internal static class Program
         Log.Write($"[2c] 合并窗口 {(detect.MergeSec == 0 ? "关（每次命中各出一段）" : detect.MergeSec + "s")}" +
                   "（config.json 的 MergeSec 字段，托盘「录制参数…」里可调）");
         Log.Write($"[2d] 画质码率 {capture.BitrateMbps}Mbps（config.json 的 BitrateMbps 字段，托盘「录制参数…」里可调）");
+        if (capture.LoadNote.Length > 0) Log.Write("[2d!] " + capture.LoadNote);
         Log.Write($"[2e] 音轨 {AudioSummary(capture)}，提示{CapturePolicy.NoticeLabel(capture.Notice)}" +
                   $"（config.json 的 AudioMode / Notice 字段，托盘菜单里可调）");
         Log.Write($"[2f] 成片目录 {Paths.Clips}{(capture.ClipsDir.Length == 0 ? "（默认）" : "（自定义）")}（config.json 的 ClipsDir 字段，托盘菜单「片段目录」里可改）");
@@ -697,9 +705,15 @@ internal static class Program
         // 日志必须在托盘分支之前开 —— 托盘模式会把控制台藏起来，
         // 要是跟以前一样放在分支后面，托盘模式就一个字节都不写，
         // 出事（比如「这一局一片都没录到」）事后完全无从查起。
+        //
+        // 托盘模式还得有个默认路径：双击图标 / 开机自启都不会带 --log=，
+        // 以前那样「没传就只写控制台」等于托盘全程不落盘，托盘菜单里那个
+        // 「查看日志」就永远打不开文件，形同虚设。
+        var isTrayMode = tray && encode && durationSec == 0;
+        if (logPath is null && isTrayMode) logPath = Path.Combine(Paths.DataRoot, "live.log");
         Log.Init(logPath);
         void Out(string s) => Log.Write(s);
-        Out($"# {DateTime.Now:yyyy-MM-dd HH:mm:ss}  game={prof.Id}  target=\"{title}\"  mode={(tray && encode && durationSec == 0 ? "tray" : "console")}");
+        Out($"# {DateTime.Now:yyyy-MM-dd HH:mm:ss}  game={prof.Id}  target=\"{title}\"  mode={(isTrayMode ? "tray" : "console")}");
 
         // 托盘模式：没有控制台窗口可看，走 ApplicationContext 常驻
         if (tray && encode && durationSec == 0)
@@ -723,6 +737,10 @@ internal static class Program
             TargetFps = fps,
             EncodedFps = fps,
             Bitrate = bitrate,
+            // 命令行这条路径也得吃用户配的前/后摇，否则日志说 15s、实际按档案的 30s 切，
+            // 而 [2g] 那行正是从 capture 里读的 —— 只改打印不改行为等于骗人。
+            PreRollSec = capture.PreRollSec,
+            PostRollSec = capture.PostRollSec,
         };
         cap.Detected += d =>
         {

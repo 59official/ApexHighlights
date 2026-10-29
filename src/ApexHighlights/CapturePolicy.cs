@@ -93,6 +93,14 @@ public sealed class CapturePolicy
     /// </summary>
     public int PostRollSec { get; set; } = 15;
 
+    /// <summary>
+    /// 装载时被夹掉的值的说明（比如「码率 80Mbps 超出上限，按 60 处理」）。
+    /// 不直接在这里写日志：Load 跑得很早，日志文件可能还没就绪；交给启动日志带出来，
+    /// 让用户看见「你的配置被动过」，而不是默默改数。
+    /// </summary>
+    [JsonIgnore]
+    public string LoadNote { get; private set; } = "";
+
     /// <summary>只录游戏进程时，托盘菜单里显示「已回退系统」——进程回环没起来过。</summary>
     [JsonIgnore]
     public bool GameFellBack { get; set; }
@@ -172,7 +180,18 @@ public sealed class CapturePolicy
             }
         }
         catch { /* 配置坏了就用默认值 */ }
-        return Clamp(p);
+
+        var rawBitrate = p.BitrateMbps;
+        var rawPre = p.PreRollSec;
+        var rawPost = p.PostRollSec;
+        p = Clamp(p);
+        var notes = new List<string>();
+        if (rawBitrate > BitrateMax) notes.Add($"码率 {rawBitrate}Mbps 超出上限，按 {BitrateMax} 处理");
+        else if (rawBitrate < BitrateMin && rawBitrate > 0) notes.Add($"码率 {rawBitrate}Mbps 低于下限，按 {BitrateMin} 处理");
+        if (rawPre > RollMax) notes.Add($"击杀前 {rawPre}s 超出上限，按 {RollMax}s 处理");
+        if (rawPost > RollMax) notes.Add($"击杀后 {rawPost}s 超出上限，按 {RollMax}s 处理");
+        if (notes.Count > 0) p.LoadNote = string.Join("；", notes);
+        return p;
     }
 
     private static bool Bool(JsonNode? n, bool fallback)
@@ -252,6 +271,8 @@ public sealed class CapturePolicy
     public const int BitrateMin = 4;
     public const int BitrateMax = 60;
     public const int RollMax = 30;
+    /// <summary>合并窗口上限（秒）。和前后摇同样是 30，但语义不同，分开写免得以后调一个带崩另一个。</summary>
+    public const int MergeMax = 30;
 
     /// <summary>音轨档位在菜单里的顺序（默认档排第一，用户从上往下看就是推荐顺序）。</summary>
     public static readonly AudioMode[] AudioModes =
