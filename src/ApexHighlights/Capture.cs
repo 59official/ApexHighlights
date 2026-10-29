@@ -76,6 +76,8 @@ internal sealed class Capture : IDisposable
     private volatile bool _audioFillRun;
     /// <summary>环形容量（秒）：运行期重开音轨时要按同样的容量重建 AudioRing。</summary>
     private int _ringCapacitySec = 90;
+    /// <summary>灰区下界：低于这个分数连「像横幅」都算不上，不值得补扫其它尺度。</summary>
+    private const float GrayFloor = 0.30f;
     /// <summary>
     /// 音轨档位，和 <see cref="CapturePolicy.Audio"/> 同义。外面只改这个 + <see cref="SetAudioMode"/>，
     /// 不要直接摸那几个采集源。
@@ -882,6 +884,11 @@ internal sealed class Capture : IDisposable
 
                 var sw = Stopwatch.StartNew();
                 var det = _eng.Score(_band);
+
+                // 灰区补扫（用户没指定 HUD 缩放时才做）：横幅肯定在，只是尺度对不上。
+                // 平时分数都在 0.2 以下，走不到这里；真撞上也只是这一帧多花三四毫秒。
+                if (_eng.HudScalePct == 0 && det.Score >= GrayFloor && det.Score < det.Threshold)
+                    det = _eng.ScoreScaled(_band, det);
                 sw.Stop();
                 _samples++; _totalMs += sw.ElapsedMilliseconds;
 

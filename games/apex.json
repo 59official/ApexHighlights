@@ -27,6 +27,12 @@
       "label": "击倒（繁中横幅）",
       "file": "apex/knock-zhtw.png",
       "threshold": 0.6
+    },
+    {
+      "id": "knock_zhcn",
+      "label": "击倒（简中横幅）",
+      "file": "apex/knock-zhcn.png",
+      "threshold": 0.6
     }
   ]
 }

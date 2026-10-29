@@ -90,6 +90,9 @@ public sealed class BannerTemplate
     public string File { get; set; } = "";
     public float Threshold { get; set; } = 0.60f;
 
+    /// <summary>模板图的实际路径（缩放版要重新读这张图再重采样，所以得留着）。</summary>
+    [JsonIgnore] public string Path { get; set; } = "";
+
     [JsonIgnore] public int W { get; set; }
     [JsonIgnore] public int H { get; set; }
     [JsonIgnore] public float[] Hp { get; set; } = Array.Empty<float>();
@@ -111,7 +114,9 @@ public sealed class BannerEngine
     private const int CoarseStep = 4;
     private const int RefineRadius = 5;
 
-    private readonly List<BannerTemplate> _tpl = new();
+    private readonly List<BannerTemplate> _tpl = new();      // 当前生效的模板（可能已按 HUD 缩放）
+    private readonly List<BannerTemplate> _base = new();     // 原始模板（100% 尺度）
+    private readonly Dictionary<int, List<BannerTemplate>> _variants = new();   // 其它尺度的缓存
     private readonly int _bw, _bh;
 
     public GameProfile Profile { get; }
@@ -128,7 +133,11 @@ public sealed class BannerEngine
     public float EffectiveThreshold => ThresholdOverride > 0 ? ThresholdOverride : Profile.Templates[0].Threshold;
 
     /// <summary>套用一份检测策略（启动时、或用户在界面上调完之后调用）。</summary>
-    public void Apply(DetectPolicy policy) => ThresholdOverride = policy.Threshold;
+    public void Apply(DetectPolicy policy)
+    {
+        ThresholdOverride = policy.Threshold;
+        SetHudScale(policy.HudScalePct);
+    }
 
     public BannerEngine(GameProfile profile)
     {
@@ -139,14 +148,22 @@ public sealed class BannerEngine
         {
             var path = Path.IsPathRooted(t.File) ? t.File : Path.Combine(profile.BaseDir, t.File);
             if (!File.Exists(path)) throw new FileNotFoundException($"模板图不存在: {path}（模板 {t.Id}）");
+            t.Path = path;
             LoadTemplate(t, path);
             _tpl.Add(t);
+            _base.Add(t);
         }
     }
 
     private static void LoadTemplate(BannerTemplate t, string path)
     {
         using var bmp = new Bitmap(path);
+        Fill(t, bmp);
+    }
+
+    /// <summary>把一张位图变成模板的高通系数（原始版和缩放版共用这一段）。</summary>
+    private static void Fill(BannerTemplate t, Bitmap bmp)
+    {
         t.W = bmp.Width; t.H = bmp.Height;
         var gray = new byte[t.W * t.H];
         var rect = new Rectangle(0, 0, bmp.Width, bmp.Height);
@@ -179,6 +196,75 @@ public sealed class BannerEngine
         for (int i = 0; i < t.Hp.Length; i++) { t.Hp[i] -= (float)mean; var += t.Hp[i] * t.Hp[i]; }
         t.Std = (float)Math.Sqrt(var / t.Hp.Length);
     }
+
+    /// <summary>HUD 缩放档位：0 = 自动（灰区补扫），其它值直接换成该尺度的模板。</summary>
+    public int HudScalePct { get; private set; }
+
+    /// <summary>
+    /// 按用户的 HUD 缩放换模板。100% 和 0（自动）都用原图，其它档位把模板图按比例重采样。
+    ///
+    /// 为什么不干脆永远多尺度：每帧多扫 4 个尺度就是 4 倍检测时间（实测单帧 1.3–1.7ms），
+    /// 而绝大多数帧连 0.20 都不到，纯属白烧 CPU。所以「用户知道自己 HUD 多高」时只扫一档，
+    /// 「用户不知道」时才在灰区补扫。
+    /// </summary>
+    public void SetHudScale(int pct)
+    {
+        HudScalePct = pct;
+        _tpl.Clear();
+        if (pct is 0 or 100) { _tpl.AddRange(_base); }
+        else { _tpl.AddRange(Variant(pct)); }
+    }
+
+    private List<BannerTemplate> Variant(int pct)
+    {
+        if (_variants.TryGetValue(pct, out var hit)) return hit;
+        float k = pct / 100f;
+        var list = new List<BannerTemplate>();
+        foreach (var src in _base)
+        {
+            using var bmp = new Bitmap(src.Path);
+            int w = Math.Max(8, (int)Math.Round(bmp.Width * k));
+            int h = Math.Max(6, (int)Math.Round(bmp.Height * k));
+            using var scaled = new Bitmap(bmp, new Size(w, h));
+            var t = new BannerTemplate
+            {
+                Id = src.Id + "_" + pct,
+                Label = src.Label,
+                File = src.File,
+                Path = src.Path,
+                Threshold = src.Threshold,
+            };
+            Fill(t, scaled);
+            list.Add(t);
+        }
+        _variants[pct] = list;
+        return list;
+    }
+
+    /// <summary>
+    /// 「像但不够像」时的二次扫描：把 80/90/110/120% 四个尺度也试一遍，取最高分。
+    /// 只在 <see cref="HudScalePct"/> 为 0（自动）且当前分数落在灰区时调用 —— 平时一次都不跑。
+    /// </summary>
+    public Detection ScoreScaled(ReadOnlySpan<byte> band, Detection best)
+    {
+        if (band.Length != _bw * _bh) return best;
+        var hp = HighPass(band, _bw, _bh);
+        var (ii1, ii2) = Integral2(hp, _bw, _bh);
+        int iw = _bw + 1;
+
+        foreach (var pct in AutoScales)
+        {
+            foreach (var t in Variant(pct))
+            {
+                var (sc, x, y) = ScoreOne(hp, ii1, ii2, iw, t);
+                if (sc > best.Score) best = new Detection(t.Label, sc, x, y, Th(t));
+            }
+        }
+        return best;
+    }
+
+    /// <summary>自动模式下补扫的档位（Apex 的 HUD 缩放常见档就在这一圈）。</summary>
+    private static readonly int[] AutoScales = { 80, 90, 110, 120 };
 
     /// <summary>对一条 band（灰度、行优先 bw*bh）打分，返回最高分的模板、分数与左上角坐标。</summary>
     public Detection Score(ReadOnlySpan<byte> band)

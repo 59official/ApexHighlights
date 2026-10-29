@@ -233,6 +233,8 @@ internal static class Program
             {
                 var bcProfile = GameProfile.Load(GameProfile.ResolvePath(game));
                 var bcEngine = new BannerEngine(bcProfile);
+                var hudArg = args.FirstOrDefault(a => a.StartsWith("--hud=", StringComparison.OrdinalIgnoreCase));
+                if (hudArg is not null && int.TryParse(hudArg[6..], out var hudPct)) bcEngine.SetHudScale(hudPct);
                 var bcDir = args.FirstOrDefault(a => a.StartsWith("--dir=", StringComparison.OrdinalIgnoreCase))?[6..]
                             ?? Paths.Captures;
                 var thArg2 = args.FirstOrDefault(a => a.StartsWith("--threshold=", StringComparison.OrdinalIgnoreCase));
@@ -262,6 +264,7 @@ internal static class Program
 
             // 检测阈值：命令行 --threshold= 优先（调试/回归用），否则读 config.json
             var detect = DetectPolicy.Load(cfgPath);
+            engine.SetHudScale(detect.HudScalePct);
             var thArg = args.FirstOrDefault(a => a.StartsWith("--threshold=", StringComparison.OrdinalIgnoreCase));
             if (thArg is not null && float.TryParse(thArg[12..], System.Globalization.NumberStyles.Float,
                     System.Globalization.CultureInfo.InvariantCulture, out var thv))

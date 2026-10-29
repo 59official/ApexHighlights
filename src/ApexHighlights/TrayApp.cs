@@ -22,6 +22,8 @@ internal sealed class TrayApp : ApplicationContext
     private readonly System.Windows.Forms.Timer _tick = new() { Interval = 5000 };
 
     private Capture? _cap;
+    /// <summary>当前检测引擎（改 HUD 缩放要在采集进行中就生效，所以得留着引用）。</summary>
+    private BannerEngine? _eng;
     private LibraryForm? _libForm;
     private readonly ToolStripMenuItem _pauseItem = new("暂停录制");
     private readonly ToolStripMenuItem _statusItem = new("启动中…") { Enabled = false };
@@ -88,6 +90,7 @@ internal sealed class TrayApp : ApplicationContext
         config.Click += (_, _) => OpenConfig();
         menu.Items.Add(config);
         menu.Items.Add(BuildSensitivityMenu());
+        menu.Items.Add(BuildHudScaleMenu());
         menu.Items.Add(BuildParamsItem());
         menu.Items.Add(BuildAudioMenu());
         menu.Items.Add(BuildNoticeMenu());
@@ -157,6 +160,13 @@ internal sealed class TrayApp : ApplicationContext
                         var back = DetectPolicy.Presets.First(v => Math.Abs(v - 0.70f) < 0.001f);
                         ClickSensitivity(back);
                         say($"点回 {back:F2} 之后 = {EffectiveThreshold:F2}");
+
+                        // HUD 缩放：菜单点一下，确认配置跟着走、引擎也换了模板
+                        say($"HUD 菜单 = {FindHudRoot()?.Text ?? "找不到"}，默认 = {EffectiveHudScale}");
+                        ClickHud(110);
+                        say($"点 110% 之后 = {EffectiveHudScale}，config 里 = {DetectPolicy.Load(_cfgPath).HudScalePct}");
+                        ClickHud(0);
+                        say($"点回自动之后 = {EffectiveHudScale}");
                         // 录制参数：面板现在管码率/前摇/后摇/合并四个值，走的是面板回调那条路
                         say($"改前：码率 {EffectiveBitrateMbps}Mbps，前 {EffectivePreRollSec}s，后 {EffectivePostRollSec}s，合并 {EffectiveMergeSec}s");
                         ApplyParams(40, 12, 9, 6);
@@ -300,6 +310,7 @@ internal sealed class TrayApp : ApplicationContext
             // 引擎是新建的，得把用户自调的阈值套上去（Program 那次 Apply 是给控制台模式用的）
             var eng = new BannerEngine(_profile);
             eng.Apply(_detect);
+            _eng = eng;
             _cap = new Capture(hwnd, eng)
             {
                 DiagPath = null,
@@ -458,6 +469,7 @@ internal sealed class TrayApp : ApplicationContext
     {
         var cap = _cap;
         _cap = null;
+        _eng = null;
         _missingTicks = 0;
         _pauseItem.Text = "暂停录制";
         if (cap is null) return;
@@ -1185,6 +1197,51 @@ internal sealed class TrayApp : ApplicationContext
     }
 
     /// <summary>改阈值：写进内存配置 → 立刻套到正在跑的采集上 → 落盘记住。</summary>
+    /// <summary>
+    /// HUD 缩放：横幅的大小跟着游戏内 HUD 缩放走，而模板是固定像素的，差 10% 就对不上。
+    /// 「自动」= 只在对不上时补扫其它尺度（平时零开销）；选具体档位 = 只按那一档扫（最快）。
+    /// </summary>
+    private ToolStripMenuItem BuildHudScaleMenu()
+    {
+        var root = new ToolStripMenuItem("HUD 缩放");
+        var items = new List<ToolStripMenuItem>();
+
+        void Refresh()
+        {
+            var cur = EffectiveHudScale;
+            foreach (var it in items) it.Checked = (int)it.Tag! == cur;
+            root.Text = $"HUD 缩放（{(cur == 0 ? "自动" : cur + "%")}）";
+        }
+
+        foreach (var pct in DetectPolicy.HudScales)
+        {
+            var it = new ToolStripMenuItem($"{DetectPolicy.HudLabel(pct)}   {DetectPolicy.HudHint(pct)}") { Tag = pct };
+            var val = pct;
+            it.Click += (_, _) => ApplyHudScale(val, Refresh);
+            root.DropDownItems.Add(it);
+            items.Add(it);
+        }
+
+        root.DropDownOpening += (_, _) => Refresh();
+        Refresh();
+        return root;
+    }
+
+    /// <summary>当前生效的 HUD 缩放档（0 = 自动）。</summary>
+    private int EffectiveHudScale => _detect.HudScalePct;
+
+    private void ApplyHudScale(int pct, Action? after = null)
+    {
+        _detect.HudScalePct = DetectPolicy.Clamp(new DetectPolicy { HudScalePct = pct }).HudScalePct;
+        try { _eng?.SetHudScale(_detect.HudScalePct); }
+        catch (Exception ex) { Log.Write("[tray] 改 HUD 缩放失败: " + ex.Message); }
+
+        var ok = _detect.Save(_cfgPath);
+        Log.Write($"[hud] HUD 缩放设为 {(pct == 0 ? "自动" : pct + "%")}（保存到 {_cfgPath}：{(ok ? "成功" : "失败")}）");
+        after?.Invoke();
+        RefreshStatus();
+    }
+
     private void ApplyThreshold(float v, Action? after = null)
     {
         _detect.Threshold = DetectPolicy.Clamp(new DetectPolicy { Threshold = v }).Threshold;
@@ -1199,6 +1256,18 @@ internal sealed class TrayApp : ApplicationContext
     }
 
     /// <summary>自检用：找到「检测灵敏度」根菜单项。</summary>
+    private ToolStripMenuItem? FindHudRoot() =>
+        _icon.ContextMenuStrip?.Items.OfType<ToolStripMenuItem>()
+            .FirstOrDefault(i => i.Text.StartsWith("HUD 缩放", StringComparison.Ordinal));
+
+    private void ClickHud(int pct)
+    {
+        var hit = FindHudRoot()?.DropDownItems.OfType<ToolStripMenuItem>()
+            .FirstOrDefault(i => i.Tag is int v && v == pct);
+        if (hit is null) { Log.Write($"[t] 找不到 HUD 档位 {pct}"); return; }
+        if (!hit.Checked) hit.PerformClick();
+    }
+
     private ToolStripMenuItem? FindSensitivityRoot() =>
         _icon.ContextMenuStrip?.Items.OfType<ToolStripMenuItem>()
             .FirstOrDefault(i => i.Text.StartsWith("检测灵敏度", StringComparison.Ordinal));

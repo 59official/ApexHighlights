@@ -86,7 +86,21 @@ internal static class PolicyTest
             fail += Check("不认识的 AudioMode 退回默认", bad.Audio == AudioMode.GameOnly);
             fail += Check("不认识的 Notice 退回默认", bad.Notice == NoticeMode.Toast);
 
-            // ⑤ 菜单上四档/三档齐全，且默认档排第一
+            // ⑤ HUD 缩放：默认「自动」，写进 config.json，读回还是它，乱填退回自动
+            File.WriteAllText(cfg, """{ "Threshold": 0.66 }""");
+            var hudDef = DetectPolicy.Load(cfg);
+            fail += Check("HUD 缩放默认「自动」", hudDef.HudScalePct == 0);
+            hudDef.HudScalePct = 110;
+            hudDef.Save(cfg);
+            var hudRoot = JsonNode.Parse(File.ReadAllText(cfg))!.AsObject();
+            fail += Check("写盘写入 HudScalePct", hudRoot["HudScalePct"]?.GetValue<int>() == 110);
+            fail += Check("写 HUD 缩放不会冲掉阈值", Math.Abs(hudRoot["Threshold"]!.GetValue<double>() - 0.66) < 1e-6);
+            fail += Check("读回来还是 110%", DetectPolicy.Load(cfg).HudScalePct == 110);
+            File.WriteAllText(cfg, """{ "HudScalePct": 37 }""");
+            fail += Check("乱填的缩放值退回「自动」", DetectPolicy.Load(cfg).HudScalePct == 0);
+            fail += Check("档位表含 0/80/90/100/110/120", DetectPolicy.HudScales.Length == 6 && DetectPolicy.HudScales[0] == 0);
+
+            // ⑥ 菜单上四档/三档齐全，且默认档排第一
             fail += Check("音轨四档", CapturePolicy.AudioModes.Length == 4);
             fail += Check("音轨默认档排第一", CapturePolicy.AudioModes[0] == AudioMode.GameOnly);
             fail += Check("提示三档", CapturePolicy.NoticeModes.Length == 3);
