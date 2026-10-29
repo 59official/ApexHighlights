@@ -295,7 +295,8 @@ public sealed class LibraryForm : Form
     private void LayoutBands()
     {
         const int pad = 22;
-        const int headH = 78;
+        // 头部是「大标题 + 计数 + 一行说明」三层，78 px 放不下第三行（会压到工具条上），改 92
+        const int headH = 92;
         const int barH = 56;
         const int footH = 34;
 
@@ -315,8 +316,9 @@ public sealed class LibraryForm : Form
         var thPill = _thPill!;
         search.SetBounds(hw - search.Width, 8, search.Width, 38);
         thPill.SetBounds(search.Left - 8 - thPill.Width, 8, thPill.Width, 38);
-        // 和「22 片 · 合计 2.44GB」同一行，靠右收边
-        _sizeNote.Location = new Point(Math.Max(0, _head.Width - _sizeNote.Width), _count.Top);
+        // 原来是贴在右边、和计数同一行 —— 但右边是「灵敏度 + 搜索」两个胶囊，
+        // 那行字会被压在胶囊底下、还顶到窗口右边缘。改到左侧标题块下面单独一行。
+        _sizeNote.Location = new Point(2, _count.Bottom + 4);
         _thLabel.Text = "灵敏度";
         int thLabelW = TextRenderer.MeasureText(_thLabel.Text, _thLabel.Font).Width;
         _thLabel.SetBounds(thPill.Left - 10 - thLabelW, 8 + (38 - _thLabel.Height) / 2, thLabelW, _thLabel.Height);
