@@ -1,4 +1,4 @@
-; dist 没 publish 过就别编译，省得装出个空目录。
+﻿; dist 没 publish 过就别编译，省得装出个空目录。
 ; 这一步必须放在**编译期**：安装时的机器上没有 ../dist 这回事。
 ; 之前用 InitializeSetup 在安装时查，结果从别的目录启动安装包时 {src} 指向当前目录，
 ; FileExists 一假就静默退出，表现成「双击没反应」。
@@ -57,7 +57,9 @@ ArchitecturesInstallIn64BitMode=x64compatible
 ; 更新时如果托盘还开着，让 Restart Manager 去关它（比让用户自己找托盘图标友好）
 CloseApplications=yes
 RestartApplications=no
-MinVersion=10.0.17763
+; 程序用到的进程回环（ActivateAudioInterfaceAsync + VAD\Process_Loopback）是 Windows 10 2004 才有，
+; csproj 的 SupportedOSPlatformVersion 也是 10.0.19041 —— 安装器门槛跟着走，免得 1809/1903 装了也跑不起来
+MinVersion=10.0.19041
 
 [Languages]
 Name: "zhcn"; MessagesFile: "Languages\ChineseSimplified.isl"
@@ -88,7 +90,7 @@ Filename: "{app}\{#AppExe}"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags
 Filename: "powershell.exe"; \
   Parameters: "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""{app}\register-identity.ps1"" -AppDir ""{app}"""; \
   StatusMsg: "正在注册「无边框录制」组件（会弹一次管理员确认）…"; \
-  Flags: shellexec runhidden waituntilterminated skipifsilent; Verb: runas
+  Flags: shellexec runhidden waituntilterminated skipifsilent; Verb: runas; Check: IsWin11
 
 [UninstallRun]
 ; 反注册放在删文件之前（脚本本身还在），普通权限就够：包是当前用户注册的
@@ -138,4 +140,14 @@ begin
               '要一起删掉吗？删了没法恢复。', mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES then
       DelTree(Dir, True, True, True);
   end;
+end;
+
+// 「无黄框」那套（包身份 + graphicsCaptureWithoutBorder 能力）是 Windows 11 22H2 才有的东西，
+// Windows 10 上 IsBorderRequired 这个 API 根本不存在，注册了也没用 —— 别让 Win10 用户白点一次 UAC。
+function IsWin11(): Boolean;
+var
+  V: TWindowsVersion;
+begin
+  GetWindowsVersionEx(V);
+  Result := (V.Major > 10) or ((V.Major = 10) and (V.Build >= 22000));
 end;

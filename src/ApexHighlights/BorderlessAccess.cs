@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using Windows.Graphics.Capture;
 using Windows.Security.Authorization.AppCapabilityAccess;
@@ -28,6 +29,24 @@ internal static class BorderlessAccess
     /// </summary>
     public static bool TryEnable(GraphicsCaptureSession session)
     {
+        // 先在最外层判版本再往下走：IsBorderRequired / GraphicsCaptureAccess 都是
+        // Windows 11 22H2 才有的东西，在 Windows 10 上连碰都不要碰（类型/激活都可能炸）。
+        if (!OperatingSystem.IsWindowsVersionAtLeast(10, 0, 22000))
+        {
+            if (_state == Unknown)
+            {
+                _state = Denied;
+                Log.Write("[capture] Windows 10 没有关框 API，黄框会一直在（系统画的，程序关不掉）");
+            }
+            return false;
+        }
+
+        return TryEnableWin11(session);
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]   // 别让 Win10 的 JIT 顺手把 Win11 的类型也加载了
+    private static bool TryEnableWin11(GraphicsCaptureSession session)
+    {
         if (!EnsureAllowed()) return false;
         try
         {
@@ -46,13 +65,6 @@ internal static class BorderlessAccess
     private static bool EnsureAllowed()
     {
         if (_state != Unknown) return _state == Allowed;
-
-        // IsBorderRequired 是 WGC 契约 2.0 的东西，Windows 11 才有
-        if (!OperatingSystem.IsWindowsVersionAtLeast(10, 0, 22000))
-        {
-            _state = Denied;
-            return false;
-        }
 
         try
         {
