@@ -103,6 +103,7 @@ internal sealed class Capture : IDisposable
 
     private long _frames, _samples, _hits, _encoded, _droppedFrames, _totalMs;
     private long _limiterDrops, _capDrops, _queueDrops, _poolCreated;
+    private long _lastAcceptedMs = long.MinValue;   // 帧限流用（见 OnFrame）
     public bool HasFiredFake { get; private set; }
     /// <summary>假命中连发几次、间隔多少毫秒 —— 专门复现「一次击倒连出 3 段」的 bug。</summary>
     public int FakeHitRepeat = 1;
@@ -811,6 +812,17 @@ internal sealed class Capture : IDisposable
             {
                 _frames++;
                 var now = _clock.ElapsedMilliseconds;
+
+                // 显示刷新率比目标帧率高的时候（165/179Hz 屏很常见），WGC 会按刷新率送帧。
+                // 全收下来等于用 60fps 的码控去压 160fps 的内容：码率翻 2.6 倍、GOP 从 1 秒
+                // 缩成 0.37 秒、GPU 白烧。按目标帧率放行，留 25% 抖动余量。
+                if (_lastAcceptedMs != long.MinValue &&
+                    now - _lastAcceptedMs < 1000.0 / Math.Max(1, TargetFps) * 0.75)
+                {
+                    _droppedFrames++; _limiterDrops++;
+                    return;
+                }
+                _lastAcceptedMs = now;
                 // 不来一帧限流：WGC 的 FrameArrived 本身就是采集帧率（≈窗口刷新率），
                 // 逐帧限流会误杀 60fps 流里 ±1~2ms 的抖动帧（历史遗留，早期 CPU 探针时代才需要）。
                 // 背压只靠纹理池上限（GPU 端）和队列容量（编码端）；检测仍单独 10fps 限流。
@@ -1172,6 +1184,10 @@ internal sealed class Capture : IDisposable
                 try { File.Delete(tmp); } catch { }
                 throw;
             }
+
+            // 把两条轨的实际长度写进日志：以后有人报「音画不同步」，第一眼就能看出是
+            // 时间轴对不上（两个数差很多）还是内容对不上（两个数一样但听着错位）。
+            Log.Write($"[clip] {name} {written / (1024 * 1024)}MB {_ring.LastReport}");
 
             // 提示交给宿主（托盘）：这里只报「存好了、是什么、多长」
             ClipSaved?.Invoke(ClipKinds.FromBanner(det.Kind), Math.Max(0, stopUs - startUs) / 1_000_000.0);

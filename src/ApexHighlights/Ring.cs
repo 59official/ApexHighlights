@@ -141,6 +141,9 @@ public sealed class SegmentRing
             p.Value.AudioRate, p.Value.Asc, p.Value.Channels);
     }
 
+    /// <summary>最近一次 Prepare 的音视频长度说明，给 WriteClip 写日志用。</summary>
+    public string LastReport { get; private set; } = "";
+
     private readonly record struct Prepared(
         List<Mp4Writer.ClipSample> Video,
         List<Mp4Writer.ClipSample>? Audio,
@@ -177,7 +180,10 @@ public sealed class SegmentRing
         var video = all.GetRange(first, last - first + 1);
 
         if (audio is null || audio.TotalFrames == 0)
+        {
+            LastReport = $"视频 {video.Sum(x => (double)x.DurTicks) / Mp4.Timescale:F2}s/{video.Count}帧 音频 无";
             return new Prepared(video, null, 0, null, 0);
+        }
 
         // 视频第一帧的绝对微秒时间，作为两条轨共同的 0 点
         long firstUs = all[first].DtsTicks * 1_000_000L / Mp4.Timescale;
@@ -192,6 +198,12 @@ public sealed class SegmentRing
         if (aSamples.Count == 0)
             return new Prepared(video, null, 0, null, 0);
 
+        double vDur = video.Sum(x => (double)x.DurTicks) / Mp4.Timescale;
+        double aDur = (double)aSamples.Count * 1024 / audio.SampleRate;
+        // 音频帧的 DtsTicks 是「从片头算起的采样数」，除采样率就是它落在片头的第几秒。
+        // 正常情况下第一帧应该是 0.00~0.02s；差出 0.1 秒以上就说明两条轨的时间基准没对齐。
+        double aStart = aSamples[0].DtsTicks / (double)audio.SampleRate;
+        LastReport = $"视频 {vDur:F2}s/{video.Count}帧 音频 {aDur:F2}s/{aSamples.Count}帧 音频起点 {aStart:F3}s";
         return new Prepared(video, aSamples, audio.SampleRate, audio.Asc, audio.Channels);
     }
 
