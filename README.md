@@ -157,6 +157,7 @@ ApexHighlights.exe --title="BenchWnd" --fps=60 --bitrate=30 --duration=30 --fake
 | `--ocr-langs` | 列出系统已装的 OCR 语言包 |
 | `--band-check --dir=<目录> [--hud=110]` | 阈值回归：把历史 `hit_*.bmp` / `near_*.bmp` 重跑检测器 |
 | `--band-tool=<截图.png> [--game=apex]` | 条带标定器：在截图上拖框，生成 `band` 的 JSON、把框里那截存成模板 PNG |
+| `--make-cover=<封面.png> [--cover-size=1920x1080]` | 出视频封面（程序图标 ≈ 击倒骷髅），纯代码绘制，改配色/尺寸重新跑一遍即可 |
 | `--ocr-check --dir=<目录>` | 横幅分类回归：重跑 OCR 列出识别结果 |
 | `--policy-test` | `config.json` 读写：默认值、老配置迁移、只写自己的字段 |
 | `--quota-test` | 配额/保留期逻辑（临时目录伪造片段，不碰真实库） |

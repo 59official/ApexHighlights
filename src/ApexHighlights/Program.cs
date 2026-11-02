@@ -66,6 +66,23 @@ internal static class Program
                 return 0;
             }
 
+            // 视频封面：左边程序图标 ≈ 右边击倒骷髅，画完直接出 PNG
+            var coverArg = args.FirstOrDefault(a => a.StartsWith("--make-cover=", StringComparison.OrdinalIgnoreCase));
+            if (coverArg is not null)
+            {
+                int cw = 1920, ch = 1080;
+                var sizeArg = args.FirstOrDefault(a => a.StartsWith("--cover-size=", StringComparison.OrdinalIgnoreCase));
+                if (sizeArg is not null)
+                {
+                    var parts = sizeArg[13..].Split('x', 'X');
+                    if (parts.Length == 2 && int.TryParse(parts[0], out var pw) && int.TryParse(parts[1], out var ph))
+                    {
+                        cw = pw; ch = ph;
+                    }
+                }
+                return CoverArt.Run(coverArg[13..], cw, ch);
+            }
+
             // 打包用：身份包（sparse MSIX）要的那几张 png 从同一份绘制代码出，
             // 免得商店资产和 exe 图标是两张脸。
             // 录制参数面板的截图：面板没有宿主窗口，单独一个口子
