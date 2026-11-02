@@ -213,6 +213,14 @@ internal static class Program
                 return AudioTest.Run(s is not null ? int.Parse(s[6..]) : 3);
             }
 
+            if (args.FirstOrDefault(a => a.StartsWith("--band-tool=", StringComparison.OrdinalIgnoreCase)) is { } btArg)
+            {
+                var gArg = args.FirstOrDefault(a => a.StartsWith("--game=", StringComparison.OrdinalIgnoreCase));
+                var oArg = args.FirstOrDefault(a => a.StartsWith("--out=", StringComparison.OrdinalIgnoreCase));
+                return BandTool.Run(btArg["--band-tool=".Length..],
+                    gArg?["--game=".Length..], oArg?["--out=".Length..]);
+            }
+
             if (args.Any(a => a == "--enc-test"))
                 return EncTest.Run(2560, 1440, 180, Path.Combine(Paths.Captures, "enc_test"));
 

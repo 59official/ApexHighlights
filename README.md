@@ -156,6 +156,7 @@ ApexHighlights.exe --title="BenchWnd" --fps=60 --bitrate=30 --duration=30 --fake
 | `--ocr-parse-test` | 横幅文案分类（中/英/繁 19 条断言） |
 | `--ocr-langs` | 列出系统已装的 OCR 语言包 |
 | `--band-check --dir=<目录> [--hud=110]` | 阈值回归：把历史 `hit_*.bmp` / `near_*.bmp` 重跑检测器 |
+| `--band-tool=<截图.png> [--game=apex]` | 条带标定器：在截图上拖框，生成 `band` 的 JSON、把框里那截存成模板 PNG |
 | `--ocr-check --dir=<目录>` | 横幅分类回归：重跑 OCR 列出识别结果 |
 | `--policy-test` | `config.json` 读写：默认值、老配置迁移、只写自己的字段 |
 | `--quota-test` | 配额/保留期逻辑（临时目录伪造片段，不碰真实库） |
@@ -191,7 +192,7 @@ dotnet publish src/ApexHighlights/ApexHighlights.csproj -c Release \
 - 独占全屏可能抓不到（WGC 依赖 DWM 合成），全屏请用「无边框窗口」。
 - 相邻命中 ≤ 合并窗口视为同一场交火，只出一段；所以片段在**末次命中后约 8 秒**才出现。
 - 大厅开始录、进了对局才窗口变尺寸时，采集会自动重开一次，中间那一小段帧补不回来。
-- 换分辨率的自定义游戏需要重新标定 `games/<id>.json` 的 `band`。
+- 自定义游戏要自己填 `games/<id>.json` 的条带位置：用 `--band-tool=<截图.png>` 拖个框就能生成（见下）。分辨率不用重标——`band` 是「基准分辨率」坐标系里的数，采集时按实际画面尺寸等比例缩放。
 
 ## 许可
 

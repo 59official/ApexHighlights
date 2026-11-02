@@ -23,7 +23,7 @@
     <!-- 资源管理器 / 快捷方式 / 安装包看到的图标。由 `ApexHighlights.exe` 的 make-icon
          开关从 AppIcon.Render 生成（16 到 256 七个尺寸），换图标只要重跑那条命令 -->
     <ApplicationIcon>..\..\packaging\ApexHighlights.ico</ApplicationIcon>
-    <Version>0.8.22</Version>
+    <Version>0.8.23</Version>
     <!-- 应用清单：把 exe 和「身份包」绑到一起（见 app.manifest 里的注释） -->
     <ApplicationManifest>app.manifest</ApplicationManifest>
   </PropertyGroup>
