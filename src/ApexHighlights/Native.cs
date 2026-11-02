@@ -195,6 +195,22 @@ internal static unsafe class Native
     [DllImport("user32.dll")] private static extern bool PrintWindow(IntPtr h, IntPtr hdc, uint flags);
     [DllImport("user32.dll")] private static extern bool GetWindowRect(IntPtr h, out RECT r);
 
+    [StructLayout(LayoutKind.Sequential)]
+    private struct RECT2 { public int Left, Top, Right, Bottom; }
+    [DllImport("user32.dll")] private static extern bool GetClientRect(IntPtr h, out RECT2 r);
+
+    /// <summary>
+    /// 窗口客户区的像素尺寸 —— 和 WGC 抓到的画面尺寸是同一个口径。
+    /// 游戏切分辨率/从大厅窗口切成全屏时它会变，而采集会话是绑死尺寸的，
+    /// 所以托盘每 5 秒拿它比一次，变了就重开采集。
+    /// </summary>
+    public static (int W, int H) ClientSizeOf(IntPtr hwnd)
+    {
+        if (!GetClientRect(hwnd, out var r)) return (0, 0);
+        int w = r.Right - r.Left, h = r.Bottom - r.Top;
+        return w > 0 && h > 0 ? (w, h) : (0, 0);
+    }
+
     /// <summary>
     /// 把窗口画进位图。PW_RENDERFULLCONTENT(2) 让 DWM 合成一份完整内容，
     /// 所以窗口被遮挡、或者控件自己不支持 WM_PRINTCLIENT 也能抓到。

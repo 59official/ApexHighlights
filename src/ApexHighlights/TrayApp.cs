@@ -22,6 +22,13 @@ internal sealed class TrayApp : ApplicationContext
     private readonly System.Windows.Forms.Timer _tick = new() { Interval = 5000 };
 
     private Capture? _cap;
+    private IntPtr _capHwnd;
+    private long _watchFrames;
+    private int _stallTicks;
+    private bool _stallWarned;
+    private int _sizeMisses;          // 连续几次发现尺寸不一致（防抖：一次不算数）
+    private long _lastRestartMs;      // 上次因尺寸重开采集的时刻（冷却）
+    private int _restartCount;
     /// <summary>当前检测引擎（改 HUD 缩放要在采集进行中就生效，所以得留着引用）。</summary>
     private BannerEngine? _eng;
     private LibraryForm? _libForm;
@@ -116,7 +123,7 @@ internal sealed class TrayApp : ApplicationContext
         // 结果就是命中时气球提示静默失败。读一次 Handle 才真的建出来。
         _ = _marshal.Handle;
 
-        _tick.Tick += (_, _) => RefreshStatus();
+        _tick.Tick += (_, _) => { RefreshStatus(); WatchCapture(); };
         _tick.Start();
 
         StartCapture();
@@ -307,6 +314,7 @@ internal sealed class TrayApp : ApplicationContext
         try
         {
             Log.Write($"[tray] 找到窗口 \"{Native.TitleOf(hwnd)}\" 0x{hwnd:X}");
+            _capHwnd = hwnd;
             // 引擎是新建的，得把用户自调的阈值套上去（Program 那次 Apply 是给控制台模式用的）
             var eng = new BannerEngine(_profile);
             eng.Apply(_detect);
@@ -464,6 +472,65 @@ internal sealed class TrayApp : ApplicationContext
     }
 
     /// <summary>收掉当前的采集（游戏退出 / 退出程序时用）。失败也只记一笔，不让托盘崩。</summary>
+    /// <summary>
+    /// 每 5 秒问一次：游戏窗口是不是换尺寸了？画面是不是不动了？
+    ///
+    /// 用户报过「繁中横幅一次都没录到」，日志里是采集启动在 1052x752（大厅窗口），
+    /// 进对局后游戏窗口变成 2560x1440，而 WGC 的会话还钉在旧尺寸上 —— 帧数从此停在 26 不再增长。
+    /// 采集会话是绑死窗口尺寸的，尺寸一变就得整个重开，这里就是干这件事。
+    /// </summary>
+    private void WatchCapture()
+    {
+        var cap = _cap;
+        if (cap is null || _capHwnd == IntPtr.Zero) return;
+
+        // 尺寸变了就重开采集。防抖 + 冷却，免得量出来的尺寸和 WGC 差一两个像素打成死循环。
+        var (w, h) = Native.ClientSizeOf(_capHwnd);
+        if (w > 0 && h > 0 && (w != cap.Width || h != cap.Height))
+        {
+            if (++_sizeMisses < 2) return;
+            long nowMs = _sinceStart.ElapsedMilliseconds;
+            if (_lastRestartMs != 0 && nowMs - _lastRestartMs < 60_000) return;
+            if (_restartCount >= 3)
+            {
+                if (!_stallWarned)
+                {
+                    _stallWarned = true;
+                    Log.Write("[tray] 尺寸反复变化，已停止自动重开采集（再变就请手动「暂停录制」再开始）");
+                }
+                return;
+            }
+            _lastRestartMs = nowMs;
+            _restartCount++;
+            _sizeMisses = 0;
+            Log.Write($"[tray] 窗口尺寸 {cap.Width}x{cap.Height} → {w}x{h}，重开采集");
+            StopCapture();
+            StartCapture();
+            _stallTicks = 0;
+            _watchFrames = 0;
+            return;
+        }
+        _sizeMisses = 0;
+
+        long frames = cap.FrameCount;
+        if (frames != _watchFrames)
+        {
+            _watchFrames = frames;
+            _stallTicks = 0;
+            if (!_stallWarned) _stallWarned = false;
+            return;
+        }
+
+        if (++_stallTicks >= 3 && !_stallWarned)   // 15 秒没有新帧
+        {
+            _stallWarned = true;
+            Log.Write("[tray] 采集 15 秒没有新帧：游戏如果是「独占全屏」就没法被采集，改用「无边框窗口」");
+            _icon.ShowBalloonTip(6000, "采集没有画面",
+                "15 秒没有收到新画面。如果游戏设的是「独占全屏」，请改成「无边框窗口」再试。",
+                ToolTipIcon.Warning);
+        }
+    }
+
     private void StopCapture()
     {
         var cap = _cap;
