@@ -1299,7 +1299,7 @@ internal sealed class Capture : IDisposable
         {
             s += $" 编码={_encoded} 丢帧={_droppedFrames}(限{_limiterDrops}/池{_capDrops}/队{_queueDrops}) 建池={_poolCreated} 编码器丢={enc.Dropped}";
             if (_ring is not null) s += $" 环={_ring.Segments.Count}段/{_ring.Coverage()}";
-            s += $" 码率={Bitrate / 1_000_000}Mbps 编码={enc.Name} 旋={enc.Rotations} gop[{NvEncoder.GopInfo}]";
+            s += $" 码率={Bitrate / 1_000_000}Mbps 编码={enc.Name} 旋={enc.Rotations} gop[{NvEncoder.GopInfo}] q[{NvEncoder.QualityInfo}]";
         }
         if (_aRing is not null)
         {

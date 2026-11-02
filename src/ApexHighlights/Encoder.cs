@@ -26,6 +26,7 @@ public sealed class NvEncoder : IDisposable
     private bool _streaming;
     private readonly Queue<long> _ptsQueue = new();
 
+    public static string QualityInfo = "";
     public static string GopInfo = "-";
     /// <summary>
     /// surface 直喂时 IMFSample 的构造方式（排查用，--surface-mode=N 可切）：
@@ -182,6 +183,18 @@ public sealed class NvEncoder : IDisposable
                 var rb = api.GetUInt(CodecApi.GopSize);
                 GopInfo = $"sup={sup} set={set} rb={rb}";
                 if (set) gop = gopFrames;
+
+                // 画质三件套。NVENC 的默认预设偏「低延迟」，静态画面看不出，
+                // 一进运动画面（尤其是 1440p60 + 细碎纹理）就开始糊，还带一圈振铃边缘，
+                // 看着像被锐化过。把质量优先度拧到高、并给峰值码率留 1.5 倍余量。
+                bool qSup = api.IsSupported(CodecApi.QualityVsSpeed);
+                bool qSet = qSup && api.SetUInt(CodecApi.QualityVsSpeed, 80);
+                bool mSup = api.IsSupported(CodecApi.MaxBitRate);
+                bool mSet = mSup && api.SetUInt(CodecApi.MaxBitRate, (uint)(bitrate * 3 / 2));
+                // PeakConstrainedVBR：静场面少给点、动场面多给点，同样平均码率下观感更好
+                bool rSup = api.IsSupported(CodecApi.RateControlMode);
+                bool rSet = rSup && api.SetUInt(CodecApi.RateControlMode, 1);
+                QualityInfo = $"qvs=sup{qSup}/set{qSet} max=sup{mSup}/set{mSet} rc=sup{rSup}/set{rSet}";
             }
         }
         catch (Exception e) { state = new CfgState(false, 0, "设类型失败 " + e.Message, gop); return false; }

@@ -11,6 +11,11 @@ internal sealed unsafe class CodecApi : IDisposable
 {
     private static readonly Guid IID_ICodecAPI = new("901db4c7-31ce-41a2-85dc-8fa0bf41b8da");
     public static readonly Guid GopSize = new("95f31b26-95a4-41aa-9303-246a7fc6eef1");
+    // 画质相关：码率控制模式 / 质量优先度 / 峰值码率
+    public static readonly Guid RateControlMode = new("1c0608e9-370c-4710-8a58-cb6181c42423");
+    public static readonly Guid QualityVsSpeed = new("98332df8-03cd-476b-89fa-3f9e442dec9f");
+    public static readonly Guid CommonQuality = new("fcbf57a3-7ea5-4b0c-9644-69b40c39c391");
+    public static readonly Guid MaxBitRate = new("9651e76e-850a-46d3-b52b-f166310c0d09");
 
     private readonly IntPtr _self;      // 接口指针（this），不是 vtable
     private readonly void** _vt;
