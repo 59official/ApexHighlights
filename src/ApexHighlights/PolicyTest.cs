@@ -105,6 +105,24 @@ internal static class PolicyTest
             fail += Check("音轨默认档排第一", CapturePolicy.AudioModes[0] == AudioMode.GameOnly);
             fail += Check("提示三档", CapturePolicy.NoticeModes.Length == 3);
             fail += Check("提示默认档排第一", CapturePolicy.NoticeModes[0] == NoticeMode.Toast);
+
+            // ⑦ 编码格式：默认 H.264、选了 HEVC 要能存能读、乱填退回 H.264、写编码不冲掉别的字段
+            var codecCfg = Path.Combine(dir, "codec.json");
+            var cp0 = CapturePolicy.Load(Path.Combine(dir, "none2.json"));
+            fail += Check("编码默认 H.264", cp0.Codec == VideoCodec.H264);
+            File.WriteAllText(codecCfg, """{ "Threshold": 0.72, "QuotaGb": 55, "PreRollSec": 9 }""");
+            var cp1 = CapturePolicy.Load(codecCfg);
+            cp1.Codec = VideoCodec.Hevc;
+            cp1.Save(codecCfg);
+            var codecRoot = JsonNode.Parse(File.ReadAllText(codecCfg))!.AsObject();
+            fail += Check("写盘写入 Codec=Hevc", (string?)codecRoot["Codec"] == "Hevc");
+            fail += Check("写 Codec 没冲掉阈值/配额", codecRoot["Threshold"]?.GetValue<double>() == 0.72
+                                                        && codecRoot["QuotaGb"]?.GetValue<long>() == 55);
+            fail += Check("读回来还是 HEVC", CapturePolicy.Load(codecCfg).Codec == VideoCodec.Hevc);
+            File.WriteAllText(codecCfg, """{ "Codec": "AV1" }""");
+            fail += Check("乱填的编码退回 H.264", CapturePolicy.Load(codecCfg).Codec == VideoCodec.H264);
+            File.WriteAllText(codecCfg, """{ "Codec": 7 }""");
+            fail += Check("编码写数字也不炸", CapturePolicy.Load(codecCfg).Codec == VideoCodec.H264);
         }
         finally
         {

@@ -324,6 +324,7 @@ internal sealed class TrayApp : ApplicationContext
                 TargetFps = _fps,
                 EncodedFps = _fps,
                 Bitrate = _capture.BitrateBps,
+                Codec = _capture.Codec,
             };
             _cap.GopFrames = _fps;
             _cap.Quota = _policy;
@@ -669,11 +670,12 @@ internal sealed class TrayApp : ApplicationContext
             EffectiveBitrateMbps,
             EffectivePreRollSec,
             EffectivePostRollSec,
-            EffectiveMergeSec)
+            EffectiveMergeSec,
+            _cap?.Codec ?? _capture.Codec)
         {
             // 拖动中只改采集器（save:false），松手才写盘 —— 一次拖动不该刷几百次配置文件
-            Changed = (bitrate, pre, post, merge) => ApplyParams(bitrate, pre, post, merge, save: false),
-            Committed = (bitrate, pre, post, merge) => ApplyParams(bitrate, pre, post, merge),
+            Changed = (bitrate, pre, post, merge, codec) => ApplyParams(bitrate, pre, post, merge, codec, save: false),
+            Committed = (bitrate, pre, post, merge, codec) => ApplyParams(bitrate, pre, post, merge, codec),
         };
         f.FormClosed += (_, _) => _paramsForm = null;
 
@@ -697,8 +699,14 @@ internal sealed class TrayApp : ApplicationContext
     /// 面板拖完一根滑杆就走到这里：改内存配置 → 套到正在跑的采集器上 → 两份 config 落盘。
     /// 四个值互不依赖，所以一次全写，不搞增量。
     /// </summary>
-    private void ApplyParams(int bitrate, int preRoll, int postRoll, int merge, bool save = true)
+    private void ApplyParams(int bitrate, int preRoll, int postRoll, int merge,
+        VideoCodec codec = VideoCodec.H264, bool save = true)
     {
+        // 换编码必须重开采集：编码器和环形分片都是按编码建的，混着用会出现
+        // 一半 avc1、一半 hvc1 的分片，拼出来的 mp4 直接播不了。
+        var codecChanged = codec != _capture.Codec;
+        _capture.Codec = VideoCodecs.Normalize(codec);
+
         _capture.BitrateMbps = Math.Clamp(bitrate, CapturePolicy.BitrateMin, CapturePolicy.BitrateMax);
         _capture.PreRollSec = Math.Clamp(preRoll, 0, CapturePolicy.RollMax);
         _capture.PostRollSec = Math.Clamp(postRoll, 0, CapturePolicy.RollMax);
@@ -716,12 +724,20 @@ internal sealed class TrayApp : ApplicationContext
         try { _cap?.SetMergeMs(_detect.MergeSec * 1000); }
         catch (Exception ex) { Log.Write("[tray] 改合并窗口失败: " + ex.Message); }
 
+        // 编码换了且正在录：停一下再起（StartCapture 里会读到新的 _capture.Codec）
+        if (codecChanged && _cap is not null)
+        {
+            Log.Write($"[params] 编码切到 {VideoCodecs.Label(_capture.Codec)}，重开采集");
+            try { StopCapture(); StartCapture(); }
+            catch (Exception ex) { Log.Write("[tray] 换编码时重开采集失败: " + ex.Message); }
+        }
+
         if (save)
         {
             var ok1 = _capture.Save(_cfgPath);
             var ok2 = _detect.Save(_cfgPath);
-            Log.Write($"[params] 码率 {_capture.BitrateMbps}Mbps，击杀前 {_capture.PreRollSec}s，" +
-                      $"击杀后 {_capture.PostRollSec}s，合并 {_detect.MergeSec}s" +
+            Log.Write($"[params] 码率 {_capture.BitrateMbps}Mbps，编码 {VideoCodecs.Label(_capture.Codec)}，" +
+                      $"击杀前 {_capture.PreRollSec}s，击杀后 {_capture.PostRollSec}s，合并 {_detect.MergeSec}s" +
                       $"（保存到 {_cfgPath}：{(ok1 && ok2 ? "成功" : "失败")}）");
         }
         RefreshStatus();

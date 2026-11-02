@@ -226,7 +226,10 @@ internal static class Program
                 var sm = args.FirstOrDefault(a => a.StartsWith("--surface-mode=", StringComparison.OrdinalIgnoreCase));
                 if (sm is not null) NvEncoder.SurfaceMode = int.Parse(sm[15..]);
                 Console.WriteLine($"[0] surface-mode={NvEncoder.SurfaceMode}");
-                return GpuTest.Run(2560, 1440, 180, Path.Combine(Paths.Captures, "gpu_test"));
+                var gcodec = args.Any(a => string.Equals(a, "--codec=hevc", StringComparison.OrdinalIgnoreCase))
+                    ? VideoCodec.Hevc : VideoCodec.H264;
+                Console.WriteLine($"[0b] codec={VideoCodecs.Label(gcodec)}");
+                return GpuTest.Run(2560, 1440, 180, Path.Combine(Paths.Captures, "gpu_test"), gcodec);
             }
 
             // 阈值回归：拿历史 band 图重跑检测器，确认某档阈值既挡掉误判又不误杀真命中
@@ -761,13 +764,14 @@ internal static class Program
             cap.FakeHitGapMs = fakeGap > 0 ? fakeGap : 700;
             cap.DumpAtSec = dumpAtSec;
             cap.Mode = capture.Audio;
+            cap.Codec = capture.Codec;
 
 
             cap.OcrEnabled = ocr;
             cap.Quota = quota;
             cap.MergeMs = detect.MergeSec * 1000;
             cap.EnableEncoding(90);
-            Out($"[2b] 编码 {cap.Width}x{cap.Height} @{fps}fps {bitrate / 1_000_000}Mbps，环形 90s，音轨{(audio ? "开" : "关")}，提示音{(beep ? "开" : "关")}，横幅分类{(ocr ? "开" : "关")}，合并窗口{(detect.MergeSec == 0 ? "关" : detect.MergeSec + "s")}");
+            Out($"[2b] 编码 {cap.Width}x{cap.Height} @{fps}fps {bitrate / 1_000_000}Mbps {VideoCodecs.Label(cap.Codec)}，环形 90s，音轨{(audio ? "开" : "关")}，提示音{(beep ? "开" : "关")}，横幅分类{(ocr ? "开" : "关")}，合并窗口{(detect.MergeSec == 0 ? "关" : detect.MergeSec + "s")}");
             Out($"[2c] 配额 {quota.QuotaGb}GB / 保留 {(quota.RetainDays == 0 ? "永久" : quota.RetainDays + " 天")} / 水位 {quota.WatermarkGb}GB / 检查间隔 {quota.CheckMinutes} 分钟");
 
             // 启动时先清一次（spec §5 的清理触发点之一），顺带把水位状态摸清楚

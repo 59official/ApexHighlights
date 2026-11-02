@@ -170,6 +170,8 @@ internal sealed class Capture : IDisposable
     /// <summary>调试：启动 N 秒后伪造一次命中（验证切片链路，不依赖游戏）。</summary>
     public int FakeHitAtSec { get; set; }
     public int Bitrate { get; set; } = 20_000_000;
+    /// <summary>视频编码。改它要重开采集（编码器和环形分片都是按编码建的）。</summary>
+    public VideoCodec Codec { get; set; } = VideoCodec.H264;
     public bool Encoding => _enc is not null;
     public int HotLoops { get; set; }
 
@@ -259,8 +261,8 @@ internal sealed class Capture : IDisposable
         var dir = RingDir ?? Path.Combine(OutDir, "ring");
         _ringCapacitySec = capacitySec;
         _converter = new GpuConverter(_dev!, _ctx!, Width, Height, EncodedFps);
-        _enc = new EncoderChain(Width, Height, Bitrate, GopFrames, EncodedFps, _dev);
-        _ring = new SegmentRing(dir, Width, Height, capacitySec);
+        _enc = new EncoderChain(Width, Height, Bitrate, GopFrames, EncodedFps, _dev, Codec);
+        _ring = new SegmentRing(dir, Width, Height, capacitySec, Codec);
         _lib = new ClipLibrary(ClipDir);
 
         // 音轨：按用户选的那一档起（只录游戏 / 整机 / 整机+麦 / 不录）。
@@ -562,7 +564,7 @@ internal sealed class Capture : IDisposable
         if (old is null) return;          // 还没起编码：EnableEncoding 时会用新 Bitrate
 
         EncoderChain fresh;
-        try { fresh = new EncoderChain(Width, Height, Bitrate, GopFrames, EncodedFps, _dev); }
+        try { fresh = new EncoderChain(Width, Height, Bitrate, GopFrames, EncodedFps, _dev, Codec); }
         catch (Exception ex)
         {
             _encErr = "改码率失败: " + ex.Message;

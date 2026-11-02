@@ -69,34 +69,82 @@ public static class Mp4
         return b;
     }
 
+    /// <summary>
+    /// HEVC 的 hvcC：三个参数集（VPS/SPS/PPS）+ 从 SPS 里抄出来的 profile/tier/level。
+    /// 手写比特解析容易错，这里只取固定偏移 —— SPS 的负载开头就是
+    /// vps_id(4) max_sub_layers(3) nesting(1) / space(2) tier(1) idc(5) / compat(32) / constraint(48) / level(8)。
+    /// </summary>
+    public static byte[] HvcC(byte[]? vps, byte[] sps, byte[] pps)
+    {
+        // SPS 前两个字节是 NAL 头，负载从第 2 字节开始
+        int o = 2;
+        byte head = sps.Length > o ? sps[o] : (byte)0;
+        byte ptl = sps.Length > o + 1 ? sps[o + 1] : (byte)0x01;   // space|tier|profile_idc
+        int profileIdc = ptl & 0x1F;
+        int tier = (ptl >> 5) & 1;
+        int space = (ptl >> 6) & 3;
+        var compat = new byte[4];
+        var cons = new byte[6];
+        for (int i = 0; i < 4; i++) compat[i] = sps.Length > o + 2 + i ? sps[o + 2 + i] : (byte)0;
+        for (int i = 0; i < 6; i++) cons[i] = sps.Length > o + 6 + i ? sps[o + 6 + i] : (byte)0;
+        byte level = sps.Length > o + 12 ? sps[o + 12] : (byte)123;   // 4.1
+
+        var arrays = new List<byte>();
+        int count = 0;
+        void AddArray(int type, byte[]? nal)
+        {
+            if (nal is null || nal.Length == 0) return;
+            count++;
+            arrays.Add((byte)(0x80 | type));            // array_completeness=1
+            arrays.AddRange(U16((ushort)1));
+            arrays.AddRange(U16((ushort)nal.Length));
+            arrays.AddRange(nal);
+        }
+        AddArray(32, vps);
+        AddArray(33, sps);
+        AddArray(34, pps);
+
+        var head2 = new List<byte>
+        {
+            1,                                          // configurationVersion
+            (byte)((space << 6) | (tier << 5) | profileIdc),
+        };
+        head2.AddRange(compat);
+        head2.AddRange(cons);
+        head2.Add(level);
+        head2.Add(0xF0);                                // min_spatial_segmentation_idc = 0
+        head2.Add(0x00);
+        head2.Add(0xFC);                                // parallelismType = 0
+        head2.Add(0xFD);                                // chromaFormat = 1 (4:2:0)
+        head2.Add(0xF8);                                // bitDepthLuma = 8
+        head2.Add(0xF8);                                // bitDepthChroma = 8
+        head2.Add(0x00); head2.Add(0x00);               // avgFrameRate
+        head2.Add(0x03);                                // constantFrameRate|temporalLayers|nested|lengthSize-1
+        head2.Add((byte)count);
+        head2.AddRange(arrays);
+        return Box("hvcC", head2.ToArray());
+    }
+
     private static readonly byte[] Matrix = Box("_", U32(
         0x00010000, 0, 0, 0, 0x00010000, 0, 0, 0, 0x40000000)).AsSpan(8).ToArray();
 
     // ---- init segment ----
 
-    public static byte[] BuildInit(byte[] sps, byte[] pps, int width, int height)
+    public static byte[] BuildInit(byte[] sps, byte[] pps, int width, int height,
+        VideoCodec codec = VideoCodec.H264, byte[]? vps = null)
     {
+        bool hevc = codec == VideoCodec.Hevc;
         var ftyp = Box("ftyp",
             Encoding.ASCII.GetBytes("isom"), U32(512),
             Encoding.ASCII.GetBytes("isom"), Encoding.ASCII.GetBytes("iso5"),
-            Encoding.ASCII.GetBytes("avc1"), Encoding.ASCII.GetBytes("mp41"));
+            Encoding.ASCII.GetBytes(hevc ? "hvc1" : "avc1"), Encoding.ASCII.GetBytes("mp41"));
 
-        var avcC = Box("avcC",
-            new byte[] { 1, sps[1], sps[2], sps[3], 0xFF, 0xE1 },
-            U16((ushort)sps.Length), sps,
-            new byte[] { 1 },
-            U16((ushort)pps.Length), pps);
-
-        var avc1 = Box("avc1",
-            new byte[] { 0, 0, 0, 0, 0, 0 }, U16(1),          // reserved + data_reference_index
-            U16(0, 0, 0, 0),                                   // pre_defined + reserved
-            U16(0, 0, 0),                                      // pre_defined[3]
-            U16((ushort)width, (ushort)height),
-            U32(0x00480000, 0x00480000),                       // 72 dpi
-            U32(0), U16(1),                                    // reserved + frame_count
-            new byte[32],                                      // compressorname
-            U16(0x0018), U16(0xFFFF),                          // depth + pre_defined
-            avcC);
+        var sample = hevc
+            ? Box("hvc1", Mp4Writer.VisualEntryHeader(width, height), HvcC(vps, sps, pps))
+            : Box("avc1", Mp4Writer.VisualEntryHeader(width, height),
+                  Box("avcC", new byte[] { 1, sps[1], sps[2], sps[3], 0xFF, 0xE1 },
+                      U16((ushort)sps.Length), sps, new byte[] { 1 }, U16((ushort)pps.Length), pps));
+        var avc1 = sample;
 
         var stsd = Full("stsd", 0, 0, U32(1), avc1);
         var stts = Full("stts", 0, 0, U32(0));
@@ -197,7 +245,7 @@ public static class Mp4
     public readonly record struct Nal(int Start, int Length, int Type);
 
     /// <summary>拆 Annex-B 的起始码，返回每个 NAL 的位置与类型。</summary>
-    public static List<Nal> SplitAnnexB(ReadOnlySpan<byte> d)
+    public static List<Nal> SplitAnnexB(ReadOnlySpan<byte> d, bool hevc = false)
     {
         var list = new List<Nal>();
         int i = 0;
@@ -211,7 +259,9 @@ public static class Mp4
                 int end = (j + 3 <= d.Length) ? j : d.Length;
                 // 去掉尾部可能的 0 填充
                 while (end > start && d[end - 1] == 0) end--;
-                if (end > start) list.Add(new Nal(start, end - start, d[start] & 0x1F));
+                // H.264 的类型在首字节低 5 位；HEVC 在头两字节里：forbidden(1) type(6) layer(6) tid(3)
+                int type = hevc ? (d[start] >> 1) & 0x3F : d[start] & 0x1F;
+                if (end > start) list.Add(new Nal(start, end - start, type));
                 i = (end == d.Length) ? d.Length : end;
             }
             else i++;

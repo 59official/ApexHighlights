@@ -63,6 +63,9 @@ public sealed class CapturePolicy
     /// </summary>
     public int BitrateMbps { get; set; } = 30;
 
+    /// <summary>视频编码。默认 H.264（双击就能播）；HEVC 同码率更干净、更小。</summary>
+    public VideoCodec Codec { get; set; } = VideoCodec.H264;
+
     /// <summary>
     /// 音轨来源，见 <see cref="AudioMode"/>。默认「只录游戏」。
     ///
@@ -228,6 +231,7 @@ public sealed class CapturePolicy
             else root = new JsonObject();
 
             root["BitrateMbps"] = BitrateMbps;
+            root["Codec"] = Codec.ToString();
             root["PreRollSec"] = PreRollSec;
             root["PostRollSec"] = PostRollSec;
             root["AudioMode"] = Audio.ToString();
@@ -253,6 +257,7 @@ public sealed class CapturePolicy
     {
         if (p.BitrateMbps < BitrateMin) p.BitrateMbps = BitrateMin;
         if (p.BitrateMbps > BitrateMax) p.BitrateMbps = BitrateMax;
+        p.Codec = VideoCodecs.Normalize(p.Codec);
         if (p.PreRollSec < 0) p.PreRollSec = 0;
         if (p.PreRollSec > RollMax) p.PreRollSec = RollMax;
         if (p.PostRollSec < 0) p.PostRollSec = 0;

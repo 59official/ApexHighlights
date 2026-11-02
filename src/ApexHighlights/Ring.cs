@@ -15,6 +15,7 @@ public sealed class SegmentRing
     private readonly string _dir;
     private readonly int _w, _h;
     private readonly int _keepSeconds;
+    private readonly VideoCodec _codec;
     private readonly List<SegmentRef> _segs = new();
 
     private readonly MemoryStream _payload = new();
@@ -26,11 +27,15 @@ public sealed class SegmentRing
     public byte[]? Init { get; private set; }
     public byte[]? Sps { get; private set; }
     public byte[]? Pps { get; private set; }
+    /// <summary>HEVC 才有的 VPS；H.264 恒为 null。</summary>
+    public byte[]? Vps { get; private set; }
+    public VideoCodec Codec => _codec;
     public int KeyFrames { get; private set; }
     public long TotalSamples { get; private set; }
 
-    public SegmentRing(string dir, int width, int height, int keepSeconds = 120)
+    public SegmentRing(string dir, int width, int height, int keepSeconds = 120, VideoCodec codec = VideoCodec.H264)
     {
+        _codec = codec;
         _dir = dir;
         _w = width; _h = height;
         _keepSeconds = keepSeconds;
@@ -43,18 +48,23 @@ public sealed class SegmentRing
     /// <summary>追加一帧（Annex-B 形式的 access unit）。返回是否产生了新的段。</summary>
     public bool Append(long ptsUs, ReadOnlySpan<byte> annexB)
     {
-        var nals = Mp4.SplitAnnexB(annexB);
+        bool hevc = _codec == VideoCodec.Hevc;
+        var nals = Mp4.SplitAnnexB(annexB, hevc);
         if (nals.Count == 0) return false;
 
+        // H.264：SPS=7 PPS=8 IDR=5；HEVC：VPS=32 SPS=33 PPS=34，IRAP 是 16..23（BLA/IDR/CRA）
+        int vpsType = 32, spsType = hevc ? 33 : 7, ppsType = hevc ? 34 : 8;
         bool key = false;
         foreach (var n in nals)
         {
-            if (n.Type == 7 && Sps is null) { Sps = annexB.Slice(n.Start, n.Length).ToArray(); Init = null; }
-            else if (n.Type == 8 && Pps is null) { Pps = annexB.Slice(n.Start, n.Length).ToArray(); Init = null; }
-            else if (n.Type == 5) key = true;
+            if (hevc && n.Type == vpsType && Vps is null) { Vps = annexB.Slice(n.Start, n.Length).ToArray(); Init = null; }
+            else if (!hevc && n.Type == spsType && Sps is null) { Sps = annexB.Slice(n.Start, n.Length).ToArray(); Init = null; }
+            else if (hevc && n.Type == spsType && Sps is null) { Sps = annexB.Slice(n.Start, n.Length).ToArray(); Init = null; }
+            else if (n.Type == ppsType && Pps is null) { Pps = annexB.Slice(n.Start, n.Length).ToArray(); Init = null; }
+            else if (hevc ? (n.Type >= 16 && n.Type <= 23) : n.Type == 5) key = true;
         }
-        if (Init is null && Sps is not null && Pps is not null)
-            Init = Mp4.BuildInit(Sps, Pps, _w, _h);
+        if (Init is null && Sps is not null && Pps is not null && (!hevc || Vps is not null))
+            Init = Mp4.BuildInit(Sps, Pps, _w, _h, _codec, Vps);
 
         bool closed = false;
         if (key && _samples.Count > 0) { CloseSegment(); closed = true; }
@@ -122,7 +132,7 @@ public sealed class SegmentRing
         if (p is null) return Array.Empty<byte>();
         using var ms = new MemoryStream();
         Mp4Writer.Write(ms, Sps!, Pps!, _w, _h, p.Value.Video, p.Value.Audio,
-            p.Value.AudioRate, p.Value.Asc, p.Value.Channels);
+            p.Value.AudioRate, p.Value.Asc, p.Value.Channels, _codec, Vps);
         return ms.ToArray();
     }
 
@@ -138,7 +148,7 @@ public sealed class SegmentRing
         var p = Prepare(startUs, endUs, audio);
         if (p is null) return 0;
         return Mp4Writer.Write(dst, Sps!, Pps!, _w, _h, p.Value.Video, p.Value.Audio,
-            p.Value.AudioRate, p.Value.Asc, p.Value.Channels);
+            p.Value.AudioRate, p.Value.Asc, p.Value.Channels, _codec, Vps);
     }
 
     /// <summary>最近一次 Prepare 的音视频长度说明，给 WriteClip 写日志用。</summary>

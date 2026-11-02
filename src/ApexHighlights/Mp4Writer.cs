@@ -95,8 +95,9 @@ internal static class Mp4Writer
 
     // ---- 写普通 mp4 ----
 
-    public static byte[] Build(byte[] sps, byte[] pps, int width, int height, IReadOnlyList<ClipSample> samples)
-        => Build(sps, pps, width, height, samples, null, 48000, null, 2);
+    public static byte[] Build(byte[] sps, byte[] pps, int width, int height, IReadOnlyList<ClipSample> samples,
+        VideoCodec codec = VideoCodec.H264, byte[]? vps = null)
+        => Build(sps, pps, width, height, samples, null, 48000, null, 2, codec, vps);
 
     /// <summary>
     /// 写普通 mp4。audio 非空时额外写一条 mp4a 音轨（track_id = 2）。
@@ -108,10 +109,11 @@ internal static class Mp4Writer
     /// </summary>
     public static byte[] Build(byte[] sps, byte[] pps, int width, int height,
         IReadOnlyList<ClipSample> samples,
-        IReadOnlyList<ClipSample>? audio, int audioTimescale, byte[]? asc, int audioChannels)
+        IReadOnlyList<ClipSample>? audio, int audioTimescale, byte[]? asc, int audioChannels,
+        VideoCodec codec = VideoCodec.H264, byte[]? vps = null)
     {
         using var ms = new MemoryStream();
-        Write(ms, sps, pps, width, height, samples, audio, audioTimescale, asc, audioChannels);
+        Write(ms, sps, pps, width, height, samples, audio, audioTimescale, asc, audioChannels, codec, vps);
         return ms.ToArray();
     }
 
@@ -126,7 +128,8 @@ internal static class Mp4Writer
     /// <returns>写出的总字节数。</returns>
     public static long Write(Stream dst, byte[] sps, byte[] pps, int width, int height,
         IReadOnlyList<ClipSample> samples,
-        IReadOnlyList<ClipSample>? audio, int audioTimescale, byte[]? asc, int audioChannels)
+        IReadOnlyList<ClipSample>? audio, int audioTimescale, byte[]? asc, int audioChannels,
+        VideoCodec codec = VideoCodec.H264, byte[]? vps = null)
     {
         int n = samples.Count;
         long totalTicks = 0;
@@ -142,13 +145,13 @@ internal static class Mp4Writer
         var aOffsets = new uint[m];
 
         var moovProbe = Moov(sps, pps, width, height, samples, offsets, totalTicks,
-            audio, aOffsets, audioTimescale, asc, audioChannels, audioTicks);
+            audio, aOffsets, audioTimescale, asc, audioChannels, audioTicks, codec, vps);
         long run = ftyp.Length + moovProbe.Length + 8L;
         for (int i = 0; i < n; i++) { offsets[i] = (uint)run; run += samples[i].Avcc.Length; }
         for (int i = 0; i < m; i++) { aOffsets[i] = (uint)run; run += audio![i].Avcc.Length; }
 
         var moov = Moov(sps, pps, width, height, samples, offsets, totalTicks,
-            audio, aOffsets, audioTimescale, asc, audioChannels, audioTicks);
+            audio, aOffsets, audioTimescale, asc, audioChannels, audioTicks, codec, vps);
         if (moov.Length != moovProbe.Length) throw new InvalidOperationException("moov 长度不一致");
 
         long written = 0;
@@ -172,11 +175,24 @@ internal static class Mp4Writer
         System.Text.Encoding.ASCII.GetBytes("isom"),
         System.Text.Encoding.ASCII.GetBytes("avc1"));
 
+    /// <summary>
+    /// SampleEntry 的公共固定头（avc1/hvc1 都一样）：6 保留 + 2 dref + 2 pre_defined + 2 reserved
+    /// + 12 pre_defined + 宽高 + 分辨率 + 保留 + frame_count + compressorname + depth + pre_defined。
+    /// </summary>
+    internal static byte[] VisualEntryHeader(int w, int h) => Box("_",
+        new byte[] { 0, 0, 0, 0, 0, 0 }, U16(1),
+        U16(0, 0), U32(0, 0, 0),
+        U16((ushort)w, (ushort)h),
+        U32(0x00480000, 0x00480000), U32(0), U16(1),
+        new byte[32], U16(0x0018), U16(0xFFFF)).AsSpan(8).ToArray();
+
     private static byte[] Moov(byte[] sps, byte[] pps, int w, int h,
         IReadOnlyList<ClipSample> samples, uint[] offsets, long totalTicks,
         IReadOnlyList<ClipSample>? audio, uint[] aOffsets, int audioTimescale,
-        byte[]? asc, int audioChannels, long audioTicks)
+        byte[]? asc, int audioChannels, long audioTicks,
+        VideoCodec codec = VideoCodec.H264, byte[]? vps = null)
     {
+        bool hevc = codec == VideoCodec.Hevc;
         int n = samples.Count;
         int movieMs = (int)Math.Max(1, totalTicks * 1000 / Mp4.Timescale);
         int m = audio?.Count ?? 0;
@@ -187,23 +203,17 @@ internal static class Mp4Writer
         }
 
         // stsd
-        var avcC = Box("avcC",
-            new byte[] { 1, sps[1], sps[2], sps[3], 0xFF, 0xE1 },
-            U16((ushort)sps.Length), sps, new byte[] { 1 },
-            U16((ushort)pps.Length), pps);
         // colr（nclx）：明确写 BT.709 + 有限范围。不写的话播放器只能靠猜，
         // 猜成 BT.601 或当成全范围，画面就会发灰、发闷 —— 看着像「脏」。
         var colr = Box("colr",
             System.Text.Encoding.ASCII.GetBytes("nclx"),
             U16(1, 1, 1),          // 原色 bt709 / 传递特性 bt709 / 矩阵 bt709
             new byte[] { 0 });     // full_range_flag = false（16..235）
-        // SampleEntry 固定头：6 保留 + 2 dref + 2 pre_defined + 2 reserved + 12 pre_defined = 24 字节
-        var avc1 = Box("avc1",
-            new byte[] { 0, 0, 0, 0, 0, 0 }, U16(1),
-            U16(0, 0), U32(0, 0, 0),
-            U16((ushort)w, (ushort)h),
-            U32(0x00480000, 0x00480000), U32(0), U16(1),
-            new byte[32], U16(0x0018), U16(0xFFFF), colr, avcC);
+        var avc1 = hevc
+            ? Box("hvc1", VisualEntryHeader(w, h), colr, Mp4.HvcC(vps, sps, pps))
+            : Box("avc1", VisualEntryHeader(w, h), colr,
+                  Box("avcC", new byte[] { 1, sps[1], sps[2], sps[3], 0xFF, 0xE1 },
+                      U16((ushort)sps.Length), sps, new byte[] { 1 }, U16((ushort)pps.Length), pps));
         var stsd = Full("stsd", 0, 0, U32(1), avc1);
 
         // stts：run-length

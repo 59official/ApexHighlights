@@ -10,7 +10,7 @@ namespace ApexHighlights;
 /// </summary>
 internal sealed class ParamsForm : Form
 {
-    private const int W = 520, H = 392, PadX = 24, TitleH = 60;
+    private const int W = 520, H = 452, PadX = 24, TitleH = 60;
 
     // 面板里的尺寸都是按 96 DPI 写的「设计像素」，实际窗口按当前 DPI 放大——
     // 不这么做的话，125% 缩放时字号自动变大、矩形还是老尺寸，副标题就会被切掉上半截
@@ -24,14 +24,16 @@ internal sealed class ParamsForm : Form
     private readonly ParamSlider _merge = new();
 
     /// <summary>拖动中值变了：只该拿去改采集器（立刻看到效果），别写盘。参数：码率 / 前摇 / 后摇 / 合并。</summary>
-    public Action<int, int, int, int>? Changed;
+    public Action<int, int, int, int, VideoCodec>? Changed;
 
     /// <summary>松手了（或键盘调完、点了恢复默认）：这时候才写盘。</summary>
-    public Action<int, int, int, int>? Committed;
+    public Action<int, int, int, int, VideoCodec>? Committed;
 
     private readonly int _defBitrate, _defPre, _defPost, _defMerge;
 
-    public ParamsForm(int bitrate, int preRoll, int postRoll, int merge,
+    private readonly CodecPicker _codec = new();
+
+    public ParamsForm(int bitrate, int preRoll, int postRoll, int merge, VideoCodec codec = VideoCodec.H264,
                       int bitrateMin = CapturePolicy.BitrateMin, int bitrateMax = CapturePolicy.BitrateMax)
     {
         _defBitrate = 30;
@@ -68,6 +70,9 @@ internal sealed class ParamsForm : Form
         _merge.Min = 0; _merge.Max = CapturePolicy.MergeMax; _merge.Step = 1; _merge.Value = merge;
         _merge.Format = v => v == 0 ? "0s（每次命中各出一段）" : v + "s";
 
+        _codec.Label = "视频编码";
+        _codec.Value = codec;
+
         var sliders = new[] { _bitrate, _pre, _post, _merge };
         for (int i = 0; i < sliders.Length; i++)
         {
@@ -78,6 +83,11 @@ internal sealed class ParamsForm : Form
             Controls.Add(s);
         }
 
+        // 第五行不是滑杆：两个互斥的胶囊（H.264 / HEVC）
+        _codec.SetBounds(Si(PadX), Si(TitleH + 10 + 4 * 60), Si(W - PadX * 2), Si(48));
+        _codec.Changed += _ => Commit();     // 编码是离散选择，点了就落盘
+        Controls.Add(_codec);
+
         var reset = new RoundButton("恢复默认", 104) { Style = RoundButton.Look.Ghost };
         reset.Click += (_, _) =>
         {
@@ -85,6 +95,7 @@ internal sealed class ParamsForm : Form
             _pre.Value = _defPre;
             _post.Value = _defPost;
             _merge.Value = _defMerge;
+            _codec.Value = VideoCodec.H264;
             Fire();
             Commit();          // 恢复默认是明确动作，立刻落盘
         };
@@ -103,17 +114,126 @@ internal sealed class ParamsForm : Form
         KeyDown += (_, e) => { if (e.KeyCode == Keys.Escape) Close(); };
     }
 
+    /// <summary>
+    /// 两个互斥的胶囊（H.264 / HEVC）。和滑杆一样自绘，颜色跟 UiKit 一套。
+    /// 单独的控件而不是在 ParamsForm 里画：命中测试和「谁亮着」的状态都关在自己身上。
+    /// </summary>
+    private sealed class CodecPicker : Control
+    {
+        public string Label = "";
+        public event Action<VideoCodec>? Changed;
+
+        private VideoCodec _value = VideoCodec.H264;
+        private int _hover = -1;
+
+        public CodecPicker()
+        {
+            DoubleBuffered = true;
+            // 顺序有讲究：必须先开 SupportsTransparentBackColor，再设透明背色，
+            // 反了会抛「Control does not support transparent background colors」。
+            SetStyle(ControlStyles.SupportsTransparentBackColor, true);
+            BackColor = Color.Transparent;
+        }
+
+        private float S => DeviceDpi / 96f;
+        private int Si(int v) => (int)Math.Round(v * S);
+
+        /// <summary>改值但一声不响（自检里模拟「用户把状态摆成这样」，不该引发落盘）。</summary>
+        public void SetValueSilently(VideoCodec v)
+        {
+            _value = v;
+            Invalidate();
+        }
+
+        public VideoCodec Value
+        {
+            get => _value;
+            set
+            {
+                if (_value == value) return;
+                _value = value;
+                Invalidate();
+                Changed?.Invoke(_value);
+            }
+        }
+
+        private Rectangle Chip(int i)
+        {
+            int w = Si(96), h = Si(34), gap = Si(8);
+            int total = w * 2 + gap;
+            int x = Width - total;
+            int y = (Height - h) / 2;
+            return new Rectangle(x + i * (w + gap), y, w, h);
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            var g = e.Graphics;
+            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
+
+            var label = new Rectangle(0, 0, Width - Si(220), Height);
+            TextRenderer.DrawText(g, Label, UiKit.F95, label, UiKit.Text,
+                TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+
+            for (int i = 0; i < VideoCodecs.All.Length; i++)
+            {
+                var c = VideoCodecs.All[i];
+                var r = Chip(i);
+                bool on = c == _value;
+                using (var path = UiKit.RoundRect(r, Si(10)))
+                {
+                    using var fill = new SolidBrush(on ? UiKit.Accent
+                        : (_hover == i ? Color.FromArgb(38, 41, 50) : UiKit.PillFill));
+                    g.FillPath(fill, path);
+                }
+                TextRenderer.DrawText(g, VideoCodecs.Label(c), UiKit.F95, r,
+                    on ? Color.FromArgb(24, 25, 30) : UiKit.Text,
+                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+            }
+        }
+
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            int hit = -1;
+            for (int i = 0; i < VideoCodecs.All.Length; i++) if (Chip(i).Contains(e.Location)) hit = i;
+            if (hit != _hover) { _hover = hit; Invalidate(); }
+            Cursor = hit >= 0 ? Cursors.Hand : Cursors.Default;
+            base.OnMouseMove(e);
+        }
+
+        protected override void OnMouseLeave(EventArgs e)
+        {
+            if (_hover != -1) { _hover = -1; Invalidate(); }
+            base.OnMouseLeave(e);
+        }
+
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            for (int i = 0; i < VideoCodecs.All.Length; i++)
+            {
+                if (!Chip(i).Contains(e.Location)) continue;
+                Value = VideoCodecs.All[i];
+                return;
+            }
+            base.OnMouseDown(e);
+        }
+    }
+
     // ── 自检用（--ui-test 走这几个口子，不去摸私有字段）──────────────────────
-    internal (int Bitrate, int Pre, int Post, int Merge) Values =>
-        (_bitrate.Value, _pre.Value, _post.Value, _merge.Value);
+    internal (int Bitrate, int Pre, int Post, int Merge, VideoCodec Codec) Values =>
+        (_bitrate.Value, _pre.Value, _post.Value, _merge.Value, _codec.Value);
+
+    internal VideoCodec CodecValue => _codec.Value;
 
     /// <summary>等价于用户把四根滑杆各拖到某处：改值并按一次面板的回调。</summary>
-    internal void TestSet(int bitrate, int pre, int post, int merge)
+    internal void TestSet(int bitrate, int pre, int post, int merge, VideoCodec codec = VideoCodec.H264)
     {
         _bitrate.Value = bitrate;
         _pre.Value = pre;
         _post.Value = post;
         _merge.Value = merge;
+        _codec.SetValueSilently(codec);   // 静默改：点胶囊算「一次完成的动作」会顺带落盘，自检时不该触发
         Fire();
     }
 
@@ -121,9 +241,9 @@ internal sealed class ParamsForm : Form
     internal void TestCommit() => Commit();
 
     /// <summary>拖完一根滑杆就往外报一次，立刻生效（用户说了实时生效，不要「保存」按钮）。</summary>
-    private void Fire() => Changed?.Invoke(_bitrate.Value, _pre.Value, _post.Value, _merge.Value);
+    private void Fire() => Changed?.Invoke(_bitrate.Value, _pre.Value, _post.Value, _merge.Value, _codec.Value);
 
-    private void Commit() => Committed?.Invoke(_bitrate.Value, _pre.Value, _post.Value, _merge.Value);
+    private void Commit() => Committed?.Invoke(_bitrate.Value, _pre.Value, _post.Value, _merge.Value, _codec.Value);
 
     protected override void OnPaint(PaintEventArgs e)
     {

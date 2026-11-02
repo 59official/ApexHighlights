@@ -8,7 +8,7 @@ namespace ApexHighlights;
 /// <summary>离线自检（GPU 直通）：合成 BGRA → VideoProcessor 转 NV12 → NVENC（surface 直喂）→ 分片环形 → 拼 mp4。</summary>
 internal static class GpuTest
 {
-    public static int Run(int w, int h, int frames, string outDir)
+    public static int Run(int w, int h, int frames, string outDir, VideoCodec codec = VideoCodec.H264)
     {
         Directory.CreateDirectory(outDir);
         var ringDir = Path.Combine(outDir, "ring");
@@ -21,10 +21,10 @@ internal static class GpuTest
 
         Console.WriteLine($"[1] GPU 直通 {w}x{h} @ {frames} 帧");
         var converter = new GpuConverter(dev, ctx, w, h);
-        var enc = new EncoderChain(w, h, 20_000_000, 60, 60, dev);
+        var enc = new EncoderChain(w, h, 20_000_000, 60, 60, dev, codec);
         Console.WriteLine($"[2] 选中 {enc.Name}（每 60 帧换编码器拿 IDR）");
 
-        var ring = new SegmentRing(ringDir, w, h, 120);
+        var ring = new SegmentRing(ringDir, w, h, 120, codec);
         Console.WriteLine("[2a] ring ok");
 
         // BGRA 输入：dynamic 上传纹理填数据 → default 纹理（VideoProcessor 输入）
@@ -96,9 +96,10 @@ internal static class GpuTest
                     Console.WriteLine($"    f{fi} types={types}");
                 }
                 bytes += data.Length;
-                if (fi < 5 || fi == 60) Console.WriteLine($"    f{fi} pkt={data.Length}B");
-                foreach (var n in Mp4.SplitAnnexB(data))
-                    if (n.Type == 5) idrs++;
+                if (fi < 5 || fi == 60) Console.WriteLine($"    f{fi} pkt={data.Length}B  head={BitConverter.ToString(data, 0, Math.Min(24, data.Length))}");
+                if (fi == 0) try { File.WriteAllBytes(Path.Combine(outDir, "pkt0.bin"), data); } catch { }
+                foreach (var n in Mp4.SplitAnnexB(data, codec == VideoCodec.Hevc))
+                    if (n.Type == (codec == VideoCodec.Hevc ? 19 : 5)) idrs++;
                 ring.Append(pts / 10, data);
             }); }
             catch (Exception e) { Console.WriteLine($"[X] SubmitSurface 帧{f}: {e.Message}"); return 5; }

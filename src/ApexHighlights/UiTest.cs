@@ -561,36 +561,39 @@ internal static class UiTest
         int bad = 0;
         var t = new Thread(() =>
         {
-            var f = new ParamsForm(bitrate: 28, preRoll: 15, postRoll: 15, merge: 8)
+            var f = new ParamsForm(bitrate: 30, preRoll: 15, postRoll: 15, merge: 8)
             {
                 StartPosition = FormStartPosition.Manual,
                 Location = new Point(-4000, -4000),
                 ShowInTaskbar = false,
             };
-            (int, int, int, int)? got = null;        // 拖动中（实时生效，不落盘）
-            (int, int, int, int)? saved = null;      // 松手（落盘）
-            f.Changed = (b, pre, post, merge) => got = (b, pre, post, merge);
-            f.Committed = (b, pre, post, merge) => saved = (b, pre, post, merge);
+            (int, int, int, int, VideoCodec)? got = null;     // 拖动中（实时生效，不落盘）
+            (int, int, int, int, VideoCodec)? saved = null;   // 松手（落盘）
+            f.Changed = (b, pre, post, merge, codec) => got = (b, pre, post, merge, codec);
+            f.Committed = (b, pre, post, merge, codec) => saved = (b, pre, post, merge, codec);
             f.Show();
             Application.DoEvents();
 
-            if (f.Values == (28, 15, 15, 8)) Console.WriteLine("    ok  面板四根滑杆拿到当前值（28/15/15/8）");
-            else { Console.WriteLine($"    NG  面板初始值 {f.Values}，应为 (28,15,15,8)"); bad++; }
+            if (f.Values == (30, 15, 15, 8, VideoCodec.H264))
+                Console.WriteLine("    ok  面板四根滑杆 + 编码拿到当前值（30/15/15/8/H.264）");
+            else { Console.WriteLine($"    NG  面板初始值 {f.Values}，应为 (30,15,15,8,H264)"); bad++; }
 
-            f.TestSet(45, 20, 10, 12);
-            if (got == (45, 20, 10, 12)) Console.WriteLine("    ok  拖动中 → 实时回调收到 (45,20,10,12)");
-            else { Console.WriteLine($"    NG  实时回调收到 {got}，应为 (45,20,10,12)"); bad++; }
+            f.TestSet(45, 20, 10, 12, VideoCodec.Hevc);
+            if (got == (45, 20, 10, 12, VideoCodec.Hevc)) Console.WriteLine("    ok  拖动中 → 实时回调收到 (45,20,10,12,HEVC)");
+            else { Console.WriteLine($"    NG  实时回调收到 {got}，应为 (45,20,10,12,HEVC)"); bad++; }
             if (saved is null) Console.WriteLine("    ok  拖动中没触发落盘（saved 仍是 null）");
             else { Console.WriteLine($"    NG  拖动中就落盘了：{saved}"); bad++; }
 
             f.TestCommit();
-            if (saved == (45, 20, 10, 12)) Console.WriteLine("    ok  松手 → 落盘回调收到 (45,20,10,12)");
-            else { Console.WriteLine($"    NG  落盘回调收到 {saved}，应为 (45,20,10,12)"); bad++; }
+            if (saved == (45, 20, 10, 12, VideoCodec.Hevc)) Console.WriteLine("    ok  松手 → 落盘回调收到 (45,20,10,12,HEVC)");
+            else { Console.WriteLine($"    NG  落盘回调收到 {saved}，应为 (45,20,10,12,HEVC)"); bad++; }
 
             // 面板自身不做夹取，夹取在托盘那层（CapturePolicy.Clamp）；这里只确认超范围会被
             // 滑杆夹到自己的 min/max 上，值不会跑到 200 那种地方
-            f.TestSet(999, 999, -5, 999);
-            var (b, pre, post, mg) = f.Values;
+            f.TestSet(999, 999, -5, 999, VideoCodec.Hevc);
+            var (b, pre, post, mg, codec) = f.Values;
+            if (codec == VideoCodec.Hevc) Console.WriteLine("    ok  编码选择保持 HEVC");
+            else { Console.WriteLine($"    NG  编码被改成 {codec}"); bad++; }
             if (b == CapturePolicy.BitrateMax && pre == CapturePolicy.RollMax && post == 0 && mg == CapturePolicy.RollMax)
                 Console.WriteLine($"    ok  超出范围被夹住（{b}/{pre}/{post}/{mg}）");
             else { Console.WriteLine($"    NG  超范围没夹住：{b}/{pre}/{post}/{mg}"); bad++; }

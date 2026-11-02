@@ -43,9 +43,15 @@ public sealed class NvEncoder : IDisposable
     public int Dropped { get; private set; }
     public int Pushed { get; private set; }
     public string Name { get; private set; } = "?";
+    public VideoCodec Codec { get; }
 
-    public NvEncoder(int w, int h, int bitrate, int gopFrames = 60, int fps = 60, ID3D11Device? d3d = null)
+    /// <summary>MFVideoFormat_HEVC（'HEVC'）。Vortice 的 VideoFormatGuids 里没有，自己写。</summary>
+    public static readonly Guid HEVC = new("43564548-0000-0010-8000-00AA00389B71");
+
+    public NvEncoder(int w, int h, int bitrate, int gopFrames = 60, int fps = 60, ID3D11Device? d3d = null,
+        VideoCodec codec = VideoCodec.H264)
     {
+        Codec = codec;
         _w = w; _h = h; _gopFrames = gopFrames; _fps = Math.Max(1, fps);
         MediaFactory.MFStartup(false);
 
@@ -65,9 +71,11 @@ public sealed class NvEncoder : IDisposable
         else _d3dMgrPtr = IntPtr.Zero;
 
         var inInfo = new RegisterTypeInfo { GuidMajorType = MediaTypeGuids.Video, GuidSubtype = VideoFormatGuids.NV12 };
-        var outInfo = new RegisterTypeInfo { GuidMajorType = MediaTypeGuids.Video, GuidSubtype = VideoFormatGuids.H264 };
+        Guid wantSub = codec == VideoCodec.Hevc ? HEVC : VideoFormatGuids.H264;
+        var outInfo = new RegisterTypeInfo { GuidMajorType = MediaTypeGuids.Video, GuidSubtype = wantSub };
         MediaFactory.MFTEnumEx(TransformCategoryGuids.VideoEncoder, 0x7, inInfo, outInfo, out var ptrs, out var count);
-        if (count == 0) throw new InvalidOperationException("机器上没有 H.264 编码器");
+        if (count == 0) throw new InvalidOperationException(
+            codec == VideoCodec.Hevc ? "机器上没有 HEVC 编码器（显卡不支持？）" : "机器上没有 H.264 编码器");
 
         var arr = new IntPtr[count];
         Marshal.Copy(ptrs, arr, 0, (int)count);
@@ -86,7 +94,7 @@ public sealed class NvEncoder : IDisposable
             catch (Exception e) { act.Dispose(); err = $"{name}: activate {e.Message}"; continue; }
             act.Dispose();
 
-            if (Configure(t, w, h, bitrate, gopFrames, fps, _d3dMgrPtr, out var st))
+            if (Configure(t, w, h, bitrate, gopFrames, fps, _d3dMgrPtr, wantSub, out var st))
             {
                 chosen = t; Name = name; provides = st.provides; osiSize = st.osiSize; gopOut = st.gop;
                 break;
@@ -108,7 +116,8 @@ public sealed class NvEncoder : IDisposable
 
     private readonly record struct CfgState(bool provides, int osiSize, string fail, int gop);
 
-    private static bool Configure(IMFTransform enc, int w, int h, int bitrate, int gopFrames, int fps, IntPtr d3dMgrPtr, out CfgState state)
+    private static bool Configure(IMFTransform enc, int w, int h, int bitrate, int gopFrames, int fps,
+        IntPtr d3dMgrPtr, Guid wantSub, out CfgState state)
     {
         state = default;
         int gop = 0;
@@ -145,13 +154,13 @@ public sealed class NvEncoder : IDisposable
                 if (mt == null) break;
                 Guid sub = Guid.Empty;
                 try { sub = mt.GetGUID(MediaTypeAttributeKeys.Subtype); } catch { }
-                if (sub == VideoFormatGuids.H264) { outType = mt; break; }
+                if (sub == wantSub) { outType = mt; break; }
                 mt.Dispose();
             }
         }
         catch { }
 
-        if (outType is null) { state = new CfgState(false, 0, "没有 H264 输出类型", gop); return false; }
+        if (outType is null) { state = new CfgState(false, 0, "没有匹配的输出类型", gop); return false; }
 
         try
         {

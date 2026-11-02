@@ -13,6 +13,7 @@ public sealed class EncoderChain : IDisposable
     private readonly int _w, _h, _bitrate;
     private readonly int _framesPerSegment, _fps;
     private readonly ID3D11Device? _d3d;
+    private readonly VideoCodec _codec;
     private NvEncoder _cur;
     private Task<NvEncoder>? _next;
     private int _count;
@@ -24,19 +25,21 @@ public sealed class EncoderChain : IDisposable
     public int Dropped => _cur.Dropped;
     public int Pushed => _cur.Pushed;
     public string Name => _cur.Name;
+    public VideoCodec Codec => _codec;
 
-    public EncoderChain(int w, int h, int bitrate, int framesPerSegment = 60, int fps = 60, ID3D11Device? d3d = null)
+    public EncoderChain(int w, int h, int bitrate, int framesPerSegment = 60, int fps = 60, ID3D11Device? d3d = null,
+        VideoCodec codec = VideoCodec.H264)
     {
         _w = w; _h = h; _bitrate = bitrate;
-        _framesPerSegment = framesPerSegment; _fps = fps; _d3d = d3d;
-        _cur = new NvEncoder(w, h, bitrate, framesPerSegment, fps, d3d);
+        _framesPerSegment = framesPerSegment; _fps = fps; _d3d = d3d; _codec = codec;
+        _cur = new NvEncoder(w, h, bitrate, framesPerSegment, fps, d3d, codec);
         if (_framesPerSegment > 0) StartRefill();
     }
 
     private void StartRefill()
     {
         if (_disposed) return;
-        _next ??= Task.Run(() => new NvEncoder(_w, _h, _bitrate, _framesPerSegment, _fps, _d3d));
+        _next ??= Task.Run(() => new NvEncoder(_w, _h, _bitrate, _framesPerSegment, _fps, _d3d, _codec));
     }
 
     public void Submit(long pts, byte[] nv12, Action<byte[], long> onPacket)
@@ -59,7 +62,7 @@ public sealed class EncoderChain : IDisposable
         var sw = Stopwatch.StartNew();
         var t = _next;
         _next = null;
-        var fresh = t is null ? new NvEncoder(_w, _h, _bitrate, _framesPerSegment, _fps, _d3d) : t.GetAwaiter().GetResult();
+        var fresh = t is null ? new NvEncoder(_w, _h, _bitrate, _framesPerSegment, _fps, _d3d, _codec) : t.GetAwaiter().GetResult();
         _cur.Dispose();
         _cur = fresh;
         _count = 0;
