@@ -191,13 +191,19 @@ internal static class Mp4Writer
             new byte[] { 1, sps[1], sps[2], sps[3], 0xFF, 0xE1 },
             U16((ushort)sps.Length), sps, new byte[] { 1 },
             U16((ushort)pps.Length), pps);
+        // colr（nclx）：明确写 BT.709 + 有限范围。不写的话播放器只能靠猜，
+        // 猜成 BT.601 或当成全范围，画面就会发灰、发闷 —— 看着像「脏」。
+        var colr = Box("colr",
+            System.Text.Encoding.ASCII.GetBytes("nclx"),
+            U16(1, 1, 1),          // 原色 bt709 / 传递特性 bt709 / 矩阵 bt709
+            new byte[] { 0 });     // full_range_flag = false（16..235）
         // SampleEntry 固定头：6 保留 + 2 dref + 2 pre_defined + 2 reserved + 12 pre_defined = 24 字节
         var avc1 = Box("avc1",
             new byte[] { 0, 0, 0, 0, 0, 0 }, U16(1),
             U16(0, 0), U32(0, 0, 0),
             U16((ushort)w, (ushort)h),
             U32(0x00480000, 0x00480000), U32(0), U16(1),
-            new byte[32], U16(0x0018), U16(0xFFFF), avcC);
+            new byte[32], U16(0x0018), U16(0xFFFF), colr, avcC);
         var stsd = Full("stsd", 0, 0, U32(1), avc1);
 
         // stts：run-length

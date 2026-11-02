@@ -1208,7 +1208,9 @@ internal sealed class Capture : IDisposable
 
             // 把两条轨的实际长度写进日志：以后有人报「音画不同步」，第一眼就能看出是
             // 时间轴对不上（两个数差很多）还是内容对不上（两个数一样但听着错位）。
-            Log.Write($"[clip] {name} {written / (1024 * 1024)}MB {_ring.LastReport}");
+            // 顺手把实测码率打出来：画面「糊/脏」时先看这个数，比猜快
+            double secs = Math.Max(0.001, (stopUs - startUs) / 1_000_000.0);
+            Log.Write($"[clip] {name} {written / (1024 * 1024)}MB {written * 8 / secs / 1_000_000:F1}Mbps {_ring.LastReport}");
 
             // 提示交给宿主（托盘）：这里只报「存好了、是什么、多长」
             ClipSaved?.Invoke(ClipKinds.FromBanner(det.Kind), Math.Max(0, stopUs - startUs) / 1_000_000.0);
