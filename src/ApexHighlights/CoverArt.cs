@@ -30,7 +30,9 @@ internal static class CoverArt
             g.SmoothingMode = SmoothingMode.AntiAlias;
             g.PixelOffsetMode = PixelOffsetMode.HighQuality;
             g.CompositingQuality = CompositingQuality.HighQuality;
-            Draw(g, w, h);
+            // 所有坐标都按 1920×1080 写死，整体缩放一次：换个尺寸出图不用改任何常量
+            g.ScaleTransform(w / 1920f, h / 1080f);
+            Draw(g);
         }
 
         using var final = new Bitmap(width, height, PixelFormat.Format32bppArgb);
@@ -48,16 +50,17 @@ internal static class CoverArt
         return 0;
     }
 
-    private static void Draw(Graphics g, int w, int h)
+    private static void Draw(Graphics g)
     {
-        using (var bg = new LinearGradientBrush(new Rectangle(0, 0, w, h), BgTop, BgBottom, 90f))
-            g.FillRectangle(bg, 0, 0, w, h);
+        const int W = 1920, H = 1080;
+        using (var bg = new LinearGradientBrush(new Rectangle(0, 0, W, H), BgTop, BgBottom, 90f))
+            g.FillRectangle(bg, 0, 0, W, H);
 
         // 中间一团青色辉光：用径向渐变一次画完。早先是用 24 个低透明度同心圆叠出来的，
         // 放大看会留下一圈圈台阶（每一层的边界都是一条可见的环）。
         var haloPath = new GraphicsPath();
         float haloR = 780f;
-        haloPath.AddEllipse(w / 2f - haloR, h / 2f - haloR, haloR * 2, haloR * 2);
+        haloPath.AddEllipse(W / 2f - haloR, H / 2f - haloR, haloR * 2, haloR * 2);
         using (var halo = new PathGradientBrush(haloPath))
         {
             halo.CenterColor = Color.FromArgb(46, Cyan);
@@ -67,13 +70,13 @@ internal static class CoverArt
         }
         haloPath.Dispose();
 
-        float icon = 640, iconY = (h - icon) / 2f, gap = 360f;
-        float leftX = w / 2f - gap / 2 - icon;
-        float rightX = w / 2f + gap / 2;
+        float icon = 640, iconY = (H - icon) / 2f, gap = 360f;
+        float leftX = W / 2f - gap / 2 - icon;
+        float rightX = W / 2f + gap / 2;
 
         DrawAppIcon(g, leftX, iconY, icon);
         DrawSkullIcon(g, rightX, iconY, icon);
-        DrawApprox(g, w / 2f, h / 2f);
+        DrawApprox(g, W / 2f, H / 2f);
     }
 
     private static void DrawAppIcon(Graphics g, float x, float y, float size)
@@ -161,7 +164,7 @@ internal static class CoverArt
         }
 
         using var grad = new LinearGradientBrush(
-            new Rectangle((int)(cx - halfW), 0, (int)(halfW * 2), 2160), Cyan, Color.FromArgb(245, 250, 255), 90f);
+            new Rectangle((int)(cx - halfW), 0, (int)(halfW * 2), 1080), Cyan, Color.FromArgb(245, 250, 255), 90f);
         using var pen = new Pen(grad, 52f) { StartCap = LineCap.Round, EndCap = LineCap.Round };
         g.DrawPath(pen, wave);
     }
