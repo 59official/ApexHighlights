@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Drawing;
 using System.Text;
 using Windows.Graphics.Imaging;
 using Windows.Media.Ocr;
@@ -92,6 +93,28 @@ public sealed class BannerOcr
                 return (kind, text);
             }
 
+            // 原始条带读不出来时，再来一遍「放大 + 拉对比」的版本。
+            // 横幅是半透明渐入的，字是浅灰压在深色底上，原始尺寸下笔画灰度差只有十几级，
+            // Windows OCR 经常只认到几个数字（实测「助攻，擊倒 生命線1903」被读成「+100 40」）。
+            var boosted = Boost(bmpPath);
+            if (boosted is not null)
+            {
+                try
+                {
+                    foreach (var (engine, tag) in _engines)
+                    {
+                        var text = Recognize(engine, boosted);
+                        var kind = Parse(text);
+                        if (kind == BannerKind.Unknown) continue;
+                        EngineName = tag;
+                        Count++;
+                        TotalMs += sw.ElapsedMilliseconds;
+                        return (kind, text);
+                    }
+                }
+                finally { try { File.Delete(boosted); } catch { } }
+            }
+
             EngineName = _engines[0].Tag;
             Count++;
             TotalMs += sw.ElapsedMilliseconds;
@@ -152,6 +175,72 @@ public sealed class BannerOcr
                    (cur?.RecognizerLanguage.LanguageTag ?? "（无）");
         }
         catch (Exception ex) { return "读不到 OCR 语言列表: " + ex.Message; }
+    }
+
+    /// <summary>
+    /// 放大两倍再做一次「按亮度拉对比」，给半透明横幅兜底。返回临时 png 路径。
+    /// 只在原始识别失败时调用，正常命中不会付这个代价。
+    /// </summary>
+    private static string? Boost(string bmpPath)
+    {
+        try
+        {
+            using var src = new Bitmap(bmpPath);
+            int w = src.Width * 2, h = src.Height * 2;
+            using var big = new Bitmap(w, h, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+            using (var g = Graphics.FromImage(big))
+            {
+                g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+                g.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.HighQuality;
+                g.DrawImage(src, new Rectangle(0, 0, w, h));
+            }
+
+            // 统计亮度均值，把「均值以上」压到白、「均值往下 60 级」压到黑，
+            // 字和底的灰度差本来就小，不拉这一段 OCR 只认到零碎的数字。
+            var data = big.LockBits(new Rectangle(0, 0, w, h),
+                System.Drawing.Imaging.ImageLockMode.ReadWrite,
+                System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+            try
+            {
+                unsafe
+                {
+                    var p0 = (byte*)data.Scan0;
+                    int stride = data.Stride;
+                    double sum = 0; long n = 0;
+                    for (int y = 0; y < h; y++)
+                    {
+                        var row = p0 + y * stride;
+                        for (int x = 0; x < w; x++)
+                        {
+                            var px = row + x * 4;
+                            sum += (px[0] * 0.114) + (px[1] * 0.587) + (px[2] * 0.299);
+                            n++;
+                        }
+                    }
+                    double mean = n == 0 ? 128 : sum / n;
+                    double lo = mean - 60, hi = mean + 40;
+                    double k = 255.0 / Math.Max(1.0, hi - lo);
+                    for (int y = 0; y < h; y++)
+                    {
+                        var row = p0 + y * stride;
+                        for (int x = 0; x < w; x++)
+                        {
+                            var px = row + x * 4;
+                            double lum = (px[0] * 0.114) + (px[1] * 0.587) + (px[2] * 0.299);
+                            byte v = (byte)Math.Clamp((lum - lo) * k, 0, 255);
+                            px[0] = px[1] = px[2] = v;
+                            px[3] = 255;
+                        }
+                    }
+                }
+            }
+            finally { big.UnlockBits(data); }
+
+            var path = Path.Combine(Path.GetTempPath(), $"apex-ocr-boost-{Guid.NewGuid():N}.png");
+            big.Save(path, System.Drawing.Imaging.ImageFormat.Png);
+            return path;
+        }
+        catch { return null; }
     }
 
     private static string Recognize(OcrEngine engine, string path)
