@@ -189,7 +189,6 @@ dotnet publish src/ApexHighlights/ApexHighlights.csproj -c Release \
 ## 已知限制
 
 - 独占全屏可能抓不到（WGC 依赖 DWM 合成），全屏请用「无边框窗口」。
-- 击杀（KILL）不触发录制：Apex 的击杀只在右上角击杀栏显示，中间没有横幅。
 - 相邻命中 ≤ 合并窗口视为同一场交火，只出一段；所以片段在**末次命中后约 8 秒**才出现。
 - 大厅开始录、进了对局才窗口变尺寸时，采集会自动重开一次，中间那一小段帧补不回来。
 - 换分辨率的自定义游戏需要重新标定 `games/<id>.json` 的 `band`。
