@@ -59,5 +59,14 @@ internal sealed unsafe class CodecApi : IDisposable
         [FieldOffset(8)] public uint u32;
     }
 
-    public void Dispose() { }
+    /// <summary>
+    /// QueryInterface 拿到的是一份新引用，必须还回去。以前这里是空实现：每建一次编码器就漏两个
+    /// ICodecAPI 引用（Configure 里 GOP 和画质各取一次），换码率/换编码反复重建之后 MFT、D3D 管理器、
+    /// NVENC 会话都释放不掉，最后表现成「HEVC 编码器起不来」——又触发一次回退。
+    /// </summary>
+    public void Dispose()
+    {
+        if (_self == IntPtr.Zero) return;
+        try { Marshal.Release(_self); } catch { }
+    }
 }

@@ -24,7 +24,7 @@ internal static class AvTest
         Console.WriteLine($"[2] AAC {aac.Name} {aac.SampleRate}Hz/{aac.Channels}ch/{aac.Bitrate}bps  ASC={Convert.ToHexString(aac.Asc)}");
 
         var aRing = new AudioRing(aac.SampleRate, aac.Channels, 120) { Asc = aac.Asc };
-        var vRing = new SegmentRing(ringDir, w, h, 120);
+        var vRing = new SegmentRing(ringDir, w, h, 120, fps: 60);
         using var enc = new EncoderChain(w, h, 20_000_000, 60);
 
         var bgra = new byte[w * h * 4];

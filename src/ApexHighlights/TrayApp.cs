@@ -674,8 +674,8 @@ internal sealed class TrayApp : ApplicationContext
             _cap?.Codec ?? _capture.Codec)
         {
             // 拖动中只改采集器（save:false），松手才写盘 —— 一次拖动不该刷几百次配置文件
-            Changed = (bitrate, pre, post, merge, codec) => ApplyParams(bitrate, pre, post, merge, codec, save: false),
-            Committed = (bitrate, pre, post, merge, codec) => ApplyParams(bitrate, pre, post, merge, codec),
+            Changed = (bitrate, pre, post, merge, codec) => ApplyParams(bitrate, pre, post, merge, Picked(codec), save: false),
+            Committed = (bitrate, pre, post, merge, codec) => ApplyParams(bitrate, pre, post, merge, Picked(codec)),
         };
         f.FormClosed += (_, _) => _paramsForm = null;
 
@@ -699,14 +699,29 @@ internal sealed class TrayApp : ApplicationContext
     /// 面板拖完一根滑杆就走到这里：改内存配置 → 套到正在跑的采集器上 → 两份 config 落盘。
     /// 四个值互不依赖，所以一次全写，不搞增量。
     /// </summary>
+    private VideoCodec? Picked(VideoCodec fromPanel) =>
+        _paramsForm?.TakeCodecPick() == true ? fromPanel : (VideoCodec?)null;
+
     private void ApplyParams(int bitrate, int preRoll, int postRoll, int merge,
-        VideoCodec codec = CapturePolicy.DefaultCodec, bool save = true)
+        VideoCodec? pickedCodec = null, bool save = true)
     {
         // 换编码必须重开采集：编码器和环形分片都是按编码建的，混着用会出现
         // 一半 avc1、一半 hvc1 的分片，拼出来的 mp4 直接播不了。
-        var codecChanged = VideoCodecs.Normalize(codec) != _capture.Codec;
-        _capture.Codec = VideoCodecs.Normalize(codec);
-        if (codecChanged) _capture.CodecExplicit = true;   // 用户亲手选的，以后改默认值也不动它
+        //
+        // 只有「用户亲手点了编码胶囊」才把值钉成他的选择（CodecExplicit）。滑杆顺带带上来的
+        // 编码值不算数：HEVC 编码器起不来时 _cap 会回退成 H.264，面板显示 H.264，用户随后
+        // 拖一下码率，若是把这枚回退结果当成他的选择写进配置，他就永远停在 H.264、再也不试 HEVC。
+        var codecChanged = false;
+        if (pickedCodec is { } picked)
+        {
+            var want = VideoCodecs.Normalize(picked);
+            if (want != _capture.Codec)
+            {
+                _capture.Codec = want;
+                _capture.CodecExplicit = true;
+                codecChanged = true;
+            }
+        }
 
         _capture.BitrateMbps = Math.Clamp(bitrate, CapturePolicy.BitrateMin, CapturePolicy.BitrateMax);
         _capture.PreRollSec = Math.Clamp(preRoll, 0, CapturePolicy.RollMax);

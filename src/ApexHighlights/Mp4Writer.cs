@@ -140,7 +140,7 @@ internal static class Mp4Writer
         long audioTicks = 0;
         for (int i = 0; i < m; i++) { audioTicks += audio![i].DurTicks; totalBytes += audio[i].Avcc.Length; }
 
-        var ftyp = Ftyp();
+        var ftyp = Ftyp(codec == VideoCodec.Hevc);
         var offsets = new uint[n];
         var aOffsets = new uint[m];
 
@@ -168,12 +168,13 @@ internal static class Mp4Writer
         return written;
     }
 
-    private static byte[] Ftyp() => Box("ftyp",
+    // 兼容品牌要跟着编码走：按品牌分流的管线（上传站、剪辑软件）看到 avc1 就按 H.264 处理
+    private static byte[] Ftyp(bool hevc) => Box("ftyp",
         System.Text.Encoding.ASCII.GetBytes("isom"), U32(0),
         System.Text.Encoding.ASCII.GetBytes("isom"),
         System.Text.Encoding.ASCII.GetBytes("mp41"),
         System.Text.Encoding.ASCII.GetBytes("isom"),
-        System.Text.Encoding.ASCII.GetBytes("avc1"));
+        System.Text.Encoding.ASCII.GetBytes(hevc ? "hvc1" : "avc1"));
 
     /// <summary>
     /// SampleEntry 的公共固定头（avc1/hvc1 都一样）：6 保留 + 2 dref + 2 pre_defined + 2 reserved
@@ -239,7 +240,15 @@ internal static class Mp4Writer
 
         var stco = Full("stco", 0, 0, U32((uint)n), U32(offsets));
 
-        var stbl = Box("stbl", stsd, stts, stsc, stsz, stco);
+        // stss：关键帧表。不写这张表，播放器会把**每个**样本都当成可随机访问的起点，
+        // 拖到 GOP 中间就解出花屏/黑屏，剪辑软件按它切第一帧也是坏的。
+        // 全部样本都是关键帧时才省略（缺省语义就是全同步）。
+        var syncNums = new List<uint>();
+        for (int i = 0; i < n; i++) if (samples[i].Sync) syncNums.Add((uint)(i + 1));
+        var stblParts = new List<byte[]> { stsd, stts, stsc, stsz, stco };
+        if (syncNums.Count > 0 && syncNums.Count < n)
+            stblParts.Insert(3, Full("stss", 0, 0, U32((uint)syncNums.Count), U32(syncNums.ToArray())));
+        var stbl = Box("stbl", stblParts.ToArray());
         var vmhd = Full("vmhd", 0, 1, U16(0, 0, 0, 0));
         var url = Full("url ", 0, 1);
         var dref = Full("dref", 0, 0, U32(1), url);

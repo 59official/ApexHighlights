@@ -16,6 +16,7 @@ public sealed class SegmentRing
     private readonly int _w, _h;
     private readonly int _keepSeconds;
     private readonly VideoCodec _codec;
+    private readonly long _frameUs;
     private readonly List<SegmentRef> _segs = new();
 
     private readonly MemoryStream _payload = new();
@@ -33,9 +34,11 @@ public sealed class SegmentRing
     public int KeyFrames { get; private set; }
     public long TotalSamples { get; private set; }
 
-    public SegmentRing(string dir, int width, int height, int keepSeconds = 120, VideoCodec codec = VideoCodec.H264)
+    public SegmentRing(string dir, int width, int height, int keepSeconds = 120, VideoCodec codec = VideoCodec.H264,
+        int fps = 60)
     {
         _codec = codec;
+        _frameUs = 1_000_000L / Math.Max(1, fps);
         _dir = dir;
         _w = width; _h = height;
         _keepSeconds = keepSeconds;
@@ -69,7 +72,18 @@ public sealed class SegmentRing
         bool closed = false;
         if (key && _samples.Count > 0) { CloseSegment(); closed = true; }
 
-        var avcc = Mp4.ToAvcc(annexB, nals);
+        // 样本里剔掉参数集：hvc1/avc1 的参数集只允许在 hvcC/avcC 里（array_completeness 也写了 1），
+        // 流内再带一份就是规范冲突 —— 解码器宽容时没事，严格的一律报错或重复注入。
+        var keep = new List<Mp4.Nal>(nals.Count);
+        foreach (var n in nals)
+        {
+            bool paramSet = hevc
+                ? (n.Type == 32 || n.Type == 33 || n.Type == 34)
+                : (n.Type == 7 || n.Type == 8);
+            if (!paramSet) keep.Add(n);
+        }
+        if (keep.Count == 0) keep = nals;      // 整帧都是参数集（不该发生），别把自己搞成空样本
+        var avcc = Mp4.ToAvcc(annexB, keep);
         _payload.Write(avcc, 0, avcc.Length);
         _samples.Add((ptsUs, avcc.Length, key));
         if (key) KeyFrames++;
@@ -86,7 +100,7 @@ public sealed class SegmentRing
         var specs = new SegSample[n];
         for (int i = 0; i < n; i++)
         {
-            long d = (i + 1 < n ? _samples[i + 1].ptsUs : _samples[i].ptsUs + 16_667) - _samples[i].ptsUs;
+            long d = (i + 1 < n ? _samples[i + 1].ptsUs : _samples[i].ptsUs + _frameUs) - _samples[i].ptsUs;
             int ticks = (int)Math.Round(d * Mp4.Timescale / 1_000_000.0);
             specs[i] = new SegSample(Math.Max(1, ticks), _samples[i].size, _samples[i].key);
         }

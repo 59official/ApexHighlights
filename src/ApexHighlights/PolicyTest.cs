@@ -125,6 +125,12 @@ internal static class PolicyTest
             fail += Check("写 Codec 没冲掉阈值/配额", codecRoot["Threshold"]?.GetValue<double>() == 0.72
                                                         && codecRoot["QuotaGb"]?.GetValue<long>() == 55);
             fail += Check("读回来还是 HEVC", CapturePolicy.Load(codecCfg).Codec == VideoCodec.Hevc);
+            // 一个不认识的枚举字符串不能把整份配置带进沟里（以前会被外层 catch 吞成默认值）
+            File.WriteAllText(codecCfg, """{ "Codec": "AV1", "BitrateMbps": 45, "PreRollSec": 7, "PostRollSec": 9 }""");
+            var survived = CapturePolicy.Load(codecCfg);
+            fail += Check("乱填编码时其它字段不丢（码率 45）", survived.BitrateMbps == 45);
+            fail += Check("乱填编码时其它字段不丢（前摇 7 / 后摇 9）", survived.PreRollSec == 7 && survived.PostRollSec == 9);
+
             File.WriteAllText(codecCfg, """{ "Codec": "AV1" }""");
             fail += Check("乱填的编码退回默认（HEVC）", CapturePolicy.Load(codecCfg).Codec == VideoCodec.Hevc);
             // 旧版默认码率（20/28）自动跟到 30；用户自己拖过的值不许动

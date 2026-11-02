@@ -277,7 +277,7 @@ internal sealed class Capture : IDisposable
             Log.Write($"[enc] HEVC 编码器起不来（{ex.Message}），本场改用 H.264");
             _enc = new EncoderChain(Width, Height, Bitrate, GopFrames, EncodedFps, _dev, Codec);
         }
-        _ring = new SegmentRing(dir, Width, Height, capacitySec, Codec);
+        _ring = new SegmentRing(dir, Width, Height, capacitySec, Codec, Math.Max(1, EncodedFps));
         _lib = new ClipLibrary(ClipDir);
 
         // 音轨：按用户选的那一档起（只录游戏 / 整机 / 整机+麦 / 不录）。

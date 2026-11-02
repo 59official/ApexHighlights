@@ -24,7 +24,7 @@ internal static class GpuTest
         var enc = new EncoderChain(w, h, 20_000_000, 60, 60, dev, codec);
         Console.WriteLine($"[2] 选中 {enc.Name}（每 60 帧换编码器拿 IDR）");
 
-        var ring = new SegmentRing(ringDir, w, h, 120, codec);
+        var ring = new SegmentRing(ringDir, w, h, 120, codec, 60);
         Console.WriteLine($"[2a] ring ok  codec={VideoCodecs.Label(codec)} q[{NvEncoder.QualityInfo}] gop[{NvEncoder.GopInfo}]");
 
         // BGRA 输入：dynamic 上传纹理填数据 → default 纹理（VideoProcessor 输入）
@@ -99,7 +99,7 @@ internal static class GpuTest
                 if (fi < 5 || fi == 60) Console.WriteLine($"    f{fi} pkt={data.Length}B  head={BitConverter.ToString(data, 0, Math.Min(24, data.Length))}");
                 if (fi == 0) try { File.WriteAllBytes(Path.Combine(outDir, "pkt0.bin"), data); } catch { }
                 foreach (var n in Mp4.SplitAnnexB(data, codec == VideoCodec.Hevc))
-                    if (n.Type == (codec == VideoCodec.Hevc ? 19 : 5)) idrs++;
+                    if (codec == VideoCodec.Hevc ? (n.Type >= 16 && n.Type <= 23) : n.Type == 5) idrs++;
                 ring.Append(pts / 10, data);
             }); }
             catch (Exception e) { Console.WriteLine($"[X] SubmitSurface 帧{f}: {e.Message}"); return 5; }

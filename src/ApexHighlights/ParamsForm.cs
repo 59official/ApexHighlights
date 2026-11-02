@@ -85,7 +85,7 @@ internal sealed class ParamsForm : Form
 
         // 第五行不是滑杆：两个互斥的胶囊（H.264 / HEVC）
         _codec.SetBounds(Si(PadX), Si(TitleH + 10 + 4 * 60), Si(W - PadX * 2), Si(48));
-        _codec.Changed += _ => Commit();     // 编码是离散选择，点了就落盘
+        _codec.Changed += _ => { CodecWasPicked = true; Commit(); };   // 编码是离散选择，点了就落盘
         Controls.Add(_codec);
 
         var reset = new RoundButton("恢复默认", 104) { Style = RoundButton.Look.Ghost };
@@ -239,6 +239,11 @@ internal sealed class ParamsForm : Form
 
     /// <summary>自检用：模拟「松手」这一刻。</summary>
     internal void TestCommit() => Commit();
+
+    /// <summary>这次提交里编码是用户亲手点的（而不是滑杆顺带的）。决定要不要钉成「用户选择」。</summary>
+    internal bool CodecWasPicked { get; private set; }
+
+    internal bool TakeCodecPick() { var v = CodecWasPicked; CodecWasPicked = false; return v; }
 
     /// <summary>拖完一根滑杆就往外报一次，立刻生效（用户说了实时生效，不要「保存」按钮）。</summary>
     private void Fire() => Changed?.Invoke(_bitrate.Value, _pre.Value, _post.Value, _merge.Value, _codec.Value);

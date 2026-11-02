@@ -15,7 +15,7 @@ internal static class EncTest
         var enc = new EncoderChain(w, h, 20_000_000, 60);
         Console.WriteLine($"[2] 选中 {enc.Name}（每 60 帧换编码器拿 IDR）");
 
-        var ring = new SegmentRing(ringDir, w, h, 120);
+        var ring = new SegmentRing(ringDir, w, h, 120, fps: 60);
         var restartSw = new Stopwatch();
         int restarts = 0;
         var bgra = new byte[w * h * 4];

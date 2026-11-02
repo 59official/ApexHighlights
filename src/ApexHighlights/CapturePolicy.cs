@@ -172,6 +172,14 @@ public sealed class CapturePolicy
     [JsonIgnore] public bool MigratedBitrate { get; internal set; }
 
     /// <summary>从 config.json 读。文件不存在、写坏了、字段缺失，统统退回默认值，绝不因此启动失败。</summary>
+    /// <summary>把不认识的枚举文本扔掉（留着就整份配置读不出来）。数字保持原样，交给 Clamp 兜。</summary>
+    private static void SanitizeEnum<T>(JsonObject root, string key) where T : struct, Enum
+    {
+        if (root[key] is not JsonValue v) return;
+        if (v.GetValueKind() != JsonValueKind.String) return;
+        if (!Enum.TryParse<T>(v.GetValue<string>(), ignoreCase: true, out _)) root.Remove(key);
+    }
+
     public static CapturePolicy Load(string? path)
     {
         var p = new CapturePolicy();
@@ -191,6 +199,13 @@ public sealed class CapturePolicy
                     root.Remove("Audio");
                     root.Remove("Mic");
                 }
+
+                // 枚举字段的容错必须逐项做：一个不认识的字符串（比如手改成 "Codec":"AV1"）会让
+                // JsonSerializer 抛异常，被外层 catch 吞掉之后**整份配置退回默认** —— 码率、前后摇、
+                // 音轨、种类开关、片段目录一起没了，下次 Save 还会把默认值写回去，救不回来。
+                SanitizeEnum<VideoCodec>(root, "Codec");
+                SanitizeEnum<AudioMode>(root, "AudioMode");
+                SanitizeEnum<NoticeMode>(root, "Notice");
 
                 var loaded = JsonSerializer.Deserialize<CapturePolicy>(root.ToJsonString(), Json);
                 if (loaded is not null) p = loaded;
