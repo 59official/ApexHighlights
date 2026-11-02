@@ -121,6 +121,16 @@ internal static class PolicyTest
             fail += Check("读回来还是 HEVC", CapturePolicy.Load(codecCfg).Codec == VideoCodec.Hevc);
             File.WriteAllText(codecCfg, """{ "Codec": "AV1" }""");
             fail += Check("乱填的编码退回 H.264", CapturePolicy.Load(codecCfg).Codec == VideoCodec.H264);
+            // 旧版默认码率（20/28）自动跟到 30；用户自己拖过的值不许动
+            var migCfg = Path.Combine(dir, "mig28.json");
+            File.WriteAllText(migCfg, """{ "BitrateMbps": 28 }""");
+            var mig = CapturePolicy.Load(migCfg);
+            fail += Check("旧版默认 28 → 30", mig.BitrateMbps == 30);
+            fail += Check("迁移后 MigratedBitrate=true", mig.MigratedBitrate);
+            File.WriteAllText(migCfg, """{ "BitrateMbps": 38 }""");
+            fail += Check("用户自选的 38 不动", CapturePolicy.Load(migCfg).BitrateMbps == 38);
+            fail += Check("没迁移时不置标", !CapturePolicy.Load(migCfg).MigratedBitrate);
+
             File.WriteAllText(codecCfg, """{ "Codec": 7 }""");
             fail += Check("编码写数字也不炸", CapturePolicy.Load(codecCfg).Codec == VideoCodec.H264);
         }

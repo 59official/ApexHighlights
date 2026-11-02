@@ -208,7 +208,7 @@ internal sealed class TrayApp : ApplicationContext
                         say($"点「不提示」之后 = {FindNoticeRoot()?.Text}，配置 Notice = {_capture.Notice}");
                         ClickNotice(NoticeMode.Toast);
                         say($"点回「滑出提示」之后 = {FindNoticeRoot()?.Text}，配置 Notice = {_capture.Notice}");
-                        ApplyParams(28, 15, 15, 8);
+                        ApplyParams(30, 15, 15, 8);
                         say($"恢复默认之后：码率 {EffectiveBitrateMbps}Mbps，前 {EffectivePreRollSec}s，后 {EffectivePostRollSec}s，合并 {EffectiveMergeSec}s");
                         // 种类开关：关掉「助攻击倒」，看闸门真的不切片，再开回来
                         say($"种类菜单 = {FindKindsRoot()?.Text ?? "找不到"}");

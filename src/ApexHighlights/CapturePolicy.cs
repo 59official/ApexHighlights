@@ -157,6 +157,9 @@ public sealed class CapturePolicy
     /// <summary>换算成 Capture/EncoderChain 用的 bps。</summary>
     public int BitrateBps => BitrateMbps * 1_000_000;
 
+    /// <summary>这次读盘把旧版默认码率迁移成了 30 —— 调用方可以顺手回写一次，省得每条日志都报一遍。</summary>
+    [JsonIgnore] public bool MigratedBitrate { get; internal set; }
+
     /// <summary>从 config.json 读。文件不存在、写坏了、字段缺失，统统退回默认值，绝不因此启动失败。</summary>
     public static CapturePolicy Load(string? path)
     {
@@ -189,6 +192,17 @@ public sealed class CapturePolicy
         var rawPost = p.PostRollSec;
         p = Clamp(p);
         var notes = new List<string>();
+
+        // 旧版的默认值（20、28）当年是程序自己写进文件的，用户没点过任何东西。默认改到 30 之后，
+        // 这些配置会永远停在旧默认上，看起来就像「默认值没改」。只迁移「恰好等于旧默认」的值，
+        // 用户手动拖过的（比如 45、38）一律不动。
+        var legacyDefault = rawBitrate is 20 or 28;
+        if (legacyDefault)
+        {
+            p.BitrateMbps = 30;
+            p.MigratedBitrate = true;
+            notes.Add($"画质码率 {rawBitrate}Mbps 是旧版默认值，已跟随新版默认改为 30Mbps");
+        }
         if (rawBitrate > BitrateMax) notes.Add($"码率 {rawBitrate}Mbps 超出上限，按 {BitrateMax} 处理");
         else if (rawBitrate < BitrateMin && rawBitrate > 0) notes.Add($"码率 {rawBitrate}Mbps 低于下限，按 {BitrateMin} 处理");
         if (rawPre > RollMax) notes.Add($"击杀前 {rawPre}s 超出上限，按 {RollMax}s 处理");

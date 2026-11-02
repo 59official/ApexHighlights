@@ -287,6 +287,7 @@ internal static class Program
             // 成片目录：必须在 Capture 构造之前定下来（Capture.ClipDir 的默认值读 Paths.Clips）
             Paths.SetClipsRoot(capture.ClipsDir);
             Console.WriteLine($"[2d] 画质码率 {capture.BitrateMbps}Mbps（config.json 的 BitrateMbps，托盘「录制参数…」里可调）");
+            if (capture.MigratedBitrate) capture.Save(cfgPath);   // 把旧版默认值落到文件里，别每次启动都报一遍
             if (capture.LoadNote.Length > 0) Console.WriteLine("[2d!] " + capture.LoadNote);
             Console.WriteLine($"[2e] 音轨 {AudioSummary(capture)}，提示 {CapturePolicy.NoticeLabel(capture.Notice)}" +
                               $"（config.json 的 AudioMode / Notice，托盘里可调）");
@@ -651,6 +652,7 @@ internal static class Program
         Log.Write($"[2c] 合并窗口 {(detect.MergeSec == 0 ? "关（每次命中各出一段）" : detect.MergeSec + "s")}" +
                   "（config.json 的 MergeSec 字段，托盘「录制参数…」里可调）");
         Log.Write($"[2d] 画质码率 {capture.BitrateMbps}Mbps（config.json 的 BitrateMbps 字段，托盘「录制参数…」里可调）");
+        if (capture.MigratedBitrate) capture.Save(cfgPath);
         if (capture.LoadNote.Length > 0) Log.Write("[2d!] " + capture.LoadNote);
         Log.Write($"[2e] 音轨 {AudioSummary(capture)}，提示{CapturePolicy.NoticeLabel(capture.Notice)}" +
                   $"（config.json 的 AudioMode / Notice 字段，托盘菜单里可调）");
