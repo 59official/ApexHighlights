@@ -27,7 +27,7 @@ internal static class PolicyTest
             fail += Check("新配置有音轨", fresh.AnyAudio);
             // 0.8.2 起这四项是滑杆的默认值，写错就是「新用户录出来的片段长度不对」——
             // 而且 4–60 / 0–30 这两个范围以前在别处是 5–200 / 0–60，必须钉住
-            fail += Check($"新配置默认码率 28（实际 {fresh.BitrateMbps}）", fresh.BitrateMbps == 28);
+            fail += Check($"新配置默认码率 30（实际 {fresh.BitrateMbps}）", fresh.BitrateMbps == 30);
             fail += Check($"新配置默认击杀前 15s（实际 {fresh.PreRollSec}）", fresh.PreRollSec == 15);
             fail += Check($"新配置默认击杀后 15s（实际 {fresh.PostRollSec}）", fresh.PostRollSec == 15);
 

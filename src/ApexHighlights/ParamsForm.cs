@@ -34,7 +34,7 @@ internal sealed class ParamsForm : Form
     public ParamsForm(int bitrate, int preRoll, int postRoll, int merge,
                       int bitrateMin = CapturePolicy.BitrateMin, int bitrateMax = CapturePolicy.BitrateMax)
     {
-        _defBitrate = 28;
+        _defBitrate = 30;
         _defPre = 15;
         _defPost = 15;
         _defMerge = 8;

@@ -61,7 +61,7 @@ public sealed class CapturePolicy
     /// H.264 在运动块多的时候会把树/草糊成一片。30–40 是这台机器实测的清晰度拐点，
     /// 所以菜单里把 30/40 标成推荐，但默认值保持不变。
     /// </summary>
-    public int BitrateMbps { get; set; } = 28;
+    public int BitrateMbps { get; set; } = 30;
 
     /// <summary>
     /// 音轨来源，见 <see cref="AudioMode"/>。默认「只录游戏」。

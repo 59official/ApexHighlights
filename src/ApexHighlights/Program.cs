@@ -795,7 +795,7 @@ internal static class Program
         Application.EnableVisualStyles();
         Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
 
-        var f = new ParamsForm(bitrate: 28, preRoll: 15, postRoll: 15, merge: 8)
+        var f = new ParamsForm(bitrate: 30, preRoll: 15, postRoll: 15, merge: 8)
         {
             StartPosition = FormStartPosition.Manual,
             Location = new Point(80, 80),
