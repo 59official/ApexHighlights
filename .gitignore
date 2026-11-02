@@ -51,3 +51,10 @@ packaging/identity/stage/
 
 # 一次性脚本与自检临时目录
 tmp-*/
+
+# Python 缓存 / 探针中间产物 / 编辑器备份
+__pycache__/
+*.pyc
+probe/*.npy
+probe/*.bin
+*.bak

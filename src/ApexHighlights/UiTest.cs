@@ -574,8 +574,8 @@ internal static class UiTest
             f.Show();
             Application.DoEvents();
 
-            if (f.Values == (30, 15, 15, 8, VideoCodec.H264))
-                Console.WriteLine("    ok  面板四根滑杆 + 编码拿到当前值（30/15/15/8/H.264）");
+            if (f.Values == (30, 15, 15, 8, CapturePolicy.DefaultCodec))
+                Console.WriteLine($"    ok  面板四根滑杆 + 编码拿到当前值（30/15/15/8/{VideoCodecs.Label(CapturePolicy.DefaultCodec)}）");
             else { Console.WriteLine($"    NG  面板初始值 {f.Values}，应为 (30,15,15,8,H264)"); bad++; }
 
             f.TestSet(45, 20, 10, 12, VideoCodec.Hevc);

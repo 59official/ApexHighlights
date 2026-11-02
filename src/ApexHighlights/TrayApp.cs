@@ -700,12 +700,13 @@ internal sealed class TrayApp : ApplicationContext
     /// 四个值互不依赖，所以一次全写，不搞增量。
     /// </summary>
     private void ApplyParams(int bitrate, int preRoll, int postRoll, int merge,
-        VideoCodec codec = VideoCodec.H264, bool save = true)
+        VideoCodec codec = CapturePolicy.DefaultCodec, bool save = true)
     {
         // 换编码必须重开采集：编码器和环形分片都是按编码建的，混着用会出现
         // 一半 avc1、一半 hvc1 的分片，拼出来的 mp4 直接播不了。
-        var codecChanged = codec != _capture.Codec;
+        var codecChanged = VideoCodecs.Normalize(codec) != _capture.Codec;
         _capture.Codec = VideoCodecs.Normalize(codec);
+        if (codecChanged) _capture.CodecExplicit = true;   // 用户亲手选的，以后改默认值也不动它
 
         _capture.BitrateMbps = Math.Clamp(bitrate, CapturePolicy.BitrateMin, CapturePolicy.BitrateMax);
         _capture.PreRollSec = Math.Clamp(preRoll, 0, CapturePolicy.RollMax);

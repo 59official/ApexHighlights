@@ -74,20 +74,36 @@ public static class Mp4
     /// 手写比特解析容易错，这里只取固定偏移 —— SPS 的负载开头就是
     /// vps_id(4) max_sub_layers(3) nesting(1) / space(2) tier(1) idc(5) / compat(32) / constraint(48) / level(8)。
     /// </summary>
+    /// <summary>去掉 NAL 里的防竞争字节（00 00 03），从头部的 <paramref name="from"/> 字节起算。</summary>
+    private static byte[] StripEpb(byte[] nal, int from)
+    {
+        var dst = new List<byte>(Math.Max(0, nal.Length - from));
+        int zeros = 0;
+        for (int i = from; i < nal.Length; i++)
+        {
+            byte v = nal[i];
+            if (zeros >= 2 && v == 3) { zeros = 0; continue; }   // 这就是插进去的那个 03
+            dst.Add(v);
+            zeros = v == 0 ? zeros + 1 : 0;
+        }
+        return dst.ToArray();
+    }
+
     public static byte[] HvcC(byte[]? vps, byte[] sps, byte[] pps)
     {
-        // SPS 前两个字节是 NAL 头，负载从第 2 字节开始
-        int o = 2;
-        byte head = sps.Length > o ? sps[o] : (byte)0;
-        byte ptl = sps.Length > o + 1 ? sps[o + 1] : (byte)0x01;   // space|tier|profile_idc
+        // SPS 前两个字节是 NAL 头。**必须先去掉防竞争字节（00 00 03 → 00 00）**：
+        // profile_tier_level 是按去防竞争后的比特流定的，直接按原字节数偏移会整体错一格，
+        // compat/constraint/level 全读错（实测 level 会读成 0，播放器直接不认这个 hvcC）。
+        var sp = StripEpb(sps, 2);
+        byte ptl = sp.Length > 1 ? sp[1] : (byte)0x01;   // space|tier|profile_idc
         int profileIdc = ptl & 0x1F;
         int tier = (ptl >> 5) & 1;
         int space = (ptl >> 6) & 3;
         var compat = new byte[4];
         var cons = new byte[6];
-        for (int i = 0; i < 4; i++) compat[i] = sps.Length > o + 2 + i ? sps[o + 2 + i] : (byte)0;
-        for (int i = 0; i < 6; i++) cons[i] = sps.Length > o + 6 + i ? sps[o + 6 + i] : (byte)0;
-        byte level = sps.Length > o + 12 ? sps[o + 12] : (byte)123;   // 4.1
+        for (int i = 0; i < 4; i++) compat[i] = sp.Length > 2 + i ? sp[2 + i] : (byte)0;
+        for (int i = 0; i < 6; i++) cons[i] = sp.Length > 6 + i ? sp[6 + i] : (byte)0;
+        byte level = sp.Length > 12 ? sp[12] : (byte)123;   // 4.1
 
         var arrays = new List<byte>();
         int count = 0;

@@ -203,7 +203,14 @@ public sealed class NvEncoder : IDisposable
                 // PeakConstrainedVBR：静场面少给点、动场面多给点，同样平均码率下观感更好
                 bool rSup = api.IsSupported(CodecApi.RateControlMode);
                 bool rSet = rSup && api.SetUInt(CodecApi.RateControlMode, 1);
-                QualityInfo = $"qvs=sup{qSup}/set{qSet} max=sup{mSup}/set{mSet} rc=sup{rSup}/set{rSet}";
+
+                // B 帧必须关掉。Mp4Writer 是按「样本顺序＝显示顺序」写的（stts 用统一帧长，
+                // 没有 ctts 重排表），一旦编码器插了 B 帧，播放器就会按错的顺序解码，
+                // 时间轴看着对、画面却一卡一跳。HEVC 的 MFT 默认值不一定给 0，所以显式设。
+                bool bSup = api.IsSupported(CodecApi.BPictureCount);
+                bool bSet = bSup && api.SetUInt(CodecApi.BPictureCount, 0);
+
+                QualityInfo = $"qvs=sup{qSup}/set{qSet} max=sup{mSup}/set{mSet} rc=sup{rSup}/set{rSet} bf=sup{bSup}/set{bSet}";
             }
         }
         catch (Exception e) { state = new CfgState(false, 0, "设类型失败 " + e.Message, gop); return false; }

@@ -33,7 +33,7 @@ internal sealed class ParamsForm : Form
 
     private readonly CodecPicker _codec = new();
 
-    public ParamsForm(int bitrate, int preRoll, int postRoll, int merge, VideoCodec codec = VideoCodec.H264,
+    public ParamsForm(int bitrate, int preRoll, int postRoll, int merge, VideoCodec codec = CapturePolicy.DefaultCodec,
                       int bitrateMin = CapturePolicy.BitrateMin, int bitrateMax = CapturePolicy.BitrateMax)
     {
         _defBitrate = 30;
@@ -95,7 +95,7 @@ internal sealed class ParamsForm : Form
             _pre.Value = _defPre;
             _post.Value = _defPost;
             _merge.Value = _defMerge;
-            _codec.Value = VideoCodec.H264;
+            _codec.Value = CapturePolicy.DefaultCodec;
             Fire();
             Commit();          // 恢复默认是明确动作，立刻落盘
         };
@@ -123,7 +123,7 @@ internal sealed class ParamsForm : Form
         public string Label = "";
         public event Action<VideoCodec>? Changed;
 
-        private VideoCodec _value = VideoCodec.H264;
+        private VideoCodec _value = CapturePolicy.DefaultCodec;
         private int _hover = -1;
 
         public CodecPicker()

@@ -128,7 +128,8 @@ internal static class Program
             }
 
             if (args.Length >= 2 && args[0] == "--mp4-check")
-                return Mp4Check.Run(args[1]);
+                return Mp4Check.Run(args[1], requireAudio: !args.Any(a => a == "--no-audio"),
+                                   decode: args.Any(a => a == "--decode"));
 
             if (args.Length >= 2 && args[0] == "--audio-check")
                 return AudioCheck.Run(args[1]);

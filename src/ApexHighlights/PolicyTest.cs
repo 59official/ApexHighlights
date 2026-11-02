@@ -109,7 +109,13 @@ internal static class PolicyTest
             // ⑦ 编码格式：默认 H.264、选了 HEVC 要能存能读、乱填退回 H.264、写编码不冲掉别的字段
             var codecCfg = Path.Combine(dir, "codec.json");
             var cp0 = CapturePolicy.Load(Path.Combine(dir, "none2.json"));
-            fail += Check("编码默认 H.264", cp0.Codec == VideoCodec.H264);
+            fail += Check("编码默认 HEVC", cp0.Codec == VideoCodec.Hevc);
+            File.WriteAllText(Path.Combine(dir, "oldCodec.json"), """{ "Codec": "H264" }""");
+            fail += Check("老配置里程序写的 H264 跟着默认走（变 HEVC）",
+                CapturePolicy.Load(Path.Combine(dir, "oldCodec.json")).Codec == VideoCodec.Hevc);
+            File.WriteAllText(Path.Combine(dir, "myCodec.json"), """{ "Codec": "H264", "CodecSet": true }""");
+            fail += Check("用户亲手选的 H264 不许动",
+                CapturePolicy.Load(Path.Combine(dir, "myCodec.json")).Codec == VideoCodec.H264);
             File.WriteAllText(codecCfg, """{ "Threshold": 0.72, "QuotaGb": 55, "PreRollSec": 9 }""");
             var cp1 = CapturePolicy.Load(codecCfg);
             cp1.Codec = VideoCodec.Hevc;
@@ -120,7 +126,7 @@ internal static class PolicyTest
                                                         && codecRoot["QuotaGb"]?.GetValue<long>() == 55);
             fail += Check("读回来还是 HEVC", CapturePolicy.Load(codecCfg).Codec == VideoCodec.Hevc);
             File.WriteAllText(codecCfg, """{ "Codec": "AV1" }""");
-            fail += Check("乱填的编码退回 H.264", CapturePolicy.Load(codecCfg).Codec == VideoCodec.H264);
+            fail += Check("乱填的编码退回默认（HEVC）", CapturePolicy.Load(codecCfg).Codec == VideoCodec.Hevc);
             // 旧版默认码率（20/28）自动跟到 30；用户自己拖过的值不许动
             var migCfg = Path.Combine(dir, "mig28.json");
             File.WriteAllText(migCfg, """{ "BitrateMbps": 28 }""");
@@ -132,7 +138,7 @@ internal static class PolicyTest
             fail += Check("没迁移时不置标", !CapturePolicy.Load(migCfg).MigratedBitrate);
 
             File.WriteAllText(codecCfg, """{ "Codec": 7 }""");
-            fail += Check("编码写数字也不炸", CapturePolicy.Load(codecCfg).Codec == VideoCodec.H264);
+            fail += Check("编码写数字也不炸", CapturePolicy.Load(codecCfg).Codec == VideoCodec.Hevc);
         }
         finally
         {

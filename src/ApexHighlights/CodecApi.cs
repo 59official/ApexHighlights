@@ -17,6 +17,9 @@ internal sealed unsafe class CodecApi : IDisposable
     public static readonly Guid CommonQuality = new("fcbf57a3-7ea5-4b0c-9644-69b40c39c391");
     public static readonly Guid MaxBitRate = new("9651e76e-850a-46d3-b52b-f166310c0d09");
 
+    /// <summary>CODECAPI_AVEncMPVDefaultBPictureCount：B 帧个数。我们必须设 0 —— 见 Encoder.Configure 里的注释。</summary>
+    public static readonly Guid BPictureCount = new("8d390aac-dc5c-4200-b57f-814d04babab2");
+
     private readonly IntPtr _self;      // 接口指针（this），不是 vtable
     private readonly void** _vt;
 

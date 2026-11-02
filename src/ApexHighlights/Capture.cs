@@ -172,6 +172,9 @@ internal sealed class Capture : IDisposable
     public int Bitrate { get; set; } = 20_000_000;
     /// <summary>视频编码。改它要重开采集（编码器和环形分片都是按编码建的）。</summary>
     public VideoCodec Codec { get; set; } = VideoCodec.H264;
+
+    /// <summary>这一场因为机器不支持 HEVC 而退回了 H.264（界面和日志要如实说明）。</summary>
+    public bool CodecFellBack { get; private set; }
     public bool Encoding => _enc is not null;
     public int HotLoops { get; set; }
 
@@ -261,7 +264,19 @@ internal sealed class Capture : IDisposable
         var dir = RingDir ?? Path.Combine(OutDir, "ring");
         _ringCapacitySec = capacitySec;
         _converter = new GpuConverter(_dev!, _ctx!, Width, Height, EncodedFps);
-        _enc = new EncoderChain(Width, Height, Bitrate, GopFrames, EncodedFps, _dev, Codec);
+        try
+        {
+            _enc = new EncoderChain(Width, Height, Bitrate, GopFrames, EncodedFps, _dev, Codec);
+        }
+        catch (Exception ex) when (Codec == VideoCodec.Hevc)
+        {
+            // 用户默认是 HEVC，但老显卡（或者只做了 H.264 的 MFT）可能根本没有 HEVC 编码器。
+            // 这种情况下宁可整场退回 H.264 继续录，也不能让「录制」按钮直接哑掉。
+            CodecFellBack = true;
+            Codec = VideoCodec.H264;
+            Log.Write($"[enc] HEVC 编码器起不来（{ex.Message}），本场改用 H.264");
+            _enc = new EncoderChain(Width, Height, Bitrate, GopFrames, EncodedFps, _dev, Codec);
+        }
         _ring = new SegmentRing(dir, Width, Height, capacitySec, Codec);
         _lib = new ClipLibrary(ClipDir);
 

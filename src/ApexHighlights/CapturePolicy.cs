@@ -64,7 +64,18 @@ public sealed class CapturePolicy
     public int BitrateMbps { get; set; } = 30;
 
     /// <summary>视频编码。默认 H.264（双击就能播）；HEVC 同码率更干净、更小。</summary>
-    public VideoCodec Codec { get; set; } = VideoCodec.H264;
+    /// <summary>默认编码。改这里就等于改「新用户第一段录像是什么编码」。</summary>
+    public const VideoCodec DefaultCodec = VideoCodec.Hevc;
+
+    public VideoCodec Codec { get; set; } = DefaultCodec;
+
+    /// <summary>
+    /// 用户是不是亲手选过编码。
+    /// 没选过的（老配置里那条 "Codec" 是程序自己写进去的）跟着 <see cref="DefaultCodec"/> 走，
+    /// 选过的一辈子记住 —— 这就是「默认值能改、用户的选择不能改」的分界线。
+    /// </summary>
+    [JsonPropertyName("CodecSet")]   // 键名和字段名不一样，是为了让读的人一眼知道这是「用户设过没有」的标记
+    public bool CodecExplicit { get; set; }
 
     /// <summary>
     /// 音轨来源，见 <see cref="AudioMode"/>。默认「只录游戏」。
@@ -187,6 +198,9 @@ public sealed class CapturePolicy
         }
         catch { /* 配置坏了就用默认值 */ }
 
+        // 没亲手选过编码的，跟随当前默认值（否则默认值永远改不动）
+        if (!p.CodecExplicit) p.Codec = DefaultCodec;
+
         var rawBitrate = p.BitrateMbps;
         var rawPre = p.PreRollSec;
         var rawPost = p.PostRollSec;
@@ -246,6 +260,7 @@ public sealed class CapturePolicy
 
             root["BitrateMbps"] = BitrateMbps;
             root["Codec"] = Codec.ToString();
+            root["CodecSet"] = CodecExplicit;
             root["PreRollSec"] = PreRollSec;
             root["PostRollSec"] = PostRollSec;
             root["AudioMode"] = Audio.ToString();

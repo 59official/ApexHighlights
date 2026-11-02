@@ -9,9 +9,11 @@ internal static class Mp4Check
     /// 视频-only 的自检（--gpu-test、--enc-test）要传 false —— 它们写出来的片子本来就没有音轨，
     /// 按“必须有音轨”判就会把正常结果报成失败。
     /// </param>
-    public static int Run(string path, bool requireAudio = true)
+    public static int Run(string path, bool requireAudio = true, bool decode = false)
     {
         MediaFactory.MFStartup(false);
+
+        if (decode) DecodeOne(path);
 
         var v = Read(path, (int)SourceReaderIndex.FirstVideoStream, "视频");
         var a = Read(path, (int)SourceReaderIndex.FirstAudioStream, "音频");
@@ -31,6 +33,41 @@ internal static class Mp4Check
     }
 
     private readonly record struct Info(int Samples, long LastTs, long Bytes);
+
+    /// <summary>
+    /// 逼系统真解一帧出来。只读元数据是验不出「能不能播」的：
+    /// 容器坏没坏、码流能不能解，是两件事。
+    /// </summary>
+    private static void DecodeOne(string path)
+    {
+        try
+        {
+            using var reader = MediaFactory.MFCreateSourceReaderFromURL(path, null!);
+            reader.SetStreamSelection((int)SourceReaderIndex.AllStreams, false);
+            reader.SetStreamSelection((int)SourceReaderIndex.FirstVideoStream, true);
+            var outType = MediaFactory.MFCreateMediaType();
+            outType.Set(MediaTypeAttributeKeys.MajorType, MediaTypeGuids.Video);
+            // 解码器公认的输出是 NV12；RGB32 需要额外的颜色转换器，装了也不一定被自动插进来
+            outType.Set(MediaTypeAttributeKeys.Subtype, VideoFormatGuids.NV12);
+            reader.SetCurrentMediaType((int)SourceReaderIndex.FirstVideoStream, outType);
+            for (int i = 0; i < 30; i++)
+            {
+                using var s = reader.ReadSample((int)SourceReaderIndex.FirstVideoStream,
+                    SourceReaderControlFlag.None, out _, out var flags, out _);
+                if (flags.HasFlag(SourceReaderFlag.EndOfStream)) break;
+                if (s is null) continue;
+                long len = 0;
+                try { len = s.TotalLength; } catch { }
+                Console.WriteLine($"[解码] 成功解出一帧，{len} 字节");
+                return;
+            }
+            Console.WriteLine("[解码] 没读到可解码的帧");
+        }
+        catch (Exception e)
+        {
+            Console.WriteLine($"[解码] 失败：{e.GetType().Name} {e.Message}");
+        }
+    }
 
     /// <summary>
     /// 每条流各开一个读取器。

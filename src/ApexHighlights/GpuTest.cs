@@ -25,7 +25,7 @@ internal static class GpuTest
         Console.WriteLine($"[2] 选中 {enc.Name}（每 60 帧换编码器拿 IDR）");
 
         var ring = new SegmentRing(ringDir, w, h, 120, codec);
-        Console.WriteLine("[2a] ring ok");
+        Console.WriteLine($"[2a] ring ok  codec={VideoCodecs.Label(codec)} q[{NvEncoder.QualityInfo}] gop[{NvEncoder.GopInfo}]");
 
         // BGRA 输入：dynamic 上传纹理填数据 → default 纹理（VideoProcessor 输入）
         // 注意：Staging 不能带 CPUAccessFlags.Write，CPU 写入必须用 Dynamic + WriteDiscard
