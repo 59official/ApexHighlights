@@ -417,7 +417,9 @@ internal sealed class TrayApp : ApplicationContext
 
     private void Announce(Capture.Detection d)
     {
-        Log.Write($"[HIT] {d.WallClock:HH:mm:ss} +{d.Ms / 1000.0:F1}s [{d.Label}] score={d.Score:F2} at({d.X},{d.Y})" +
+        var kindName = ClipKinds.Label(ClipKinds.FromBanner(d.Kind));
+        var ocr = string.IsNullOrWhiteSpace(d.OcrText) ? "" : $"  ocr「{d.OcrText.Trim()}」";
+        Log.Write($"[HIT] {d.WallClock:HH:mm:ss} +{d.Ms / 1000.0:F1}s [{kindName}] score={d.Score:F2} at({d.X},{d.Y}){ocr}" +
                   (d.ClipPath is null ? "  （还没产出片段）" : $"  → {Path.GetFileName(d.ClipPath)} {QuotaReport.Mb(d.Bytes)}"));
         if (d.ClipPath is null) return;
         if (!File.Exists(d.ClipPath)) { Log.Write($"[!] 片段文件不见了: {d.ClipPath}"); return; }

@@ -1076,6 +1076,27 @@ internal sealed class Capture : IDisposable
                 }
             }
 
+            // 横幅是渐入的：最高分那帧可能正好只画出后半截「擊倒」，「助攻，」还没显出来，
+            // OCR 就会读成普通击倒（文件名少个 _ak_，事后分不出来）。
+            // 击倒属于粗判，所以再翻一遍同组其它帧，谁读到更具体的种类就用谁。
+            if (d.Kind == BannerKind.Knock && group.Count > 1)
+            {
+                foreach (var g in group.OrderByDescending(x => x.Score))
+                {
+                    if (ReferenceEquals(g, rep) || g.BandPath is null) continue;
+                    var alt = Classify(g);
+                    // 只接受「助攻击倒」这一种升级：别的字（淘汰）在噪声里也偶尔出现，
+                    // 放开会让普通击倒被误判成淘汰，得不偿失。
+                    if (alt.Kind == BannerKind.AssistKnock)
+                    {
+                        Log.Write($"[ocr] 更具体的种类：{ClipKinds.Label(ClipKinds.FromBanner(d.Kind))} → " +
+                                  $"{ClipKinds.Label(ClipKinds.FromBanner(alt.Kind))}（读到「{alt.OcrText}」）");
+                        d = d with { Kind = alt.Kind, OcrText = alt.OcrText };
+                        break;
+                    }
+                }
+            }
+
             if (group.Count > 1)
             {
                 _merged += group.Count - 1;
