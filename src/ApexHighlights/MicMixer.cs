@@ -47,6 +47,10 @@ internal sealed class MicMixer
         _buf = new short[_rate * _ch * sec];
     }
 
+    /// <summary>WASAPI 的回调数据已转为立体声，声道数与设备的原始格式无关。</summary>
+    public void AppendCapturePacket(byte[] pcm, int bytes, int srcRate) =>
+        Append(pcm, bytes, srcRate, LoopbackCapture.OutputChannels);
+
     /// <summary>
     /// 收一包麦克风 PCM（任意采样率/声道，16bit 交错）。在麦克风采集线程上调用。
     /// </summary>
@@ -78,6 +82,16 @@ internal sealed class MicMixer
                 int l = BitConverter.ToInt16(pcm, s);
                 int r = srcCh == 1 ? l : BitConverter.ToInt16(pcm, s + 2);
                 return (l, r);
+            }
+
+            if (_srcRate == _rate)
+            {
+                for (int i = 0; i < frames; i++)
+                {
+                    var sample = At(i);
+                    Push(sample.L, sample.R);
+                }
+                return;
             }
 
             while (_pos < frames - 1)

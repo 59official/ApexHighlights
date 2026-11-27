@@ -27,6 +27,8 @@ internal enum AudioSourceKind
 /// </summary>
 internal sealed class LoopbackCapture : IDisposable
 {
+    public const int OutputChannels = 2;
+    private const int OutputFrameBytes = OutputChannels * sizeof(short);
     private const int DataFlowRender = 0;
     private const int DataFlowCapture = 1;
     private const int RoleConsole = 0;
@@ -136,10 +138,13 @@ internal sealed class LoopbackCapture : IDisposable
 
     private byte[] _stage = new byte[64 * 1024];
 
-    public int SampleRate { get; private set; } = 48000;
-    public int Channels { get; private set; } = 2;
-    public int Bits => _bits;
-    public bool IsFloat => _isFloat;
+    internal readonly record struct PcmFormat(int Rate, int Channels, int Bits, int BlockAlign, bool IsFloat);
+    private PcmFormat _input = new(48000, 2, 16, 4, false);
+
+    public int SampleRate => _input.Rate;
+    public int Channels => _input.Channels;
+    public int Bits => _input.Bits;
+    public bool IsFloat => _input.IsFloat;
     public string DeviceName { get; private set; } = "?";
     public string Err { get; private set; } = "";
 
@@ -215,8 +220,7 @@ internal sealed class LoopbackCapture : IDisposable
         }
         else
         {
-            ParseFormat(_format, out int rate, out int ch);
-            SampleRate = rate; Channels = ch;
+            _input = ParseFormat(_format);
         }
 
         _signal = new AutoResetEvent(false);
@@ -279,7 +283,7 @@ internal sealed class LoopbackCapture : IDisposable
         Marshal.WriteInt16(_format, 12, (short)block);
         Marshal.WriteInt16(_format, 14, (short)bits);
         Marshal.WriteInt16(_format, 16, 0);
-        SampleRate = rate; Channels = ch; _bits = bits; _isPcm = true; _isFloat = false;
+        _input = new PcmFormat(rate, ch, bits, block, false);
     }
 
     // ── 进程回环（AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK，Windows 10 2004+）──────────
@@ -392,38 +396,32 @@ internal sealed class LoopbackCapture : IDisposable
     }
 
     /// <summary>解析 WAVEFORMATEX / WAVEFORMATEXTENSIBLE，拿到真实采样率与声道数；同时记下样本格式。</summary>
-    private void ParseFormat(IntPtr p, out int rate, out int channels)
+    internal static PcmFormat ParseFormat(IntPtr p)
     {
         ushort tag = (ushort)Marshal.ReadInt16(p, 0);
-        channels = Marshal.ReadInt16(p, 2);
-        rate = Marshal.ReadInt32(p, 4);
-        ushort bits = (ushort)Marshal.ReadInt16(p, 14);
-        ushort cbSize = (ushort)Marshal.ReadInt16(p, 16);
-
-        _isFloat = tag == 3;
-        _bits = bits;
-        if (tag == 0xFFFE && cbSize >= 22)
+        int channels = (ushort)Marshal.ReadInt16(p, 2);
+        int rate = Marshal.ReadInt32(p, 4);
+        int blockAlign = (ushort)Marshal.ReadInt16(p, 12);
+        int bits = (ushort)Marshal.ReadInt16(p, 14);
+        bool isFloat = tag == 3;
+        bool isPcm = tag == 1;
+        if (tag == 0xFFFE && (ushort)Marshal.ReadInt16(p, 16) >= 22)
         {
-            // SubFormat GUID 在 WAVEFORMATEX 之后 6 字节处（wValidBits 2 + dwChannelMask 4）
-            _bits = (ushort)Marshal.ReadInt16(p, 18);
-            int d1 = Marshal.ReadInt32(p, 24);
-            _isFloat = d1 == 3;    // 00000003-0000-0010-8000-00aa00389b71 = IEEE float
-            _isPcm = d1 == 1;
+            var format = Marshal.PtrToStructure<Guid>(p + 24);
+            isPcm = format == new Guid("00000001-0000-0010-8000-00aa00389b71");
+            isFloat = format == new Guid("00000003-0000-0010-8000-00aa00389b71");
+            // 有效位左对齐，步长用容器位宽和 nBlockAlign（例如 24 有效位装在 32 位里）。
         }
-        else _isPcm = tag == 1;
 
-        if (channels <= 0) channels = 2;
-        if (rate <= 0) rate = 48000;
-        if (!_isFloat && !_isPcm) throw new NotSupportedException($"混音格式既不是 PCM 也不是 float（tag=0x{tag:X4}）");
-        if (_bits != 16 && _bits != 24 && _bits != 32) throw new NotSupportedException($"不支持 {_bits} bit 采样");
+        if (!isPcm && !isFloat) throw new NotSupportedException($"混音格式既不是 PCM 也不是 float（tag=0x{tag:X4}）");
+        if (bits is not (16 or 24 or 32) || (isFloat && bits != 32)) throw new NotSupportedException($"不支持 {bits} bit 采样");
+        if (channels <= 0 || rate <= 0 || blockAlign < channels * (bits / 8))
+            throw new NotSupportedException("WASAPI 采样率、声道数或帧对齐无效");
+        return new PcmFormat(rate, channels, bits, blockAlign, isFloat);
     }
-
-    private bool _isFloat, _isPcm;
-    private int _bits = 32;
 
     private void Loop(PcmHandler onPcm, bool eventDriven)
     {
-        int frameBytes = Channels * (_bits / 8);
         try
         {
             while (!_stop)
@@ -441,10 +439,9 @@ internal sealed class LoopbackCapture : IDisposable
                         if (frames == 0) continue;
                         // AUDCLNT_BUFFERFLAGS_SILENT = 0x2：数据指针无效，按静音处理
                         bool silent = (pflags & 0x2) != 0;
-                        int srcBytes = (int)frames * frameBytes;
-                        int need = (int)frames * 4;                      // 目标：立体声 int16
+                        int need = checked((int)frames * OutputFrameBytes);
                         if (_stage.Length < need) _stage = new byte[need];
-                        Convert(data, silent, (int)frames, _stage);
+                        ConvertToStereo(data, silent, (int)frames, _stage, _input);
                         Packets++;
                         Bytes += need;
                         onPcm(_stage, need);
@@ -458,37 +455,37 @@ internal sealed class LoopbackCapture : IDisposable
     }
 
     /// <summary>把设备混音格式的 PCM 转成**交错立体声 int16**。</summary>
-    private unsafe void Convert(IntPtr src, bool silent, int frames, byte[] dst)
+    internal static unsafe void ConvertToStereo(IntPtr src, bool silent, int frames, byte[] dst, PcmFormat format)
     {
-        int outCh = 2, kind = _bits / 8;
+        int bytesPerSample = format.Bits / 8;
         fixed (byte* d = dst)
         {
             var o = (short*)d;
-            if (silent || src == IntPtr.Zero) { Array.Clear(dst, 0, frames * 4); return; }
+            if (silent || src == IntPtr.Zero) { Array.Clear(dst, 0, frames * OutputFrameBytes); return; }
             var s = (byte*)src;
 
             // 统一返回「int16 量程」（-32768..32767）的浮点值；float 源额外乘 32767。
             float Sample(int frame, int ch)
             {
-                int idx = frame * Channels + ch;
-                if (_isFloat) return *(float*)(s + idx * 4) * 32767f;
-                return kind switch
+                var input = s + frame * format.BlockAlign + ch * bytesPerSample;
+                if (format.IsFloat) return *(float*)input * 32767f;
+                return bytesPerSample switch
                 {
-                    2 => (short)(s[idx * 2] | (s[idx * 2 + 1] << 8)),
-                    3 => (s[idx * 3] | (s[idx * 3 + 1] << 8) | ((sbyte)s[idx * 3 + 2] << 16)) / 256f,
-                    _ => (s[idx * 4] | (s[idx * 4 + 1] << 8) | (s[idx * 4 + 2] << 16) | ((sbyte)s[idx * 4 + 3] << 24)) / 65536f,
+                    2 => (short)(input[0] | (input[1] << 8)),
+                    3 => (input[0] | (input[1] << 8) | ((sbyte)input[2] << 16)) / 256f,
+                    _ => (input[0] | (input[1] << 8) | (input[2] << 16) | ((sbyte)input[3] << 24)) / 65536f,
                 };
             }
 
             for (int f = 0; f < frames; f++)
             {
-                for (int c = 0; c < outCh; c++)
+                for (int c = 0; c < OutputChannels; c++)
                 {
-                    int sc = Channels == 1 ? 0 : Math.Min(c, Channels - 1);
+                    int sc = Math.Min(c, format.Channels - 1);
                     float v = Sample(f, sc);
                     int i = (int)(v + (v >= 0 ? 0.5f : -0.5f));
                     if (i > 32767) i = 32767; else if (i < -32768) i = -32768;
-                    o[f * outCh + c] = (short)i;
+                    o[f * OutputChannels + c] = (short)i;
                 }
             }
         }

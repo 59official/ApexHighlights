@@ -310,7 +310,8 @@ internal sealed class Capture : IDisposable
             }
 
             _audioFillRun = true;
-            _audioFill = new Thread(AudioFillLoop) { IsBackground = true, Name = "audiofill" };
+            var encoder = _aac;
+            _audioFill = new Thread(() => AudioFillLoop(encoder)) { IsBackground = true, Name = "audiofill" };
             _audioFill.Start();
             _audioErr = "";
         }
@@ -443,10 +444,11 @@ internal sealed class Capture : IDisposable
         {
             var mixer = new MicMixer(_aac.SampleRate, _aac.Channels);
             var cap = new LoopbackCapture(AudioSourceKind.Microphone);
-            cap.Start((pcm, bytes) => mixer.Append(pcm, bytes, cap.SampleRate, cap.Channels));
+            cap.Start((pcm, bytes) => mixer.AppendCapturePacket(pcm, bytes, cap.SampleRate));
             _micMixer = mixer;
             _mic = cap;
-            Log.Write($"[audio] 麦克风开始采集（{cap.SampleRate}Hz/{cap.Channels}ch → 混进 {_aac.SampleRate}Hz/{_aac.Channels}ch）");
+            Log.Write($"[audio] 麦克风开始采集（设备 {cap.SampleRate}Hz/{cap.Channels}ch/{cap.Bits}bit，" +
+                      $"回调 {LoopbackCapture.OutputChannels}ch PCM → 混进 {_aac.SampleRate}Hz/{_aac.Channels}ch）");
         }
         catch (Exception ex)
         {
@@ -733,6 +735,7 @@ internal sealed class Capture : IDisposable
         {
             lock (_audioFeedGate)
             {
+                if (!ReferenceEquals(_aac, aac)) return;
                 if (_audioStart100 == long.MinValue) _audioStart100 = now100;
 
                 // 静音补齐：只补到「壁钟应有的样本数」，不留未来
@@ -750,6 +753,7 @@ internal sealed class Capture : IDisposable
                         // 补静音的位置如果麦克风有货，就用麦克风顶上：
                         // 游戏安静、只有用户在说话时，这段不能是纯静音（否则只开麦克风等于没录）。
                         if (mixer is not null) mixer.TakeInto(_zeroBuf, take * 4);
+                        else Array.Clear(_zeroBuf, 0, take * 4);
                         aac.Feed(_zeroBuf.AsSpan(0, take * 4), now100, (d, p) => ring.Append(p / 10, d));
                         _audioFedFrames += take;
                         _silenceFilled += take;
@@ -770,12 +774,12 @@ internal sealed class Capture : IDisposable
     }
 
     /// <summary>静音补齐线程：WASAPI 不送包的时候也得让音频时间轴往前走。</summary>
-    private void AudioFillLoop()
+    private void AudioFillLoop(AacEncoder encoder)
     {
-        while (!_stop && _audioFillRun)
+        while (!_stop && _audioFillRun && ReferenceEquals(_aac, encoder))
         {
             Thread.Sleep(20);
-            if (!_audioFillRun) break;
+            if (!_audioFillRun || !ReferenceEquals(_aac, encoder)) break;
             Pump(null, 0, _clock.ElapsedMilliseconds * 10_000L);
         }
     }
@@ -1326,7 +1330,7 @@ internal sealed class Capture : IDisposable
             s += $" 音频={_aRing.TotalFrames}帧/{_aRing.DiskBytes() / 1024}KB 覆盖({ac.From / 1000},{ac.To / 1000})ms";
             s += $" 源[系统={(_wcap is null ? "关" : "开")} 游戏={(_game is null ? "关" : "开")}{(GameFellBack ? "回退" : "")}" +
                  $" 麦={(MicOn ? "开" : "关")}" +
-                 $"{(MicOn ? $"/{_micMixer?.Frames ?? 0}帧缓" : "")}]";
+                 $"{(MicOn ? $"/{_micMixer?.Frames ?? 0}帧缓/{_micMixer?.Dropped ?? 0}帧丢" : "")}]";
         }
         else if (Mode == AudioMode.None) s += " 音频=关";
         if (OcrEnabled && _ocrCount > 0)

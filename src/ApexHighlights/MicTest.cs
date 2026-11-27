@@ -116,6 +116,39 @@ internal static class MicTest
             Check(m.Frames < 3000, $"换采样率后队列没堆爆（剩 {m.Frames} 帧）");
         }
 
+        // ⑦ 真正的 WASAPI→混音入口：单声道输入已转成立体声，长度不能再翻倍。
+        unsafe
+        {
+            var wave = new byte[40];
+            fixed (byte* header = wave)
+            {
+                var ptr = (IntPtr)header;
+                Marshal.WriteInt16(ptr, 0, unchecked((short)0xFFFE));
+                Marshal.WriteInt16(ptr, 2, 1);
+                Marshal.WriteInt32(ptr, 4, Rate);
+                Marshal.WriteInt32(ptr, 8, Rate * 4);
+                Marshal.WriteInt16(ptr, 12, 4);
+                Marshal.WriteInt16(ptr, 14, 32);
+                Marshal.WriteInt16(ptr, 16, 22);
+                Marshal.WriteInt16(ptr, 18, 24);
+                new Guid("00000001-0000-0010-8000-00aa00389b71").TryWriteBytes(wave.AsSpan(24));
+                var fmt = LoopbackCapture.ParseFormat(ptr);
+                var input = new[] { 1200 << 16, -2500 << 16, 3100 << 16 };
+                var stereo = new byte[input.Length * 4];
+                fixed (int* samples = input)
+                    LoopbackCapture.ConvertToStereo((IntPtr)samples, false, input.Length, stereo, fmt);
+                Check(Read(stereo, 0) == (1200, 1200) && Read(stereo, 4) == (-2500, -2500) &&
+                    Read(stereo, 8) == (3100, 3100), "24 有效位 / 32 位容器按正确步长解码并复制单声道");
+
+                var mixer = new MicMixer(Rate, Ch);
+                mixer.AppendCapturePacket(stereo, stereo.Length, fmt.Rate);
+                var mixed = new byte[stereo.Length];
+                Check(mixer.Frames == input.Length, "立体声回调按输出声道数算帧");
+                mixer.TakeInto(mixed, mixed.Length);
+                Check(stereo.AsSpan().SequenceEqual(mixed) && mixer.Frames == 0, "设备到混音保留长度、声道和样本顺序");
+            }
+        }
+
         Console.WriteLine(fail == 0 ? "[done] 麦克风混音自检全部通过" : $"[done] {fail} 项失败");
         return fail == 0 ? 0 : 8;
     }
