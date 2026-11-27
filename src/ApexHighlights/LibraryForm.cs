@@ -34,6 +34,7 @@ public sealed class LibraryForm : Form
     private readonly CueTextBox _search = new();
     private readonly Label _status = new();
     private readonly Label _statusRight = new();
+    private ContextMenuStrip? _quotaMenu;
     private readonly HoverTip _tip = new();
 
     // 四条横带。位置全部由 LayoutBands 算，不参与任何自动布局。
@@ -494,37 +495,46 @@ public sealed class LibraryForm : Form
     public Action? OnParamsRequested;
 
     /// <summary>状态栏这一行的「点开就能改」菜单：两个子项组，和托盘里那套档位一致。</summary>
-    private void ShowQuotaMenu()
+    internal ContextMenuStrip ShowQuotaMenu()
     {
-        var menu = CreateQuotaMenu();
-        menu.Closed += (_, _) => menu.Dispose();
+        // WinForms 在 Closed 事件返回后还要完成关闭流程，因此菜单由回顾库窗口统一释放。
+        var menu = _quotaMenu ??= CreateQuotaMenu();
         menu.Show(_statusRight, new Point(_statusRight.Width, 0), ToolStripDropDownDirection.AboveLeft);
+        return menu;
     }
 
-    /// <summary>
-    /// 建出配额菜单但不弹出来——自检要能点它的子项，真 Show 出来会把模态焦点抢走。
-    /// </summary>
-    internal ContextMenuStrip CreateQuotaMenu()
+    private ContextMenuStrip CreateQuotaMenu()
     {
         var menu = new ContextMenuStrip { ShowImageMargin = false, Font = UiKit.F95 };
-        var capRoot = new ToolStripMenuItem("磁盘配额：" + QuotaPolicy.QuotaLabel(_policy.QuotaGb));
-        var keepRoot = new ToolStripMenuItem("保留天数：" + QuotaPolicy.RetainLabel(_policy.RetainDays));
+        var capRoot = new ToolStripMenuItem();
+        var keepRoot = new ToolStripMenuItem();
 
         foreach (var gb in QuotaPolicy.QuotaPresets)
         {
-            var it = new ToolStripMenuItem(QuotaPolicy.QuotaLabel(gb)) { Checked = gb == _policy.QuotaGb };
+            var it = new ToolStripMenuItem(QuotaPolicy.QuotaLabel(gb)) { Tag = gb };
             it.Click += (_, _) => OnQuotaChanged?.Invoke(gb, _policy.RetainDays);
             capRoot.DropDownItems.Add(it);
         }
         foreach (var days in QuotaPolicy.RetainPresets)
         {
-            var it = new ToolStripMenuItem(QuotaPolicy.RetainLabel(days)) { Checked = days == _policy.RetainDays };
+            var it = new ToolStripMenuItem(QuotaPolicy.RetainLabel(days)) { Tag = days };
             it.Click += (_, _) => OnQuotaChanged?.Invoke(_policy.QuotaGb, days);
             keepRoot.DropDownItems.Add(it);
         }
 
+        void RefreshOptions()
+        {
+            capRoot.Text = "磁盘配额：" + QuotaPolicy.QuotaLabel(_policy.QuotaGb);
+            keepRoot.Text = "保留天数：" + QuotaPolicy.RetainLabel(_policy.RetainDays);
+            foreach (var item in capRoot.DropDownItems.OfType<ToolStripMenuItem>())
+                item.Checked = item.Tag is int gb && gb == _policy.QuotaGb;
+            foreach (var item in keepRoot.DropDownItems.OfType<ToolStripMenuItem>())
+                item.Checked = item.Tag is int days && days == _policy.RetainDays;
+        }
+        menu.Opening += (_, _) => RefreshOptions();
         menu.Items.Add(capRoot);
         menu.Items.Add(keepRoot);
+        RefreshOptions();
         return menu;
     }
 
@@ -759,6 +769,7 @@ public sealed class LibraryForm : Form
     {
         if (disposing)
         {
+            _quotaMenu?.Dispose();
             _tip.Dispose();
         }
         base.Dispose(disposing);
