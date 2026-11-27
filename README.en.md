@@ -92,6 +92,14 @@ Dragging takes effect immediately; releasing writes it to disk, there is no "Sav
 
 **About HEVC**: at the same bitrate it is cleaner than H.264, and at the same quality 30–50% smaller; the cost is that Windows' built-in player needs the "HEVC Video Extensions" (or use VLC / PotPlayer / mpv, which decode it out of the box). If the machine has no HEVC encoder it falls back to H.264 and says so in the log; switching codec restarts the recording once (a segment ring cannot be half one codec and half the other).
 
+## Picture settings (画面配置 — tray or library toolbar)
+
+The default reads `Saved Games\Respawn\Apex\local\videoconfig.txt` for the current Windows user. It prefers the `last_display_width` / `last_display_height` pair, then tries `defaultres` / `defaultresheight`. It uses the captured window when the file has no valid size. Enter a manual width and height to override it, for example 2560×1600 (16:10). Saving a new picture reference restarts capture while the game keeps running.
+
+The picture reference sets the banner search area. The default band includes extra room above the banner and expands for narrow layouts such as 4:3. A native 4:3 capture is normalized uniformly to preserve text proportions. Windows supplies the recording dimensions. HUD scale changes the matching template size. FOV is controlled in Apex.
+
+Near-miss images are off by default. When enabled, the recorder keeps candidates whose banner text is confirmed by OCR. New diagnostic images are stored under `captures/diagnostics` for seven days and pruned at capture startup and hourly. The check commands still read legacy BMPs stored directly under `captures`.
+
 ## Audio source (音轨 — tray → "Audio")
 
 | Option | What is recorded | Notes |
@@ -133,6 +141,8 @@ Defaults: **40GB / keep 30 days / 2GB disk watermark / check hourly**, stored in
 - When free disk space drops below the watermark, writing new data into the ring pauses; clips already recorded still land normally.
 - When it checks: at startup, after every clip is written, and once an hour.
 
+Temporary video segments are stored in a capture session subfolder of `captures/ring` and kept for roughly 90 seconds. A normal stop clears the session's segments. The next capture also cleans up segments left by an interrupted session.
+
 A clip *is* its filename, there is no database: `apex_1028-130333_0.99.mp4`. To archive something by hand, just move the file.
 
 ## Banner detection
@@ -141,10 +151,14 @@ Hits are found by normalized cross-correlation against a "banner anchor image". 
 
 Classification (knockdown / re-knock / assist knock / squad wipe / assist wipe) reads the banner text with Windows' built-in OCR, which covers Chinese and English; if the matching language pack is missing it degrades to "knockdown" but still records as usual.
 
+An Apex banner can still be fading in when the template first matches. The recorder keeps up to two later samples of the same banner from the existing detection stream. If the first frame is unreadable or shows a plain knockdown, background OCR checks the later samples before applying the enabled clip types. The log records any classification change.
+
 Two common questions:
 
 - **Resolution does not matter**: the band is scaled back into the 2560×1440 reference space while capturing; 900p / 1080p / 1440p / 2160p all pass the threshold in testing.
-- **In-game HUD scaling does matter**: cross-correlation is very scale-sensitive (±10% drops it from 0.99 to 0.4). "HUD scale" (HUD 缩放) in the tray lets you pick 80/90/100/110/120% by hand; the default is "auto" — extra tiers are only scanned when a score lands in the grey zone, so it costs nothing the rest of the time.
+- **The banner's on-screen size affects matching.** "HUD scale" (HUD 缩放) in the tray can fix the template at 80/90/100/110/120%. Auto starts at 100% and tries the other scales after two consecutive samples score in the gray zone.
+
+When an Apex banner reaches the threshold, the recorder also reads a small region at the top of that frame. Background OCR skips matches on a respawn countdown or spectator/recap tabs before merging or saving. Earlier personal highlights still use the configured pre-roll and post-roll. This check depends on Windows OCR reading the HUD language. The `[stat]` and `[clip]` lines report spectator-check and MP4 write timings.
 
 ## Self-check commands
 
