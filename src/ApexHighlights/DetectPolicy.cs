@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Text.Json.Serialization;
 
 namespace ApexHighlights;
 
@@ -34,14 +35,16 @@ public sealed class DetectPolicy
     public int MergeSec { get; set; } = 8;
 
     /// <summary>
-    /// 游戏内 HUD 缩放的百分比（0 = 自动）。用户 2026-10-29 提的：与其让程序猜，
-    /// 不如让他直接选自己的 HUD 有多大。
+    /// 横幅匹配模板的缩放百分比（0 = 自动）。不改变游戏画面或检测框坐标。
     ///
     /// 为什么要它：NCC 对尺度几乎没有容差 —— 实测把条带按 0.9/1.1 缩放后，
     /// 分数从 0.995 掉到 0.40/0.46（阈值 0.6）。所以只要 HUD 缩放不是 100%，就得
     /// 用对应尺度的模板。用户选 0（自动）时，程序只在「像但不够像」的灰区才补扫其它尺度。
     /// </summary>
     public int HudScalePct { get; set; }
+
+    [JsonIgnore]
+    public PictureSettings Picture { get; set; } = new();
 
     /// <summary>给界面/日志用的可读描述。</summary>
     public string Describe =>
@@ -63,8 +66,23 @@ public sealed class DetectPolicy
         {
             if (path is not null && File.Exists(path))
             {
-                var loaded = JsonSerializer.Deserialize<DetectPolicy>(File.ReadAllText(path), Json);
+                using var document = JsonDocument.Parse(File.ReadAllText(path), new JsonDocumentOptions
+                {
+                    CommentHandling = JsonCommentHandling.Skip,
+                    AllowTrailingCommas = true,
+                });
+                var root = document.RootElement;
+                var loaded = root.Deserialize<DetectPolicy>(Json);
                 if (loaded is not null) p = loaded;
+                if (root.ValueKind == JsonValueKind.Object)
+                {
+                    foreach (var property in root.EnumerateObject())
+                    {
+                        if (!string.Equals(property.Name, "Picture", StringComparison.OrdinalIgnoreCase)) continue;
+                        try { p.Picture = property.Value.Deserialize<PictureSettings>(Json) ?? new PictureSettings(); }
+                        catch (JsonException) { p.Picture = new PictureSettings(); }
+                    }
+                }
             }
         }
         catch { /* 配置坏了就用默认值 */ }
@@ -72,7 +90,7 @@ public sealed class DetectPolicy
     }
 
     /// <summary>
-    /// 写回 config.json：只改 Threshold 这一个字段，其它字段（配额等）原样保留。
+    /// 写回 config.json 的检测字段，其它字段（配额等）原样保留。
     /// 用 JsonObject 而不是重新序列化整个配置，就是为了不把别人的字段冲掉。
     /// </summary>
     public bool Save(string path)
@@ -96,6 +114,7 @@ public sealed class DetectPolicy
             root["Threshold"] = Math.Round(Threshold, 2);
             root["MergeSec"] = MergeSec;
             root["HudScalePct"] = HudScalePct;
+            root["Picture"] = JsonSerializer.SerializeToNode(Picture, Json);
 
             var dir = Path.GetDirectoryName(path);
             if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
@@ -113,11 +132,12 @@ public sealed class DetectPolicy
     {
         if (p.MergeSec < 0) p.MergeSec = 0;
         if (p.MergeSec > CapturePolicy.MergeMax) p.MergeSec = CapturePolicy.MergeMax;
-        if (p.Threshold <= 0) { p.Threshold = 0; return p; }
-        if (p.Threshold < 0.30f) p.Threshold = 0.30f;
+        if (p.Threshold <= 0) p.Threshold = 0;
+        else if (p.Threshold < 0.30f) p.Threshold = 0.30f;
         if (p.Threshold > 0.95f) p.Threshold = 0.95f;
         // HUD 缩放只认面板里给的那几档，别的值一律当「自动」
         if (Array.IndexOf(HudScales, p.HudScalePct) < 0) p.HudScalePct = 0;
+        p.Picture = (p.Picture ?? new PictureSettings()).Normalize();
         return p;
     }
 
@@ -127,8 +147,8 @@ public sealed class DetectPolicy
     public static string HudLabel(int pct) => pct == 0 ? "自动（推荐）" : $"{pct}%";
 
     public static string HudHint(int pct) => pct == 0
-        ? "默认：平时只用 100% 模板，分数落在灰区时自动补扫 80–120%"
-        : $"按 {pct}% 的 HUD 缩放识别（游戏内设置是多少就选多少，识别更快也更准）";
+        ? "先用 100% 模板，连续两帧接近阈值时试 80/90/110/120%"
+        : $"固定用原图 {pct}% 大小的横幅模板";
 
     /// <summary>界面上给用户选的档位。间隔 0.05，够细也不至于点半天。</summary>
     public static readonly float[] Presets = { 0.55f, 0.60f, 0.65f, 0.70f, 0.75f, 0.80f, 0.85f, 0.90f };

@@ -48,6 +48,7 @@ public sealed class LibraryForm : Form
     private readonly RoundButton _btnDel = new("删除", 88);
     private readonly RoundButton _btnCancel = new("取消", 88) { Visible = false };
     private readonly RoundButton _btnParams = new("录制参数", 118);
+    private readonly RoundButton _btnPicture = new("画面配置", 108);
     /// <summary>头部那行小灰字：说清「录的是窗口尺寸」这件事，免得有人拿它跟游戏内分辨率较真。</summary>
     private readonly Label _sizeNote = new();
     private Panel? _searchPill, _thPill, _kindPill, _timePill;
@@ -185,6 +186,7 @@ public sealed class LibraryForm : Form
         _btnReveal.Click += (_, _) => RevealSelected();
         _btnDir.Click += (_, _) => PickClipsDir();
         _btnParams.Click += (_, _) => OnParamsRequested?.Invoke();
+        _btnPicture.Click += (_, _) => OnPictureRequested?.Invoke();
         _btnDel.Style = RoundButton.Look.Danger;
         _btnDel.Click += (_, _) =>
         {
@@ -212,6 +214,7 @@ public sealed class LibraryForm : Form
         _bar.Controls.Add(_btnReveal);
         _bar.Controls.Add(_btnDir);
         _bar.Controls.Add(_btnParams);
+        _bar.Controls.Add(_btnPicture);
         _bar.Controls.Add(_btnDel);
         _bar.Controls.Add(_btnCancel);
         _bar.Controls.Add(_kindPill);
@@ -334,6 +337,8 @@ public sealed class LibraryForm : Form
         _btnDir.SetBounds(z(238), btnY, z(118), z(38));
         _btnDel.SetBounds(z(364), btnY, z(_list.SelectMode ? 124 : 88), z(38));
         _btnParams.SetBounds(_btnDel.Right + z(10), btnY, z(118), z(38));
+        _btnPicture.Visible = !_list.SelectMode;
+        _btnPicture.SetBounds(_btnParams.Right + z(10), btnY, z(108), z(38));
         _btnCancel.SetBounds(_btnParams.Right + z(10), btnY, z(88), z(38));
         var timePill = _timePill!;
         var kindPill = _kindPill!;
@@ -493,6 +498,7 @@ public sealed class LibraryForm : Form
 
     /// <summary>用户点了工具条上的「录制参数」。宿主（托盘）负责把面板弹出来。</summary>
     public Action? OnParamsRequested;
+    public Action? OnPictureRequested;
 
     /// <summary>状态栏这一行的「点开就能改」菜单：两个子项组，和托盘里那套档位一致。</summary>
     internal ContextMenuStrip ShowQuotaMenu()

@@ -3,6 +3,7 @@ using System.Drawing;
 using System.Text;
 using Windows.Graphics.Imaging;
 using Windows.Media.Ocr;
+using Windows.Security.Cryptography;
 using Windows.Storage;
 
 namespace ApexHighlights;
@@ -60,6 +61,24 @@ public sealed class BannerOcr
     /// </summary>
     public string Hint => _hint;
 
+    internal bool IsSpectating(byte[] gray)
+    {
+        try
+        {
+            EnsureEngines();
+            if (_engines.Count == 0) return false;
+
+            using var bitmap = CreateGrayBitmap(gray, SpectatorHud.Width, SpectatorHud.Height);
+            foreach (var (engine, _) in _engines)
+                if (SpectatorHud.HasSpectatorText(Recognize(engine, bitmap))) return true;
+        }
+        catch (Exception ex)
+        {
+            if (_err.Length == 0) _err = "观战 OCR: " + ex.Message;
+        }
+        return false;
+    }
+
     /// <summary>
     /// 读一张条带图并判定横幅种类。任何异常都吞掉并返回 Unknown（检测不该拖垮录制）。
     ///
@@ -68,7 +87,13 @@ public sealed class BannerOcr
     /// 所以按 zh-Hant → zh-Hans → en 的顺序建一串引擎，第一个认出来的算数；
     /// 认不出（Unknown）才换下一个，正常情况下只跑一次。
     /// </summary>
-    public (BannerKind Kind, string Text) Classify(string bmpPath)
+    public (BannerKind Kind, string Text) Classify(string bmpPath) =>
+        Classify(() => LoadBitmap(bmpPath), bmpPath);
+
+    internal (BannerKind Kind, string Text) Classify(byte[] gray, int width, int height) =>
+        Classify(() => CreateGrayBitmap(gray, width, height));
+
+    private (BannerKind Kind, string Text) Classify(Func<SoftwareBitmap> loadBitmap, string? boostPath = null)
     {
         var sw = Stopwatch.StartNew();
         try
@@ -80,51 +105,56 @@ public sealed class BannerOcr
                 return (BannerKind.Unknown, "");
             }
 
-            string firstText = "";
-            foreach (var (engine, tag) in _engines)
-            {
-                var text = Recognize(engine, bmpPath);
-                var kind = Parse(text);
-                if (firstText.Length == 0) firstText = text;
-                if (kind == BannerKind.Unknown) continue;      // 这个语言读不出横幅，换下一个
-                EngineName = tag;
-                Count++;
-                TotalMs += sw.ElapsedMilliseconds;
-                return (kind, text);
-            }
+            using var bitmap = loadBitmap();
+            var result = ReadBanner(bitmap);
 
-            // 原始条带读不出来时，再来一遍「放大 + 拉对比」的版本。
-            // 横幅是半透明渐入的，字是浅灰压在深色底上，原始尺寸下笔画灰度差只有十几级，
-            // Windows OCR 经常只认到几个数字（实测「助攻，擊倒 生命線1903」被读成「+100 40」）。
-            var boosted = Boost(bmpPath);
-            if (boosted is not null)
+            // 原始条带读不出来时，尝试放大和拉对比。后续帧在内存里直接识别。
+            if (result.Kind == BannerKind.Unknown && boostPath is not null && Boost(boostPath) is { } boosted)
             {
                 try
                 {
-                    foreach (var (engine, tag) in _engines)
-                    {
-                        var text = Recognize(engine, boosted);
-                        var kind = Parse(text);
-                        if (kind == BannerKind.Unknown) continue;
-                        EngineName = tag;
-                        Count++;
-                        TotalMs += sw.ElapsedMilliseconds;
-                        return (kind, text);
-                    }
+                    using var enhanced = LoadBitmap(boosted);
+                    var retry = ReadBanner(enhanced);
+                    if (retry.Kind != BannerKind.Unknown) result = retry;
                 }
                 finally { try { File.Delete(boosted); } catch { } }
             }
 
-            EngineName = _engines[0].Tag;
+            EngineName = result.Tag;
             Count++;
             TotalMs += sw.ElapsedMilliseconds;
-            return (BannerKind.Unknown, firstText);
+            return (result.Kind, result.Text);
         }
         catch (Exception ex)
         {
             if (_err.Length == 0) _err = $"{ex.GetType().Name}: {ex.Message}";
             return (BannerKind.Unknown, "");
         }
+    }
+
+    private (BannerKind Kind, string Text, string Tag) ReadBanner(SoftwareBitmap bitmap)
+    {
+        string firstText = "";
+        foreach (var (engine, tag) in _engines)
+        {
+            var text = Recognize(engine, bitmap);
+            var kind = Parse(text);
+            if (firstText.Length == 0) firstText = text;
+            if (kind != BannerKind.Unknown) return (kind, text, tag);
+        }
+        return (BannerKind.Unknown, firstText, _engines[0].Tag);
+    }
+
+    private static SoftwareBitmap CreateGrayBitmap(byte[] gray, int width, int height)
+    {
+        var bgra = new byte[gray.Length * 4];
+        for (int i = 0, p = 0; i < gray.Length; i++, p += 4)
+        {
+            bgra[p] = bgra[p + 1] = bgra[p + 2] = gray[i];
+            bgra[p + 3] = 255;
+        }
+        return SoftwareBitmap.CreateCopyFromBuffer(CryptographicBuffer.CreateFromByteArray(bgra),
+            BitmapPixelFormat.Bgra8, width, height, BitmapAlphaMode.Premultiplied);
     }
 
     /// <summary>按「繁中 → 简中 → 英文」的顺序，把本机真装了的语言各建一个引擎。</summary>
@@ -243,16 +273,20 @@ public sealed class BannerOcr
         catch { return null; }
     }
 
-    private static string Recognize(OcrEngine engine, string path)
+    private static SoftwareBitmap LoadBitmap(string path)
     {
         // 同步等异步：调用方在普通后台线程上，没有同步上下文，不会死锁。
         var file = StorageFile.GetFileFromPathAsync(Path.GetFullPath(path)).AsTask().GetAwaiter().GetResult();
         using var stream = file.OpenReadAsync().AsTask().GetAwaiter().GetResult();
         var decoder = BitmapDecoder.CreateAsync(stream).AsTask().GetAwaiter().GetResult();
-        using var bmp = decoder
+        return decoder
             .GetSoftwareBitmapAsync(BitmapPixelFormat.Bgra8, BitmapAlphaMode.Premultiplied)
             .AsTask().GetAwaiter().GetResult();
-        var r = engine.RecognizeAsync(bmp).AsTask().GetAwaiter().GetResult();
+    }
+
+    private static string Recognize(OcrEngine engine, SoftwareBitmap bitmap)
+    {
+        var r = engine.RecognizeAsync(bitmap).AsTask().GetAwaiter().GetResult();
         return r.Text.Replace('\n', ' ').Trim();
     }
 
@@ -313,6 +347,19 @@ public sealed class BannerOcr
         if (elim) return BannerKind.Elim;
         if (knock) return BannerKind.Knock;
         return BannerKind.Unknown;
+    }
+
+    internal static bool IsRankScoringText(string text)
+    {
+        if (string.IsNullOrEmpty(text)) return false;
+        var compact = new StringBuilder(text.Length);
+        foreach (char c in text)
+            if (char.IsLetterOrDigit(c)) compact.Append(char.ToUpperInvariant(c));
+        string words = compact.ToString().Replace('級', '级').Replace('確', '确');
+
+        return (words.Contains("定级", StringComparison.Ordinal) &&
+                (words.Contains("确定每次", StringComparison.Ordinal) || words.Contains("定级RP", StringComparison.Ordinal))) ||
+               (words.Contains("PLACEMENTRP", StringComparison.Ordinal) && words.Contains("COMBATRP", StringComparison.Ordinal));
     }
 
     /// <summary>简体字 → 繁体写法。两张表不如一张，判关键词时只看繁体字形。</summary>

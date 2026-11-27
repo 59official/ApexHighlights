@@ -285,7 +285,6 @@ internal static class Program
             }
 
             var profile = GameProfile.Load(GameProfile.ResolvePath(game));
-            var engine = new BannerEngine(profile);
 
             // 配置：--config= 指定，否则找数据目录下的 config.json（配额 + 阈值共用这一个文件）
             var cfgPath = args.FirstOrDefault(a => a.StartsWith("--config=", StringComparison.OrdinalIgnoreCase))?[9..]
@@ -294,12 +293,13 @@ internal static class Program
 
             // 检测阈值：命令行 --threshold= 优先（调试/回归用），否则读 config.json
             var detect = DetectPolicy.Load(cfgPath);
-            engine.SetHudScale(detect.HudScalePct);
             var thArg = args.FirstOrDefault(a => a.StartsWith("--threshold=", StringComparison.OrdinalIgnoreCase));
             if (thArg is not null && float.TryParse(thArg[12..], System.Globalization.NumberStyles.Float,
                     System.Globalization.CultureInfo.InvariantCulture, out var thv))
-                detect = DetectPolicy.Clamp(new DetectPolicy { Threshold = thv });
-            engine.Apply(detect);
+            {
+                detect.Threshold = thv;
+                DetectPolicy.Clamp(detect);
+            }
 
             // 录制参数（码率 + 音轨）：config.json 里的值先当底，命令行只覆盖它给过的那一项，
             // 然后把这个「最终生效值」同时喂给采集器和托盘菜单 —— 两边显示必须一致。
@@ -320,9 +320,14 @@ internal static class Program
             Console.WriteLine($"[2f] 成片目录 {Paths.Clips}{(capture.ClipsDir.Length == 0 ? "（默认）" : "")}（config.json 的 ClipsDir，托盘「片段目录」可改）");
             Console.WriteLine($"[2g] 击杀前 {capture.PreRollSec}s / 击杀后 {capture.PostRollSec}s（config.json 的 PreRollSec / PostRollSec，托盘「录制参数…」可调）");
 
-            return offline is not null
-                ? Offline(engine, offline.Length == 0 ? Path.Combine(Paths.DataRoot, "probe", "bands.bin") : offline)
-                : Live(engine, dump, title ?? (profile.WindowTitles.Length > 0 ? profile.WindowTitles[0] : profile.Name), logPath, fps, bitrate, encode, gop, fakeHit, duration, audio, beep, quota, tray, ui, traySelfTest, detect, cfgPath, ocr,
+            if (offline is not null)
+            {
+                var engine = new BannerEngine(profile);
+                engine.Apply(detect);
+                return Offline(engine, offline.Length == 0 ? Path.Combine(Paths.DataRoot, "probe", "bands.bin") : offline);
+            }
+
+            return Live(profile, dump, title ?? (profile.WindowTitles.Length > 0 ? profile.WindowTitles[0] : profile.Name), logPath, fps, bitrate, encode, gop, fakeHit, duration, audio, beep, quota, tray, ui, traySelfTest, detect, cfgPath, ocr,
                        int.TryParse(args.FirstOrDefault(a => a.StartsWith("--fake-repeat=", StringComparison.OrdinalIgnoreCase))?[14..], out var fr) && fr > 0 ? fr : 1,
                        int.TryParse(args.FirstOrDefault(a => a.StartsWith("--fake-gap=", StringComparison.OrdinalIgnoreCase))?[11..], out var fg) && fg > 0 ? fg : 700,
                        capture);
@@ -508,6 +513,14 @@ internal static class Program
 
         Console.WriteLine($"[1] 回顾库 {dir}");
         var form = new LibraryForm(new ClipLibrary(dir), policy);
+        form.OnPictureRequested = () =>
+        {
+            var detect = DetectPolicy.Load(cfgPath);
+            if (PictureForm.Edit(detect.Picture, null, form) is not { } settings) return;
+            detect.Picture = settings;
+            if (!detect.Save(cfgPath)) MessageBox.Show(form, "无法保存画面配置。", "ApexHighlights",
+                MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        };
         // 单开回顾库时没有托盘/采集器，但配置文件还在：改了目录就把 ClipsDir 写回去，下次托盘起来才认。
         var capture = CapturePolicy.Load(cfgPath);
         form.OnClipsDirRequested = d =>
@@ -726,9 +739,8 @@ internal static class Program
         _ => "关（片段无声）",
     };
 
-    private static int Live(BannerEngine engine, int dumpAtSec, string title, string? logPath, int fps, int bitrate, bool encode, int gop, int fakeHit, int durationSec, bool audio = true, bool beep = true, QuotaPolicy? quotaPolicy = null, bool tray = true, bool ui = false, int traySelfTest = 0, DetectPolicy? detectPolicy = null, string? cfgPath = null, bool ocr = true, int fakeRepeat = 1, int fakeGap = 700, CapturePolicy? capturePolicy = null)
+    private static int Live(GameProfile prof, int dumpAtSec, string title, string? logPath, int fps, int bitrate, bool encode, int gop, int fakeHit, int durationSec, bool audio = true, bool beep = true, QuotaPolicy? quotaPolicy = null, bool tray = true, bool ui = false, int traySelfTest = 0, DetectPolicy? detectPolicy = null, string? cfgPath = null, bool ocr = true, int fakeRepeat = 1, int fakeGap = 700, CapturePolicy? capturePolicy = null)
     {
-        var prof = engine.Profile;
         var quota = quotaPolicy ?? new QuotaPolicy();
         var detect = detectPolicy ?? new DetectPolicy { Threshold = 0 };
         var cfg = cfgPath ?? Paths.ConfigFile;
@@ -769,7 +781,7 @@ internal static class Program
         }
 
         Out($"[1] 目标窗口: \"{Native.TitleOf(hwnd)}\"");
-        using var cap = new Capture(hwnd, engine)
+        using var cap = new Capture(hwnd, prof, detect)
         {
             TargetFps = fps,
             EncodedFps = fps,
@@ -806,8 +818,8 @@ internal static class Program
             var rep = cap.RunQuotaCheck();
             if (rep is not null) Out($"[2d] 库 {cap.ClipDir}：{rep}");
         }
-        Out($"[2] 采集已启动 {cap.Width}x{cap.Height}；条带 {prof.Band.W}x{prof.Band.H}@{prof.Band.X},{prof.Band.Y}；采集 {fps}fps / 检测 10fps");
-        Out($"[3] 模板 {string.Join(",", prof.Templates.Select(t => $"{t.Id}({t.W}x{t.H}@{t.Threshold:F2})"))}；实际阈值 {cap.Threshold:F2}；命中存条带到 {cap.OutDir}");
+        Out($"[2] 采集已启动 {cap.Width}x{cap.Height}；{cap.Picture.Description}；采集 {fps}fps / 检测 10fps");
+        Out($"[3] 模板 {string.Join(",", prof.Templates.Select(t => $"{t.Id}({t.W}x{t.H}@{t.Threshold:F2})"))}；实际阈值 {cap.Threshold:F2}；命中存条带到 {cap.DiagnosticDir}");
         if (cap.Width < 1200) Out("[!] 窗口小于 1200 宽，检测走的缩放路径；游戏建议 2560x1440");
 
         var tick = 0;

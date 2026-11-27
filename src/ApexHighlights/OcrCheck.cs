@@ -19,7 +19,7 @@ internal static class OcrCheck
             return 2;
         }
 
-        var files = Directory.GetFiles(dir, "hit_*.bmp")
+        var files = CaptureDiagnostics.Files(dir, "hit_*.bmp")
             .OrderBy(p => p, StringComparer.Ordinal).ToList();
         Console.WriteLine($"[2] 找到 {files.Count} 张 hit_*.bmp");
         if (files.Count == 0) return 2;
@@ -35,15 +35,15 @@ internal static class OcrCheck
         Console.WriteLine();
 
         var sw = System.Diagnostics.Stopwatch.StartNew();
-        var rows = new List<(string Name, BannerKind Kind, string Text)>();
+        var rows = new List<(string Session, string Name, BannerKind Kind, string Text)>();
         foreach (var f in files)
         {
             var (kind, text) = ocr.Classify(f);
-            rows.Add((Path.GetFileNameWithoutExtension(f), kind, text));
+            rows.Add((Path.GetDirectoryName(f) ?? "", Path.GetFileNameWithoutExtension(f), kind, text));
         }
         sw.Stop();
 
-        foreach (var (name, kind, text) in rows)
+        foreach (var (_, name, kind, text) in rows)
             Console.WriteLine($"  {name,-22} [{BannerOcr.Label(kind),-5}] {Trim(text, 70)}");
 
         var recognized = rows.Count(r => r.Kind != BannerKind.Unknown);
@@ -59,14 +59,14 @@ internal static class OcrCheck
         // 合并模拟：与 Capture.ClipLoop 同一套判据 —— 命中间隔 ≤ MergeMs(8s) 的并成一段。
         // 这里用文案判重是**错的**（玩家名中英混排，OCR 每次读出的乱码都不一样），
         // 所以只按时间合并。
-        var groups = new List<List<(string Name, BannerKind Kind, string Text)>>();
+        var groups = new List<List<(string Session, string Name, BannerKind Kind, string Text)>>();
         foreach (var r in rows)
         {
             long ms = MsFromName(r.Name);
-            if (groups.Count > 0 && ms - MsFromName(groups[^1][^1].Name) <= 8000)
+            if (groups.Count > 0 && r.Session == groups[^1][^1].Session && ms - MsFromName(groups[^1][^1].Name) <= 8000)
                 groups[^1].Add(r);
             else
-                groups.Add(new List<(string, BannerKind, string)> { r });
+                groups.Add(new() { r });
         }
         Console.WriteLine();
         Console.WriteLine($"[6] 合并（相邻命中 ≤ 8s 并成一段）：{rows.Count} 次命中 → {groups.Count} 段");
@@ -81,8 +81,8 @@ internal static class OcrCheck
     private static long MsFromName(string name)
     {
         var parts = name.Split('_');
-        if (parts.Length >= 2 && long.TryParse(parts[1], out var sec)) return sec * 1000L;
-        return 0;
+        if (parts.Length < 2 || !long.TryParse(parts[1], out var sec)) return 0;
+        return sec * 1000 + (parts.Length == 4 && int.TryParse(parts[2], out int ms) ? ms : 0);
     }
 
     private static string Trim(string s, int n) => s.Length <= n ? s : s[..n] + "…";
