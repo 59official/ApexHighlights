@@ -100,6 +100,8 @@ internal static class PolicyTest
             fail += Check("乱填的缩放值退回「自动」", DetectPolicy.Load(cfg).HudScalePct == 0);
             fail += Check("档位表含 0/80/90/100/110/120", DetectPolicy.HudScales.Length == 6 && DetectPolicy.HudScales[0] == 0);
 
+            fail += CheckRingCleanup(dir);
+
             // ⑥ 菜单上四档/三档齐全，且默认档排第一
             fail += Check("音轨四档", CapturePolicy.AudioModes.Length == 4);
             fail += Check("音轨默认档排第一", CapturePolicy.AudioModes[0] == AudioMode.GameOnly);
@@ -153,6 +155,33 @@ internal static class PolicyTest
 
         Console.WriteLine(fail == 0 ? "[ok] 录制参数自检全过" : $"[X] 录制参数自检挂了 {fail} 条");
         return fail == 0 ? 0 : 1;
+    }
+
+    private static int CheckRingCleanup(string tempDir)
+    {
+        int fail = 0;
+        string root = Path.Combine(tempDir, "ring");
+        string crashed = Path.Combine(root, "session-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(crashed);
+        File.WriteAllText(Path.Combine(crashed, "owner.lock"), "");
+        File.WriteAllText(Path.Combine(crashed, "seg_000000.mp4"), "crashed");
+        string legacy = Path.Combine(root, "seg_000000.mp4");
+        string other = Path.Combine(root, "seg_notes.mp4");
+        File.WriteAllText(legacy, "legacy");
+        File.WriteAllText(other, "unrelated");
+
+        string active;
+        using (var ring = new SegmentRing(root, 1440, 1080))
+        {
+            fail += Check("启动时清理旧缓存和异常退出的分片", !File.Exists(legacy) && !Directory.Exists(crashed));
+            active = Directory.EnumerateDirectories(root, "session-*").First(path => path != crashed);
+            string live = Path.Combine(active, "seg_000000.mp4");
+            File.WriteAllText(live, "active");
+            using var next = new SegmentRing(root, 1440, 1080);
+            fail += Check("并行采集保留仍在使用的缓存", File.Exists(live));
+        }
+        fail += Check("退出清理本次缓存并保留其他文件", !Directory.Exists(active) && File.Exists(other));
+        return fail;
     }
 
     private static int Check(string what, bool ok)

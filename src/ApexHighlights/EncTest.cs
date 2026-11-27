@@ -15,7 +15,7 @@ internal static class EncTest
         var enc = new EncoderChain(w, h, 20_000_000, 60);
         Console.WriteLine($"[2] 选中 {enc.Name}（每 60 帧换编码器拿 IDR）");
 
-        var ring = new SegmentRing(ringDir, w, h, 120, fps: 60);
+        using var ring = new SegmentRing(ringDir, w, h, 120, fps: 60);
         var restartSw = new Stopwatch();
         int restarts = 0;
         var bgra = new byte[w * h * 4];
@@ -64,8 +64,9 @@ internal static class EncTest
         if (ring.Segments.Count == 0) { Console.WriteLine("[X] 一段都没落盘"); return 3; }
 
         var gaps = new List<long>();
-        for (int i = 1; i < ring.Segments.Count; i++)
-            gaps.Add(ring.Segments[i].StartUs - ring.Segments[i - 1].StartUs);
+        var segments = ring.Segments;
+        for (int i = 1; i < segments.Count; i++)
+            gaps.Add(segments[i].StartUs - segments[i - 1].StartUs);
         Console.WriteLine($"[6] 段间隔 us: {string.Join(", ", gaps.Select(g => (g / 1000.0).ToString("F0") + "ms"))}");
 
         var clip = ring.BuildClip(0, long.MaxValue);

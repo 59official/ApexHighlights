@@ -822,7 +822,7 @@ internal sealed class Capture : IDisposable
 
     private void OnFrame()
     {
-        if (!Monitor.TryEnter(_gate)) return;
+        if (_stop || !Monitor.TryEnter(_gate)) return;
         try
         {
             using var frame = _pool!.TryGetNextFrame();
@@ -1195,7 +1195,7 @@ internal sealed class Capture : IDisposable
     /// <summary>按前摇/后摇从环形里切一片出来写成 mp4。片段范围是 [首命中−前摇, 末命中+后摇]。</summary>
     private (string? Path, long Bytes) WriteClip(Detection det, long firstMs, long lastMs)
     {
-        if (_ring is null || _ring.Segments.Count == 0) return (null, 0);
+        if (_ring is null || _ring.SegmentCount == 0) return (null, 0);
         try
         {
             var (coverFrom, coverTo) = _ring.Coverage();
@@ -1321,7 +1321,7 @@ internal sealed class Capture : IDisposable
         if (enc is not null)
         {
             s += $" 编码={_encoded} 丢帧={_droppedFrames}(限{_limiterDrops}/池{_capDrops}/队{_queueDrops}) 建池={_poolCreated} 编码器丢={enc.Dropped}";
-            if (_ring is not null) s += $" 环={_ring.Segments.Count}段/{_ring.Coverage()}";
+            if (_ring is not null) s += $" 环={_ring.SegmentCount}段/{_ring.Coverage()}";
             s += $" 码率={Bitrate / 1_000_000}Mbps 编码={enc.Name} 旋={enc.Rotations} gop[{NvEncoder.GopInfo}] q[{NvEncoder.QualityInfo}]";
         }
         if (_aRing is not null)
@@ -1349,24 +1349,48 @@ internal sealed class Capture : IDisposable
         _stop = true;
         _audioFillRun = false;      // 静音补齐线程自己会退出（它每 20ms 看一次这个标志）
         try { _queue.CompleteAdding(); } catch { }
-        // 退出前把还没切完的片段切掉（后摇可能没录满，但前摇画面不能浪费）
-        try { FlushPending(); } catch { }
         try { _session?.Dispose(); } catch { }
         try { _pool?.Dispose(); } catch { }
+        try { _encThread?.Join(2000); } catch { }
+        if (_encThread?.IsAlive != true)
+        {
+            try { _ring?.Flush(); } catch { }
+        }
+        // 退出前把还没切完的片段切掉（后摇可能没录满，但前摇画面不能浪费）
+        try { FlushPending(); } catch { }
         try { _wcap?.Dispose(); } catch { }
         try { _mic?.Dispose(); } catch { }
-        try { _ring?.Flush(); } catch { }
         try { _enc?.Dispose(); } catch { }
         try { _aac?.Dispose(); } catch { }
-        try { _encThread?.Join(2000); } catch { }
         try { _audioFill?.Join(1000); } catch { }
         try { _clipThread?.Join(2000); } catch { }
+        ReleaseRing();
         _converter?.Dispose();
         foreach (var t in _texPool) try { t.Dispose(); } catch { }
         _bandStaging?.Dispose();
         _dumpStaging?.Dispose();
         _ctx?.Dispose();
         _dev?.Dispose();
+    }
+
+    private void ReleaseRing()
+    {
+        if (_ring is not { } ring) return;
+        var encoder = _encThread;
+        var clip = _clipThread;
+        if (encoder?.IsAlive != true && clip?.IsAlive != true)
+        {
+            ring.Dispose();
+            return;
+        }
+
+        // 落盘较慢时，等仍在使用旧缓存的线程收尾后再删分片。
+        _ = Task.Run(() =>
+        {
+            if (encoder?.IsAlive == true) encoder.Join();
+            if (clip?.IsAlive == true) clip.Join();
+            ring.Dispose();
+        });
     }
 }
 
