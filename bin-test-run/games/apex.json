@@ -1,0 +1,38 @@
+{
+  "id": "apex",
+  "name": "Apex Legends",
+  "windowTitles": [
+    "Apex Legends"
+  ],
+  "refWidth": 2560,
+  "refHeight": 1440,
+  "band": {
+    "x": 640,
+    "y": 1000,
+    "w": 1280,
+    "h": 120
+  },
+  "minGapMs": 500,
+  "preRollSec": 30,
+  "postRollSec": 5,
+  "templates": [
+    {
+      "id": "knock_en",
+      "label": "击倒（英文横幅）",
+      "file": "apex/knock.png",
+      "threshold": 0.6
+    },
+    {
+      "id": "knock_zhtw",
+      "label": "击倒（繁中横幅）",
+      "file": "apex/knock-zhtw.png",
+      "threshold": 0.6
+    },
+    {
+      "id": "knock_zhcn",
+      "label": "击倒（简中横幅）",
+      "file": "apex/knock-zhcn.png",
+      "threshold": 0.6
+    }
+  ]
+}

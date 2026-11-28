@@ -9,7 +9,7 @@
 
 **WGC 抓窗口 → 常驻环形缓冲 → 画面里那块 "KNOCKED DOWN" banner 触发 → 往前回取固定前摇 → 落盘成片 → 本地回顾库。**
 
-不做注入、不读内存、不走 Overwolf GEP、不做 OCR、不靠音频判定。
+不做注入、不读内存、不走 Overwolf GEP、不做 OCR（0.8.24 起例外：命中后会读顶部 HUD 判断是否在观战/赛后，仅此一用）、不靠音频判定。
 
 ---
 
@@ -136,7 +136,7 @@ OBS 给不了或代价太大：
 
 **性能**：1280×120 条带 **6.5–9.5 ms/帧**（原生路径，C# SIMD，实测 9.5 ms）；10fps 下 ≈ 10% 单核。
 
-**诊断开关**：`live.log.csv` 逐帧记录 `t_ms,score,x,y`；`near_*.bmp` 保存分数落在 `[当前阈值-0.15, 当前阈值)` 的条带（每次 ≥2s 一条，上限 40 个），用于事后判断“漏检是因为没到阈值、还是横幅压根没出现”。近失阈值跟着命中阈值走：阈值调到 0.90 时还按 0.45 采样会存一堆没用的图，调到 0.55 时 0.45 又太低。
+**诊断开关**：`live.log.csv` 逐帧记录 `t_ms,score,x,y`；`captures/diagnostics/session-*/near_*.bmp` 保存分数落在 `[当前阈值-0.15, 当前阈值)` 的条带（每次 ≥2s 一条，上限 40 个），用于事后判断“漏检是因为没到阈值、还是横幅压根没出现”。近失阈值跟着命中阈值走：阈值调到 0.90 时还按 0.45 采样会存一堆没用的图，调到 0.55 时 0.45 又太低。
 
 ### 3.5 检测灵敏度可自调（2026-10-28 已实现）
 
@@ -160,7 +160,7 @@ OBS 给不了或代价太大：
 
 **写盘只改一个字段**：`DetectPolicy.Save` 用 `JsonObject` 读出原文件、只覆写 `Threshold`，配额那几项原样保留——整体重写会把用户手改过的注释/字段顺序/未知字段全冲掉。
 
-**调阈值之后怎么自证没调坏**：录制时命中/近失都会把条带存成 `captures/hit_*.bmp`、`near_*.bmp`，文件名里带当时分数。`--band-check` 把这些图重跑一遍检测器，输出每个阈值下「命中几张 / 挡掉几张 / 挡掉的是谁」。2026-10-28 的回归数据：
+**调阈值之后怎么自证没调坏**：录制时命中/近失都会把条带存成 `captures/diagnostics/session-*/hit_*.bmp`、`near_*.bmp`（保留 7 天，启动采集时与每小时各清一次），文件名里带当时分数。`--band-check` 把这些图重跑一遍检测器，输出每个阈值下「命中几张 / 挡掉几张 / 挡掉的是谁」。2026-10-28 的回归数据：
 
 | 阈值 | 命中 | 挡掉 |
 |---|---|---|
@@ -380,7 +380,7 @@ NCC 只能回答「像不像击倒横幅」，回答不了「这是哪一种」�
 | `Detector.cs` | 同上（配置驱动，模板/阈值来自 `games/*.json`）；`DetectPolicy.cs` 保存用户覆盖的阈值 |
 | `Encoder.cs` / `EncoderChain.cs` | NVENC MFT（事件驱动 601/602）+ `ICodecAPI` 定 GOP；全程单会话，不重建 |
 | `Nv12.cs` | BGRA → NV12（标量实现 ~2.4ms/帧@1440p） |
-| `Ring.cs` / `AudioRing.cs` | 视频 1s fMP4 分片环 + 音频内存环（`Append` / `Coverage` / `BuildClip`） |
+| `Ring.cs` / `AudioRing.cs` | 视频 1s fMP4 分片环（每次采集一个 `ring/session-*/` + `owner.lock`，退出即清，上次残留的启动时清）+ 音频内存环（`Append` / `Coverage` / `BuildClip`） |
 | `Wasapi.cs` / `AacEncoder.cs` | WASAPI loopback 采集 + Microsoft AAC MFT（48kHz/2ch/160k）/ ASC 提取 |
 | `Mp4.cs` / `Mp4Writer.cs` | 自己写的 MP4 封装（`ftyp` 主品牌必须是 `isom`，否则 MF 拒收）；单文件双轨 `avc1` + `mp4a` |
 | `Beep.cs` | 落盘提示音（现场合成 WAV + `winmm.PlaySound`，不弹窗） |
@@ -389,6 +389,9 @@ NCC 只能回答「像不像击倒横幅」，回答不了「这是哪一种」�
 | `BannerOcr.cs` / `OcrCheck.cs` | 横幅 OCR 分类（击倒/再次击倒/助攻击倒/小队淘汰/助攻淘汰，5 类）+ 分类回归自检（拿真实对局条带重跑，验证种类判定与合并窗口） |
 | `Mp4Probe.cs` / `ShellThumb.cs` | 列表用的轻量元数据读取（纯 box 树，不开 MF）+ Explorer 缩略图 |
 | `LibraryForm.cs` / `TrayApp.cs` / `AppIcon.cs` | 回顾库窗口（筛选/搜索/预览/删除/打开目录）+ 托盘常驻（状态/暂停/开库/退出） |
+| `PictureSettings.cs` / `PictureForm.cs` | 画面比例与横幅条带：读 Apex `videoconfig.txt` 的显示分辨率 → 按实际采集尺寸把条带扩成「能框住两种适配方式」的矩形；手动参考尺寸与近失图开关也在这一页 |
+| `CaptureDiagnostics.cs` | 诊断图落盘位置与保留期（`captures/diagnostics/session-*`，7 天，只清自己写的图） |
+| `SpectatorHud.cs` | 顶部 HUD 的观战/结算关键词判定（命中横幅但人在观战或赛后，就别录） |
 | `Paths.cs` | 可写路径的唯一来源（`--data=` → exe 同目录 → `%LOCALAPPDATA%`），并负责释放内嵌游戏配置 |
 | `Program.cs` | `--offline` 离线回放 / 实时模式 / `--fps=` `--bitrate=` `--gop=` `--fake-hit=` `--no-audio` `--no-beep` `--no-ocr` `--no-tray` `--ui` `--data=` `--config=` `--threshold=` |
 

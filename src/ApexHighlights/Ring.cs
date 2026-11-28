@@ -139,6 +139,7 @@ public sealed class SegmentRing : IDisposable
         List<string>? expired = null;
         lock (_segmentsGate)
         {
+            if (_segs.Count == 0) return;
             long newest = _segs[^1].EndUs;
             while (_segs.Count > 1 && newest - _segs[0].StartUs > _keepSeconds * 1_000_000L)
             {
@@ -179,21 +180,31 @@ public sealed class SegmentRing : IDisposable
                 !Guid.TryParseExact(dir.Name.AsSpan(SessionPrefix.Length), "N", out _) ||
                 (dir.Attributes & FileAttributes.ReparsePoint) != 0) continue;
 
-            // 仍在工作的录制器持有独占句柄。没有锁文件的目录可能正在创建。
-            FileStream owner;
-            try { owner = new FileStream(Path.Combine(dir.FullName, OwnerFile), FileMode.Open, FileAccess.ReadWrite, FileShare.None); }
+            // 仍在工作的录制器持有独占句柄；锁文件在、但打不开 → 别人正用着，跳过。
+            // 锁文件不在 → 上一版清到一半留下的目录（或者进程被杀），照样清；
+            // 以前这里直接 continue，这种目录会永远留在磁盘上。
+            FileStream? owner = null;
+            try
+            {
+                owner = new FileStream(Path.Combine(dir.FullName, OwnerFile), FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+            }
+            catch (FileNotFoundException)
+            {
+                // 没有锁：当它是死的，继续往下清
+            }
             catch (IOException) { continue; }
             catch (UnauthorizedAccessException) { continue; }
             ClearSession(dir.FullName, owner);
         }
     }
 
-    private static bool ClearSession(string dir, FileStream owner)
+    private static bool ClearSession(string dir, FileStream? owner)
     {
-        using (owner)
+        if (owner is not null)
         {
-            if (!ClearSegments(dir)) return false;
+            using (owner) { if (!ClearSegments(dir)) return false; }
         }
+        else if (!ClearSegments(dir)) return false;
         if (!TryDelete(Path.Combine(dir, OwnerFile))) return false;
         try { Directory.Delete(dir, recursive: false); }
         catch (IOException) { }  // 非空时保留目录里的其他文件
