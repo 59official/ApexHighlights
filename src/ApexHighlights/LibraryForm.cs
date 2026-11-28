@@ -34,6 +34,7 @@ public sealed class LibraryForm : Form
     private readonly CueTextBox _search = new();
     private readonly Label _status = new();
     private readonly Label _statusRight = new();
+    private ContextMenuStrip? _quotaMenu;
     private readonly HoverTip _tip = new();
 
     // 四条横带。位置全部由 LayoutBands 算，不参与任何自动布局。
@@ -47,6 +48,7 @@ public sealed class LibraryForm : Form
     private readonly RoundButton _btnDel = new("删除", 88);
     private readonly RoundButton _btnCancel = new("取消", 88) { Visible = false };
     private readonly RoundButton _btnParams = new("录制参数", 118);
+    private readonly RoundButton _btnPicture = new("画面配置", 108);
     /// <summary>头部那行小灰字：说清「录的是窗口尺寸」这件事，免得有人拿它跟游戏内分辨率较真。</summary>
     private readonly Label _sizeNote = new();
     private Panel? _searchPill, _thPill, _kindPill, _timePill;
@@ -184,6 +186,7 @@ public sealed class LibraryForm : Form
         _btnReveal.Click += (_, _) => RevealSelected();
         _btnDir.Click += (_, _) => PickClipsDir();
         _btnParams.Click += (_, _) => OnParamsRequested?.Invoke();
+        _btnPicture.Click += (_, _) => OnPictureRequested?.Invoke();
         _btnDel.Style = RoundButton.Look.Danger;
         _btnDel.Click += (_, _) =>
         {
@@ -211,6 +214,7 @@ public sealed class LibraryForm : Form
         _bar.Controls.Add(_btnReveal);
         _bar.Controls.Add(_btnDir);
         _bar.Controls.Add(_btnParams);
+        _bar.Controls.Add(_btnPicture);
         _bar.Controls.Add(_btnDel);
         _bar.Controls.Add(_btnCancel);
         _bar.Controls.Add(_kindPill);
@@ -333,6 +337,8 @@ public sealed class LibraryForm : Form
         _btnDir.SetBounds(z(238), btnY, z(118), z(38));
         _btnDel.SetBounds(z(364), btnY, z(_list.SelectMode ? 124 : 88), z(38));
         _btnParams.SetBounds(_btnDel.Right + z(10), btnY, z(118), z(38));
+        _btnPicture.Visible = !_list.SelectMode;
+        _btnPicture.SetBounds(_btnParams.Right + z(10), btnY, z(108), z(38));
         _btnCancel.SetBounds(_btnParams.Right + z(10), btnY, z(88), z(38));
         var timePill = _timePill!;
         var kindPill = _kindPill!;
@@ -492,39 +498,49 @@ public sealed class LibraryForm : Form
 
     /// <summary>用户点了工具条上的「录制参数」。宿主（托盘）负责把面板弹出来。</summary>
     public Action? OnParamsRequested;
+    public Action? OnPictureRequested;
 
     /// <summary>状态栏这一行的「点开就能改」菜单：两个子项组，和托盘里那套档位一致。</summary>
-    private void ShowQuotaMenu()
+    internal ContextMenuStrip ShowQuotaMenu()
     {
-        var menu = CreateQuotaMenu();
-        menu.Closed += (_, _) => menu.Dispose();
+        // WinForms 在 Closed 事件返回后还要完成关闭流程，因此菜单由回顾库窗口统一释放。
+        var menu = _quotaMenu ??= CreateQuotaMenu();
         menu.Show(_statusRight, new Point(_statusRight.Width, 0), ToolStripDropDownDirection.AboveLeft);
+        return menu;
     }
 
-    /// <summary>
-    /// 建出配额菜单但不弹出来——自检要能点它的子项，真 Show 出来会把模态焦点抢走。
-    /// </summary>
-    internal ContextMenuStrip CreateQuotaMenu()
+    private ContextMenuStrip CreateQuotaMenu()
     {
         var menu = new ContextMenuStrip { ShowImageMargin = false, Font = UiKit.F95 };
-        var capRoot = new ToolStripMenuItem("磁盘配额：" + QuotaPolicy.QuotaLabel(_policy.QuotaGb));
-        var keepRoot = new ToolStripMenuItem("保留天数：" + QuotaPolicy.RetainLabel(_policy.RetainDays));
+        var capRoot = new ToolStripMenuItem();
+        var keepRoot = new ToolStripMenuItem();
 
         foreach (var gb in QuotaPolicy.QuotaPresets)
         {
-            var it = new ToolStripMenuItem(QuotaPolicy.QuotaLabel(gb)) { Checked = gb == _policy.QuotaGb };
+            var it = new ToolStripMenuItem(QuotaPolicy.QuotaLabel(gb)) { Tag = gb };
             it.Click += (_, _) => OnQuotaChanged?.Invoke(gb, _policy.RetainDays);
             capRoot.DropDownItems.Add(it);
         }
         foreach (var days in QuotaPolicy.RetainPresets)
         {
-            var it = new ToolStripMenuItem(QuotaPolicy.RetainLabel(days)) { Checked = days == _policy.RetainDays };
+            var it = new ToolStripMenuItem(QuotaPolicy.RetainLabel(days)) { Tag = days };
             it.Click += (_, _) => OnQuotaChanged?.Invoke(_policy.QuotaGb, days);
             keepRoot.DropDownItems.Add(it);
         }
 
+        void RefreshOptions()
+        {
+            capRoot.Text = "磁盘配额：" + QuotaPolicy.QuotaLabel(_policy.QuotaGb);
+            keepRoot.Text = "保留天数：" + QuotaPolicy.RetainLabel(_policy.RetainDays);
+            foreach (var item in capRoot.DropDownItems.OfType<ToolStripMenuItem>())
+                item.Checked = item.Tag is int gb && gb == _policy.QuotaGb;
+            foreach (var item in keepRoot.DropDownItems.OfType<ToolStripMenuItem>())
+                item.Checked = item.Tag is int days && days == _policy.RetainDays;
+        }
+        menu.Opening += (_, _) => RefreshOptions();
         menu.Items.Add(capRoot);
         menu.Items.Add(keepRoot);
+        RefreshOptions();
         return menu;
     }
 
@@ -759,6 +775,7 @@ public sealed class LibraryForm : Form
     {
         if (disposing)
         {
+            _quotaMenu?.Dispose();
             _tip.Dispose();
         }
         base.Dispose(disposing);

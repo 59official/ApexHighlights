@@ -16,9 +16,7 @@ internal static class BandCheck
 {
     public static int Run(BannerEngine engine, string dir, float[]? thresholds = null)
     {
-        var files = Directory.Exists(dir)
-            ? Directory.GetFiles(dir, "*.bmp").OrderBy(f => f, StringComparer.OrdinalIgnoreCase).ToArray()
-            : Array.Empty<string>();
+        var files = CaptureDiagnostics.Files(dir, "*.bmp").OrderBy(f => f, StringComparer.OrdinalIgnoreCase).ToArray();
         if (files.Length == 0)
         {
             Console.WriteLine($"[X] {dir} 里没有 bmp");
@@ -34,27 +32,33 @@ internal static class BandCheck
         Console.WriteLine($"[2] 目录 {dir}，{files.Length} 张图");
         Console.WriteLine("[3] 逐张分数（文件名里的分数是当时实测值，用来交叉核对）");
 
-        var rows = new List<(string Name, string Full, float Score, float InName)>();
+        var rows = new List<(string Name, bool Legacy, float Score)>();
+        var engines = new Dictionary<(int Width, int Height), BannerEngine> { [(bw, bh)] = engine };
         foreach (var f in files)
         {
-            if (!TryLoadGray(f, bw, bh, out var gray, out var err))
+            if (!TryLoadGray(f, bw, bh, out var gray, out var size, out bool legacy, out var err))
             {
                 Console.WriteLine($"    {Path.GetFileName(f),-34} 读不出: {err}");
                 continue;
             }
-            var det = engine.Score(gray);
+            if (!engines.TryGetValue(size, out var scorer))
+            {
+                scorer = new BannerEngine(prof, size.Width, size.Height) { ThresholdOverride = engine.ThresholdOverride };
+                scorer.SetHudScale(engine.HudScalePct);
+                engines[size] = scorer;
+            }
+            var det = scorer.Score(gray);
             float inName = ParseScoreFromName(Path.GetFileName(f));
-            rows.Add((Path.GetFileName(f), f, det.Score, inName));
+            rows.Add((Path.GetFileName(f), legacy, det.Score));
             // 旧版 900 宽条带（2026-10-27 那批）取景位置和当时模板都跟现在不同，
             // 分数没法跟文件名对齐，只作参考、不参与阈值统计。
-            bool legacy = IsLegacyWidth(f, bw);
             string flag = legacy ? "" : inName > 0 && Math.Abs(inName - det.Score) > 0.02f ? "  [!] 与文件名不符" : "";
             if (legacy) flag = "  [旧条带]";
             Console.WriteLine($"    {Path.GetFileName(f),-34} score={det.Score:F3}  x={det.X},y={det.Y}  文件名={inName:F2}{flag}");
         }
 
-        Console.WriteLine("[4] 各阈值下会触发哪些（只统计当前条带尺寸的图）");
-        var live = rows.Where(r => !IsLegacyWidth(r.Full, bw)).ToList();
+        Console.WriteLine("[4] 各阈值下会触发哪些（排除历史窄条带）");
+        var live = rows.Where(r => !r.Legacy).ToList();
         foreach (var th in ths)
         {
             var on = live.Where(r => r.Score >= th).ToList();
@@ -71,17 +75,6 @@ internal static class BandCheck
         return 0;
     }
 
-    /// <summary>旧版 900 宽条带？</summary>
-    private static bool IsLegacyWidth(string path, int wantW)
-    {
-        try
-        {
-            using var bmp = new Bitmap(path);
-            return bmp.Width != wantW;
-        }
-        catch { return false; }
-    }
-
     private static float ParseScoreFromName(string name)
     {
         // hit_00828_0.98.bmp -> 0.98
@@ -93,20 +86,26 @@ internal static class BandCheck
             System.Globalization.CultureInfo.InvariantCulture, out var v) ? v : 0;
     }
 
-    /// <summary>把 24 位 BMP 读成灰度条带；尺寸不符就缩（历史图有 900 宽的）。</summary>
-    private static bool TryLoadGray(string path, int wantW, int wantH, out byte[] gray, out string err)
+    /// <summary>新版诊断图按留存时的条带尺寸复查，历史窄条带保留原有的偏移补齐。</summary>
+    private static bool TryLoadGray(string path, int wantW, int wantH, out byte[] gray,
+        out (int Width, int Height) size, out bool legacy, out string err)
     {
         gray = Array.Empty<byte>();
+        size = (wantW, wantH);
+        legacy = false;
         err = "";
         try
         {
             using var bmp = new Bitmap(path);
-            if (bmp.Height != wantH)
+            bool managed = CaptureDiagnostics.IsManagedImage(path);
+            if (managed) size = (bmp.Width, bmp.Height);
+            else if (bmp.Height != wantH)
             {
                 Console.WriteLine($"    [!] {Path.GetFileName(path)} 是 {bmp.Width}x{bmp.Height}，高度与条带 {wantH} 不符，跳过");
                 err = "尺寸不符";
                 return false;
             }
+            legacy = !managed && bmp.Width != wantW;
             using var buf = new Bitmap(bmp.Width, bmp.Height, PixelFormat.Format24bppRgb);
             using (var g = Graphics.FromImage(buf)) g.DrawImage(bmp, 0, 0, bmp.Width, bmp.Height);
             var rect = new Rectangle(0, 0, buf.Width, buf.Height);
@@ -115,31 +114,16 @@ internal static class BandCheck
             {
                 var raw = new byte[data.Stride * buf.Height];
                 Marshal.Copy(data.Scan0, raw, 0, raw.Length);
-                if (buf.Width == wantW)
-                {
-                    gray = new byte[wantW * wantH];
-                    for (int y = 0; y < wantH; y++)
-                        for (int x = 0; x < wantW; x++)
-                        {
-                            int i = y * data.Stride + x * 3;
-                            gray[y * wantW + x] = (byte)((raw[i] + raw[i + 1] + raw[i + 2]) / 3);
-                        }
-                }
-                else
-                {
-                    // 老版本用 900 宽条带（取景 x=900 起），新条带 x=640 起 → 往右挪 260。
-                    // 不能缩放：缩放过模板尺寸和内容都会变，分数没有可比性。
-                    int pad = 260;
-                    gray = new byte[wantW * wantH];
-                    for (int y = 0; y < wantH; y++)
-                        for (int x = 0; x < wantW; x++)
-                        {
-                            int sx = x - pad;
-                            if (sx < 0 || sx >= buf.Width) continue;
-                            int i = y * data.Stride + sx * 3;
-                            gray[y * wantW + x] = (byte)((raw[i] + raw[i + 1] + raw[i + 2]) / 3);
-                        }
-                }
+                // 旧 900 宽条带从 x=900 起，比 1280 宽条带晚 260 像素。
+                int pad = legacy ? 260 : 0;
+                gray = new byte[checked(size.Width * size.Height)];
+                int copyWidth = Math.Min(size.Width - pad, buf.Width);
+                for (int y = 0; y < size.Height; y++)
+                    for (int x = 0; x < copyWidth; x++)
+                    {
+                        int i = y * data.Stride + x * 3;
+                        gray[y * size.Width + x + pad] = (byte)((raw[i] + raw[i + 1] + raw[i + 2]) / 3);
+                    }
             }
             finally { buf.UnlockBits(data); }
             return true;

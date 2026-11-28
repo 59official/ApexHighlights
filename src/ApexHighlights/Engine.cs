@@ -36,6 +36,7 @@ public sealed class GameProfile
         var p = JsonSerializer.Deserialize<GameProfile>(File.ReadAllText(jsonPath), JsonOptions)
                 ?? throw new InvalidDataException($"配置解析失败: {jsonPath}");
         if (p.Templates.Count == 0) throw new InvalidDataException("配置里没有 templates");
+        if (p.RefWidth <= 0 || p.RefHeight <= 0) throw new InvalidDataException("基准分辨率无效");
         if (p.Band.W <= 0 || p.Band.H <= 0) throw new InvalidDataException("band 尺寸无效");
         p.BaseDir = Path.GetDirectoryName(Path.GetFullPath(jsonPath))!;
         return p;
@@ -139,11 +140,13 @@ public sealed class BannerEngine
         SetHudScale(policy.HudScalePct);
     }
 
-    public BannerEngine(GameProfile profile)
+    public BannerEngine(GameProfile profile) : this(profile, profile.Band.W, profile.Band.H) { }
+
+    internal BannerEngine(GameProfile profile, int bandWidth, int bandHeight)
     {
         Profile = profile;
-        _bw = profile.Band.W;
-        _bh = profile.Band.H;
+        _bw = bandWidth;
+        _bh = bandHeight;
         foreach (var t in profile.Templates)
         {
             var path = Path.IsPathRooted(t.File) ? t.File : Path.Combine(profile.BaseDir, t.File);

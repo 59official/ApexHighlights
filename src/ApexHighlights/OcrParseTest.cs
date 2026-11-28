@@ -42,8 +42,73 @@ internal static class OcrParseTest
         Case("噪声·队友名", "一点不舒服", BannerKind.Unknown);
         Case("噪声·空", "", BannerKind.Unknown);
 
+        RankCase("并 确 定 每 次 击 定 级 16 + 0 15", true);
+        RankCase("定級 RP 0 5 10", true);
+        RankCase("Placement RP 0 5 Combat RP 10 12", true);
+        RankCase("击倒 对手 +150 造成 185 点伤害", false);
+
+        SpectatorCase("排 位 实 况 总 结 观 战 小 队", true);
+        SpectatorCase("排位 总结 观战", true);
+        SpectatorCase("排位 总结", true);
+        SpectatorCase("實況 觀戰 小隊", true);
+        SpectatorCase("等待恢復中 74.2", true);
+        SpectatorCase("Waiting for Respawn 74.2", true);
+        SpectatorCase("SPECTATE  DEATH RECAP", true);
+        SpectatorCase("排位 14 剩余小队数量 34", false);
+        SpectatorCase("实况", false);
+        SpectatorCase("击倒 对手 +150 造成 185 点伤害", false);
+
+        ReviewCases();
+
         Console.WriteLine(_fail == 0 ? "[ok] 横幅分类三语自检全过" : $"[X] 横幅分类自检 {_fail} 条不过");
         return _fail == 0 ? 0 : 1;
+    }
+
+    private static void ReviewCases()
+    {
+        var review = new Capture.BannerReview(1000, 474, 4);
+        review.Observe(1200, true, 474, 4, [0]);
+        review.Observe(1350, true, 610, 70, [0]);
+        ReviewCase("忽略渐入时和错位的帧", review.First is null);
+        review.Observe(1410, true, 475, 4, [1]);
+        review.Observe(1690, true, 474, 5, [2]);
+        ReviewCase("同一次命中保留两帧", review.Complete && review.First is [1] && review.Second is [2]);
+
+        (BannerKind Kind, string Text) Read(byte[] band)
+        {
+            string text = band[0] == 1 ? "击 倒 对手" : "助 攻 ， 击 倒 对手 +100";
+            return (BannerOcr.Parse(text), text);
+        }
+        ReviewCase("单次命中首帧空白，补读成助攻击倒",
+            review.Refine((BannerKind.Unknown, ""), Read).Kind == BannerKind.AssistKnock);
+        ReviewCase("普通击倒初判允许升级为助攻击倒",
+            review.Refine((BannerKind.Knock, "击倒 对手"), Read).Kind == BannerKind.AssistKnock);
+        ReviewCase("排位评分仍交给排位过滤",
+            review.Refine((BannerKind.Unknown, "定级 RP 0 5 10"), Read).Kind == BannerKind.Unknown);
+
+        var expired = new Capture.BannerReview(1000, 474, 4);
+        expired.Observe(1900, true, 474, 4, [2]);
+        ReviewCase("采样窗口到期后结束", expired.Complete && expired.First is null && expired.Second is null);
+    }
+
+    private static void ReviewCase(string what, bool passed)
+    {
+        Console.WriteLine($"    {(passed ? "ok" : "NG")} 横幅补读：{what}");
+        if (!passed) _fail++;
+    }
+
+    private static void RankCase(string text, bool want)
+    {
+        bool passed = BannerOcr.IsRankScoringText(text) == want;
+        Console.WriteLine($"    {(passed ? "ok" : "NG")} RP 界面判定：{text}");
+        if (!passed) _fail++;
+    }
+
+    private static void SpectatorCase(string text, bool want)
+    {
+        bool passed = SpectatorHud.HasSpectatorText(text) == want;
+        Console.WriteLine($"    {(passed ? "ok" : "NG")} 观战界面判定：{text}");
+        if (!passed) _fail++;
     }
 
     private static void Case(string what, string text, BannerKind want)

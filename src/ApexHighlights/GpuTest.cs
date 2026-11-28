@@ -24,7 +24,7 @@ internal static class GpuTest
         var enc = new EncoderChain(w, h, 20_000_000, 60, 60, dev, codec);
         Console.WriteLine($"[2] 选中 {enc.Name}（每 60 帧换编码器拿 IDR）");
 
-        var ring = new SegmentRing(ringDir, w, h, 120, codec, 60);
+        using var ring = new SegmentRing(ringDir, w, h, 120, codec, 60);
         Console.WriteLine($"[2a] ring ok  codec={VideoCodecs.Label(codec)} q[{NvEncoder.QualityInfo}] gop[{NvEncoder.GopInfo}]");
 
         // BGRA 输入：dynamic 上传纹理填数据 → default 纹理（VideoProcessor 输入）
@@ -121,7 +121,7 @@ internal static class GpuTest
         Console.WriteLine($"[9] MF 回读 clip.mp4: {(Mp4Check.Run(clipPath, requireAudio: false) == 0 ? "ok" : "失败")}");
         Console.WriteLine($"[8] 码率 {(bytes * 8.0 / Math.Max(1, frames) * 60 / 1e6):F1} Mbps");
 
-        staging.Dispose(); src.Dispose(); dst.Dispose(); ring.Dispose(); enc.Dispose(); converter.Dispose(); ctx.Dispose(); dev.Dispose();
+        staging.Dispose(); src.Dispose(); dst.Dispose(); enc.Dispose(); converter.Dispose(); ctx.Dispose(); dev.Dispose();
         return 0;
     }
 

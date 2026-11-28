@@ -100,6 +100,73 @@ internal static class PolicyTest
             fail += Check("乱填的缩放值退回「自动」", DetectPolicy.Load(cfg).HudScalePct == 0);
             fail += Check("档位表含 0/80/90/100/110/120", DetectPolicy.HudScales.Length == 6 && DetectPolicy.HudScales[0] == 0);
 
+            var settings = DetectPolicy.Load(cfg);
+            fail += Check("老配置自动读取 Apex 分辨率，近失图默认关",
+                settings.Picture.Source == PictureSource.ApexConfig && !settings.Picture.SaveNearFrames);
+            reread.Save(cfg);
+            settings.Picture = new PictureSettings { Source = PictureSource.Manual, Width = 1920, Height = 1200, SaveNearFrames = true };
+            fail += Check("手动画面配置可以保存并回读", settings.Save(cfg) &&
+                DetectPolicy.Load(cfg).Picture == settings.Picture && CapturePolicy.Load(cfg).Audio == reread.Audio);
+            File.WriteAllText(cfg, "{\"Threshold\":0.63,\"Picture\":{\"Source\":\"invalid\"}}");
+            var badPicture = DetectPolicy.Load(cfg);
+            fail += Check("坏画面配置独立回退，检测阈值保留", badPicture.Picture.Source == PictureSource.ApexConfig &&
+                Math.Abs(badPicture.Threshold - 0.63f) < 1e-6f);
+
+            var apexSize = ApexVideoConfig.Parse(new[]
+            {
+                "\"setting.last_display_width\" \"2560\" // 尺寸",
+                "\"SETTING.LAST_DISPLAY_HEIGHT\" \"1600\"",
+                "\"setting.defaultres\" \"1920\"", "\"setting.defaultresheight\" \"1080\"",
+            });
+            fail += Check("Apex 使用完整有效的 last_display 宽高对", apexSize?.Size == new PictureSize(2560, 1600));
+            var fallbackSize = ApexVideoConfig.Parse(new[]
+            {
+                "\"setting.last_display_width\" \"2560\"", "\"setting.last_display_height\" \"0\"",
+                "\"setting.defaultres\" \"1920\"", "\"setting.defaultresheight\" \"1080\"",
+            });
+            fail += Check("无效 last_display 回退到 defaultres 宽高对", fallbackSize?.Size == new PictureSize(1920, 1080));
+
+            var profile = new GameProfile { Id = "apex" };
+            var captured = new PictureSize(2560, 1440);
+            var automatic = PictureLayout.Resolve(profile, captured, new PictureSettings(), apexSize);
+            fail += Check("16:10 提示保留 16:9 采集宽高，检测区包含旧区域和 y=984 的横幅",
+                automatic.Capture == captured && automatic.Game == apexSize?.Size &&
+                automatic.Band.Y <= 984 && automatic.Band.Y + automatic.Band.H >= 1120);
+            var missing = PictureLayout.Resolve(profile, captured, new PictureSettings(), null);
+            fail += Check("找不到游戏配置时使用窗口尺寸，扩展默认上沿", missing.Game == captured &&
+                missing.Band.Y == 960 && missing.Band.H == 160);
+            var manual = PictureLayout.Resolve(profile, captured, settings.Picture, fallbackSize);
+            fail += Check("手动尺寸优先", manual.Game == new PictureSize(1920, 1200));
+
+            var fourThree = new PictureSettings { Source = PictureSource.Manual, Width = 1440, Height = 1080 };
+            var nativeNarrow = PictureLayout.Resolve(profile, new PictureSize(1440, 1080), fourThree, null);
+            fail += Check("原生 4:3 横纵等比归一化，覆盖上偏横幅",
+                nativeNarrow.BandRefWidth == 1920 && nativeNarrow.Band.X <= 320 &&
+                nativeNarrow.Band.X + nativeNarrow.Band.W >= 1600 && nativeNarrow.Band.Y <= 930);
+            var wideWindow = PictureLayout.Resolve(profile, captured, fourThree, null);
+            fail += Check("4:3 游戏参考和 16:9 采集窗口并存时扩展搜索范围",
+                wideWindow.Capture == captured && wideWindow.BandRefWidth == profile.RefWidth &&
+                wideWindow.Band.X < automatic.Band.X && wideWindow.Band.Y < automatic.Band.Y &&
+                wideWindow.Band.Y + wideWindow.Band.H >= automatic.Band.Y + automatic.Band.H);
+
+            var diagnosticDir = CaptureDiagnostics.SessionDir(dir, CaptureDiagnostics.NewSessionId());
+            Directory.CreateDirectory(diagnosticDir);
+            var expired = Path.Combine(diagnosticDir, CaptureDiagnostics.ImageName("near", 1000, 0.59f));
+            var recent = Path.Combine(diagnosticDir, CaptureDiagnostics.ImageName("hit", 1310, 0.84f));
+            var existing = Path.Combine(dir, "near_00001_0.59.bmp");
+            var unrelated = Path.Combine(diagnosticDir, "screenshot.bmp");
+            var now = DateTime.UtcNow;
+            foreach (var file in new[] { expired, recent, existing, unrelated })
+            {
+                File.WriteAllText(file, "test");
+                if (file != recent) File.SetLastWriteTimeUtc(file, now.AddDays(-8));
+            }
+            CaptureDiagnostics.Prune(dir, now);
+            fail += Check("只清理新版目录中已过期的匹配诊断图",
+                !File.Exists(expired) && File.Exists(recent) && File.Exists(existing) && File.Exists(unrelated));
+            fail += Check("条带复查同时找到新旧诊断图", CaptureDiagnostics.Files(dir, "*.bmp").Count() == 2);
+            fail += CheckRingCleanup(dir);
+
             // ⑥ 菜单上四档/三档齐全，且默认档排第一
             fail += Check("音轨四档", CapturePolicy.AudioModes.Length == 4);
             fail += Check("音轨默认档排第一", CapturePolicy.AudioModes[0] == AudioMode.GameOnly);
@@ -153,6 +220,33 @@ internal static class PolicyTest
 
         Console.WriteLine(fail == 0 ? "[ok] 录制参数自检全过" : $"[X] 录制参数自检挂了 {fail} 条");
         return fail == 0 ? 0 : 1;
+    }
+
+    private static int CheckRingCleanup(string tempDir)
+    {
+        int fail = 0;
+        string root = Path.Combine(tempDir, "ring");
+        string crashed = Path.Combine(root, "session-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(crashed);
+        File.WriteAllText(Path.Combine(crashed, "owner.lock"), "");
+        File.WriteAllText(Path.Combine(crashed, "seg_000000.mp4"), "crashed");
+        string legacy = Path.Combine(root, "seg_000000.mp4");
+        string other = Path.Combine(root, "seg_notes.mp4");
+        File.WriteAllText(legacy, "legacy");
+        File.WriteAllText(other, "unrelated");
+
+        string active;
+        using (var ring = new SegmentRing(root, 1440, 1080))
+        {
+            fail += Check("启动时清理旧缓存和异常退出的分片", !File.Exists(legacy) && !Directory.Exists(crashed));
+            active = Directory.EnumerateDirectories(root, "session-*").First(path => path != crashed);
+            string live = Path.Combine(active, "seg_000000.mp4");
+            File.WriteAllText(live, "active");
+            using var next = new SegmentRing(root, 1440, 1080);
+            fail += Check("并行采集保留仍在使用的缓存", File.Exists(live));
+        }
+        fail += Check("退出清理本次缓存并保留其他文件", !Directory.Exists(active) && File.Exists(other));
+        return fail;
     }
 
     private static int Check(string what, bool ok)

@@ -279,8 +279,7 @@ internal static class UiTest
     /// 另外勾选是按路径存的 —— 重建行之后下标全变，所以这里连 SetClips 之后的重建也一并盯着。
     /// </summary>
     /// <summary>
-    /// 状态栏「配额 / 保留」那一行点开的菜单：档位齐不齐、点了之后有没有把用户的选择交给宿主。
-    /// 建菜单时不 Show（真弹出来会抢焦点，把后面的断言搅乱）。
+    /// 验证状态栏的配额菜单能选中、关闭，再打开后仍可使用。
     /// </summary>
     private static int QuotaMenuCheck(ClipLibrary lib)
     {
@@ -290,12 +289,22 @@ internal static class UiTest
             try
             {
                 var policy = new QuotaPolicy { QuotaGb = 40, RetainDays = 30 };
-                using var form = new LibraryForm(lib, policy);
+                using var form = new LibraryForm(lib, policy)
+                {
+                    StartPosition = FormStartPosition.Manual,
+                    Location = new Point(-4000, -4000),
+                    ShowInTaskbar = false,
+                };
                 long gotQuota = -1;
                 int gotRetain = -1;
-                form.OnQuotaChanged = (gb, days) => { gotQuota = gb; gotRetain = days; };
+                form.OnQuotaChanged = (gb, days) =>
+                {
+                    gotQuota = policy.QuotaGb = gb;
+                    gotRetain = policy.RetainDays = days;
+                };
 
-                using var menu = form.CreateQuotaMenu();
+                form.Show();
+                var menu = form.ShowQuotaMenu();
                 if (menu.Items.Count != 2 || menu.Items[0] is not ToolStripMenuItem cap || menu.Items[1] is not ToolStripMenuItem keep)
                 { Console.WriteLine($"    BAD 配额菜单顶层项数 = {menu.Items.Count}（应为 2）"); fail++; return; }
 
@@ -307,18 +316,29 @@ internal static class UiTest
                 var sixty = cap.DropDownItems.OfType<ToolStripMenuItem>()
                     .FirstOrDefault(i => i.Text == QuotaPolicy.QuotaLabel(60));
                 if (sixty is null) { Console.WriteLine("    BAD 找不到 60GB 档"); fail++; return; }
+                cap.ShowDropDown();
                 sixty.PerformClick();
+                menu.Close();
+                if (menu.IsDisposed)
+                { Console.WriteLine("    BAD 关闭下拉菜单后对象已被释放"); fail++; return; }
                 if (gotQuota != 60 || gotRetain != 30)
                 { Console.WriteLine($"    BAD 点 60GB 传出去是 ({gotQuota}, {gotRetain})，应为 (60, 30)"); fail++; }
                 else Console.WriteLine("    ok  点「60GB」→ 宿主收到 (60, 30)");
 
+                if (!ReferenceEquals(menu, form.ShowQuotaMenu()) || !sixty.Checked)
+                { Console.WriteLine("    BAD 重开配额菜单后没有复用并勾选新配额"); fail++; return; }
                 var week = keep.DropDownItems.OfType<ToolStripMenuItem>()
                     .FirstOrDefault(i => i.Text == QuotaPolicy.RetainLabel(7));
                 if (week is null) { Console.WriteLine("    BAD 找不到 7 天档"); fail++; return; }
+                keep.ShowDropDown();
                 week.PerformClick();
-                if (gotQuota != 40 || gotRetain != 7)
-                { Console.WriteLine($"    BAD 点「7 天」传出去是 ({gotQuota}, {gotRetain})，应为 (40, 7)"); fail++; }
-                else Console.WriteLine("    ok  点「7 天」→ 宿主收到 (40, 7)");
+                menu.Close();
+                if (gotQuota != 60 || gotRetain != 7)
+                { Console.WriteLine($"    BAD 点「7 天」传出去是 ({gotQuota}, {gotRetain})，应为 (60, 7)"); fail++; }
+                else Console.WriteLine("    ok  点「7 天」→ 宿主收到 (60, 7)");
+
+                form.Close();
+                if (!menu.IsDisposed) { Console.WriteLine("    BAD 回顾库关闭后未释放配额菜单"); fail++; }
             }
             catch (Exception ex)
             {

@@ -10,14 +10,20 @@ public readonly record struct SegmentRef(int Seq, long StartUs, long EndUs, stri
 ///   Segments              → 当前保留下来的段
 ///   BuildClip(startUs, endUs) → 可播放的 fMP4 字节流
 /// </summary>
-public sealed class SegmentRing
+public sealed class SegmentRing : IDisposable
 {
+    private const string SessionPrefix = "session-";
+    private const string OwnerFile = "owner.lock";
     private readonly string _dir;
+    private FileStream? _owner;
     private readonly int _w, _h;
     private readonly int _keepSeconds;
     private readonly VideoCodec _codec;
     private readonly long _frameUs;
+    private readonly object _segmentsGate = new();
     private readonly List<SegmentRef> _segs = new();
+    private readonly List<string> _failedDeletes = new();
+    private long _lastDeleteRetry = Environment.TickCount64;
 
     private readonly MemoryStream _payload = new();
     private readonly List<(long ptsUs, int size, bool key)> _samples = new();
@@ -39,14 +45,25 @@ public sealed class SegmentRing
     {
         _codec = codec;
         _frameUs = 1_000_000L / Math.Max(1, fps);
-        _dir = dir;
         _w = width; _h = height;
         _keepSeconds = keepSeconds;
+        dir = Path.GetFullPath(dir);
         Directory.CreateDirectory(dir);
-        foreach (var f in Directory.GetFiles(dir, "seg_*.mp4")) File.Delete(f);
+        ClearInactiveSessions(dir);
+        _dir = Path.Combine(dir, SessionPrefix + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(_dir);
+        _owner = new FileStream(Path.Combine(_dir, OwnerFile), FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None);
     }
 
-    public IReadOnlyList<SegmentRef> Segments => _segs;
+    public IReadOnlyList<SegmentRef> Segments
+    {
+        get { lock (_segmentsGate) return _segs.ToArray(); }
+    }
+
+    internal int SegmentCount
+    {
+        get { lock (_segmentsGate) return _segs.Count; }
+    }
 
     /// <summary>追加一帧（Annex-B 形式的 access unit）。返回是否产生了新的段。</summary>
     public bool Append(long ptsUs, ReadOnlySpan<byte> annexB)
@@ -108,7 +125,7 @@ public sealed class SegmentRing
         var seg = Mp4.BuildSegment((uint)_seq, baseTime, specs, _payload.ToArray());
         var path = Path.Combine(_dir, $"seg_{_seq:D6}.mp4");
         File.WriteAllBytes(path, seg);
-        _segs.Add(new SegmentRef(_seq, _curStartUs, _lastPtsUs, path));
+        lock (_segmentsGate) _segs.Add(new SegmentRef(_seq, _curStartUs, _lastPtsUs, path));
         _seq++;
 
         _payload.SetLength(0);
@@ -119,18 +136,96 @@ public sealed class SegmentRing
 
     private void Trim()
     {
-        long newest = _segs.Count > 0 ? _segs[^1].EndUs : 0;
-        while (_segs.Count > 1 && newest - _segs[0].StartUs > _keepSeconds * 1_000_000L)
+        List<string>? expired = null;
+        lock (_segmentsGate)
         {
-            try { File.Delete(_segs[0].Path); } catch { }
-            _segs.RemoveAt(0);
+            long newest = _segs[^1].EndUs;
+            while (_segs.Count > 1 && newest - _segs[0].StartUs > _keepSeconds * 1_000_000L)
+            {
+                (expired ??= new()).Add(_segs[0].Path);
+                _segs.RemoveAt(0);
+            }
+        }
+        if (expired is not null)
+            foreach (string path in expired)
+                if (!TryDelete(path)) _failedDeletes.Add(path);
+
+        if (_failedDeletes.Count > 0 && Environment.TickCount64 - _lastDeleteRetry >= 30_000)
+        {
+            _lastDeleteRetry = Environment.TickCount64;
+            _failedDeletes.RemoveAll(TryDelete);
         }
     }
 
     /// <summary>收尾：把当前没写完的段落盘。</summary>
     public void Flush() => CloseSegment();
 
-    public void Dispose() { }
+    public void Dispose()
+    {
+        var owner = Interlocked.Exchange(ref _owner, null);
+        if (owner is null) return;
+        _payload.Dispose();
+        if (!ClearSession(_dir, owner))
+            Log.Write("[ring] 有缓存分片暂无法清理，下次启动采集时再试");
+    }
+
+    private static void ClearInactiveSessions(string root)
+    {
+        // 旧版把自己的分片直接写在 ring 下。
+        ClearSegments(root);
+        foreach (var dir in new DirectoryInfo(root).EnumerateDirectories(SessionPrefix + "*"))
+        {
+            if (!dir.Name.StartsWith(SessionPrefix, StringComparison.Ordinal) ||
+                !Guid.TryParseExact(dir.Name.AsSpan(SessionPrefix.Length), "N", out _) ||
+                (dir.Attributes & FileAttributes.ReparsePoint) != 0) continue;
+
+            // 仍在工作的录制器持有独占句柄。没有锁文件的目录可能正在创建。
+            FileStream owner;
+            try { owner = new FileStream(Path.Combine(dir.FullName, OwnerFile), FileMode.Open, FileAccess.ReadWrite, FileShare.None); }
+            catch (IOException) { continue; }
+            catch (UnauthorizedAccessException) { continue; }
+            ClearSession(dir.FullName, owner);
+        }
+    }
+
+    private static bool ClearSession(string dir, FileStream owner)
+    {
+        using (owner)
+        {
+            if (!ClearSegments(dir)) return false;
+        }
+        if (!TryDelete(Path.Combine(dir, OwnerFile))) return false;
+        try { Directory.Delete(dir, recursive: false); }
+        catch (IOException) { }  // 非空时保留目录里的其他文件
+        catch (UnauthorizedAccessException) { }
+        return true;
+    }
+
+    private static bool ClearSegments(string dir)
+    {
+        try
+        {
+            bool allDeleted = true;
+            foreach (string path in Directory.EnumerateFiles(dir, "seg_*.mp4"))
+            {
+                var name = Path.GetFileName(path);
+                if (name.Length < 14 || !name.StartsWith("seg_", StringComparison.OrdinalIgnoreCase) ||
+                    !name.EndsWith(".mp4", StringComparison.OrdinalIgnoreCase)) continue;
+                if (name.AsSpan(4, name.Length - 8).IndexOfAnyExceptInRange('0', '9') >= 0) continue;
+                if (!TryDelete(path)) allDeleted = false;
+            }
+            return allDeleted;
+        }
+        catch (IOException) { return false; }
+        catch (UnauthorizedAccessException) { return false; }
+    }
+
+    private static bool TryDelete(string path)
+    {
+        try { File.Delete(path); return true; }
+        catch (IOException) { return false; }
+        catch (UnauthorizedAccessException) { return false; }
+    }
 
     /// <summary>拼一个可播放的普通 mp4：读回段文件 → 按时间裁剪 → 从关键帧起 → 写 ftyp/moov/mdat。</summary>
     public byte[] BuildClip(long startUs, long endUs) => BuildClip(startUs, endUs, null);
@@ -177,11 +272,26 @@ public sealed class SegmentRing
     private Prepared? Prepare(long startUs, long endUs, AudioRing? audio)
     {
         if (Sps is null || Pps is null) throw new InvalidOperationException("还没拿到 SPS/PPS");
-        var chosen = _segs.Where(s => s.EndUs >= startUs && s.StartUs <= endUs).ToList();
-        if (chosen.Count == 0) return null;
-
         var all = new List<Mp4Writer.ClipSample>();
-        foreach (var s in chosen) all.AddRange(Mp4Writer.ReadSegment(File.ReadAllBytes(s.Path)));
+        var inputs = new List<FileStream>();
+        try
+        {
+            lock (_segmentsGate)
+                foreach (var s in _segs)
+                    if (s.EndUs >= startUs && s.StartUs <= endUs)
+                        inputs.Add(new FileStream(s.Path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete));
+            // 已打开的分片在滚动删除后仍可读，解封装在锁外进行。
+            foreach (var file in inputs)
+            {
+                var bytes = new byte[checked((int)file.Length)];
+                file.ReadExactly(bytes);
+                all.AddRange(Mp4Writer.ReadSegment(bytes));
+            }
+        }
+        finally
+        {
+            foreach (var file in inputs) file.Dispose();
+        }
         if (all.Count == 0) return null;
 
         long startTicks = startUs <= 0 ? 0 : startUs * Mp4.Timescale / 1_000_000;
@@ -233,12 +343,15 @@ public sealed class SegmentRing
 
     /// <summary>整段覆盖时间范围（用于报告）</summary>
     public (long from, long to) Coverage()
-        => _segs.Count == 0 ? (0, 0) : (_segs[0].StartUs, _segs[^1].EndUs);
+    {
+        lock (_segmentsGate)
+            return _segs.Count == 0 ? (0, 0) : (_segs[0].StartUs, _segs[^1].EndUs);
+    }
 
     public long DiskBytes()
     {
         long n = 0;
-        foreach (var s in _segs) { try { n += new FileInfo(s.Path).Length; } catch { } }
+        foreach (var s in Segments) { try { n += new FileInfo(s.Path).Length; } catch { } }
         return n;
     }
 }

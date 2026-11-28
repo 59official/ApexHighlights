@@ -22,6 +22,7 @@ internal sealed class Capture : IDisposable
 {
     private readonly BannerEngine _eng;
     private readonly GameProfile _prof;
+    private readonly bool _apexHud;
     private readonly byte[] _band;
     private readonly object _gate = new();
     private readonly Stopwatch _clock = new();
@@ -31,6 +32,7 @@ internal sealed class Capture : IDisposable
     private Direct3D11CaptureFramePool? _pool;
     private GraphicsCaptureSession? _session;
     private ID3D11Texture2D? _bandStaging;   // 条带小回读（检测用，10fps）
+    private ID3D11Texture2D? _spectatorStaging; // 仅在 Apex 横幅达到阈值时使用
     private ID3D11Texture2D? _dumpStaging;   // 整帧 dump 用（懒建，只 --dump 时用一次）
     private GpuConverter? _converter;
 
@@ -118,9 +120,12 @@ internal sealed class Capture : IDisposable
     private readonly List<Detection> _pending = new();
     private Thread? _clipThread;
 
-    // OCR 分类：只在 NCC 命中后才跑，且由 "clip" 线程独占（OcrEngine 非线程安全）
+    // 切片与退出补切都可能使用 OCR，串行调用。
+    private readonly object _ocrGate = new();
     private readonly BannerOcr _ocr = new();
-    /// <summary>关掉横幅 OCR 分类（--no-ocr）。关掉后种类一律记为 Unknown，仍照常录制。</summary>
+    private long _spectatorReads, _spectatorReadTicks, _spectatorChecks, _spectatorOcrTicks, _spectatorSkips;
+    private BannerReview? _bannerReview;
+    /// <summary>关掉文字识别（--no-ocr）时，跳过观战检查和横幅分类。</summary>
     public bool OcrEnabled = true;
     /// <summary>
     /// 合并窗口（spec §4）：相邻两次命中间隔 ≤ 这么多毫秒，视为同一场交火，切成一段。
@@ -153,6 +158,12 @@ internal sealed class Capture : IDisposable
     private bool Halted => RecordingPaused || UserPaused;
     private bool _wasAbove;
     private int _nearCount;
+    private int _nearSaved;
+    private int _nearBusy;
+    private BannerOcr? _nearOcr;
+    private volatile bool _saveNearFrames;
+    private readonly string _diagnosticSession = CaptureDiagnostics.NewSessionId();
+    private long _lastDiagnosticCleanupMs = -1;
     private int _grayScans;        // 灰区补扫实际跑了几轮（诊断用：跑太多说明灰区门槛太低）
     private int _grayStreak;
     private long _lastGrayMs = -1000;
@@ -190,33 +201,101 @@ internal sealed class Capture : IDisposable
         public BannerKind Kind { get; init; }
         /// <summary>OCR 读出的原始文案，仅供日志诊断。</summary>
         public string OcrText { get; init; }
+        internal byte[]? BandPixels { get; init; }
+        internal byte[]? SpectatorPixels { get; init; }
+        internal BannerReview? Review { get; init; }
+    }
+
+    // 采集线程填充，切片线程在 _pendingGate 下取走后只读。
+    internal sealed class BannerReview(long ms, int x, int y)
+    {
+        internal const int FirstDelayMs = 350;
+        internal const int SecondDelayMs = 650;
+        internal long DeadlineMs => ms + 900;
+        internal byte[]? First { get; private set; }
+        internal byte[]? Second { get; private set; }
+        internal bool Complete { get; set; }
+
+        internal void Observe(long now, bool match, int matchX, int matchY, byte[] band)
+        {
+            if (Complete || now >= DeadlineMs) { Complete = true; return; }
+            // 复用检测结果，只取仍在原位置附近的横幅。
+            if (!match || Math.Abs(matchX - x) > 32 || Math.Abs(matchY - y) > 16) return;
+            long elapsed = now - ms;
+            if (elapsed >= SecondDelayMs)
+            {
+                Second = (byte[])band.Clone();
+                Complete = true;
+            }
+            else if (elapsed >= FirstDelayMs && First is null)
+            {
+                First = (byte[])band.Clone();
+            }
+        }
+
+        internal (BannerKind Kind, string Text) Refine(
+            (BannerKind Kind, string Text) original,
+            Func<byte[], (BannerKind Kind, string Text)> recognize)
+        {
+            if (original.Kind is not (BannerKind.Unknown or BannerKind.Knock) ||
+                BannerOcr.IsRankScoringText(original.Text)) return original;
+
+            var result = original;
+            foreach (var pixels in new[] { First, Second })
+            {
+                if (pixels is null) continue;
+                var later = recognize(pixels);
+                if (later.Kind == BannerKind.Unknown || BannerOcr.IsRankScoringText(later.Text)) continue;
+                // 已读到击倒时，只用更完整的助攻击倒覆盖它。
+                if (result.Kind != BannerKind.Unknown && later.Kind != BannerKind.AssistKnock) continue;
+                result = later;
+                if (result.Kind != BannerKind.Knock) break;
+            }
+            return result;
+        }
     }
 
     public string OutDir { get; set; } = Paths.Captures;
+    internal string DiagnosticDir => CaptureDiagnostics.SessionDir(OutDir, _diagnosticSession);
+    internal bool SaveNearFrames { get => _saveNearFrames; set => _saveNearFrames = value; }
     public string ClipDir { get; set; } = Paths.Clips;
     public string? RingDir { get; set; }
 
-    public Capture(IntPtr hwnd, BannerEngine engine)
+    internal PictureLayout Picture { get; }
+
+    internal Capture(IntPtr hwnd, GameProfile profile, DetectPolicy detect)
     {
         _hwnd = hwnd;
-        _eng = engine;
-        _prof = engine.Profile;
-        _band = new byte[_prof.Band.W * _prof.Band.H];
+        _prof = profile;
+        _apexHud = string.Equals(profile.Id, "apex", StringComparison.OrdinalIgnoreCase);
         var item = Native.CreateItem(hwnd);
         // 4:2:0 要求偶数宽高；WGC 允许按我们给的尺寸缩放，所以直接取偶
         Width = item.Size.Width & ~1;
         Height = item.Size.Height & ~1;
-        if (Width == 0) throw new InvalidOperationException("窗口尺寸为 0（最小化了？）");
+        if (Width == 0 || Height == 0) throw new InvalidOperationException("窗口尺寸为 0（最小化了？）");
+
+        var captureSize = new PictureSize(Width, Height);
+        var settings = detect.Picture;
+        SaveNearFrames = settings.SaveNearFrames;
+        var autoSize = settings.Source == PictureSource.ApexConfig && _apexHud
+            ? ApexVideoConfig.Read(ApexVideoConfig.DefaultPath()) : null;
+        Picture = PictureLayout.Resolve(profile, captureSize, settings, autoSize);
+        var band = Picture.Band;
+        _eng = new BannerEngine(profile, band.W, band.H);
+        _eng.Apply(detect);
+        _band = new byte[checked(band.W * band.H)];
 
         var r = D3D11.D3D11CreateDevice(null, DriverType.Hardware, DeviceCreationFlags.BgraSupport,
             new[] { FeatureLevel.Level_11_1, FeatureLevel.Level_11_0 }, out _dev!, out _ctx!);
         if (r.Failure) throw new InvalidOperationException($"D3D11CreateDevice 失败 0x{(int)r:X8}");
 
-        // 条带几何按实际尺寸定死（与旧版一致：按 ref 尺寸等比缩放）
-        _bw = (int)(_prof.Band.W * (double)Width / _prof.RefWidth);
-        _bh = (int)(_prof.Band.H * (double)Height / _prof.RefHeight);
-        _rx = (int)(_prof.Band.X * (double)Width / _prof.RefWidth);
-        _ry = (int)(_prof.Band.Y * (double)Height / _prof.RefHeight);
+        // 分别映射左右和上下边界，避免缩到小窗口时把条带边缘舍掉。
+        double scaleX = (double)Width / Picture.BandRefWidth;
+        double scaleY = (double)Height / _prof.RefHeight;
+        _rx = (int)Math.Clamp(Math.Floor(band.X * scaleX), 0, Width - 1);
+        _ry = (int)Math.Clamp(Math.Floor(band.Y * scaleY), 0, Height - 1);
+        _bw = (int)Math.Clamp(Math.Ceiling((band.X + (double)band.W) * scaleX), _rx + 1, Width) - _rx;
+        _bh = (int)Math.Clamp(Math.Ceiling((band.Y + (double)band.H) * scaleY), _ry + 1, Height) - _ry;
 
         _bandStaging = _dev!.CreateTexture2D(new Texture2DDescription
         {
@@ -310,7 +389,8 @@ internal sealed class Capture : IDisposable
             }
 
             _audioFillRun = true;
-            _audioFill = new Thread(AudioFillLoop) { IsBackground = true, Name = "audiofill" };
+            var encoder = _aac;
+            _audioFill = new Thread(() => AudioFillLoop(encoder)) { IsBackground = true, Name = "audiofill" };
             _audioFill.Start();
             _audioErr = "";
         }
@@ -443,10 +523,11 @@ internal sealed class Capture : IDisposable
         {
             var mixer = new MicMixer(_aac.SampleRate, _aac.Channels);
             var cap = new LoopbackCapture(AudioSourceKind.Microphone);
-            cap.Start((pcm, bytes) => mixer.Append(pcm, bytes, cap.SampleRate, cap.Channels));
+            cap.Start((pcm, bytes) => mixer.AppendCapturePacket(pcm, bytes, cap.SampleRate));
             _micMixer = mixer;
             _mic = cap;
-            Log.Write($"[audio] 麦克风开始采集（{cap.SampleRate}Hz/{cap.Channels}ch → 混进 {_aac.SampleRate}Hz/{_aac.Channels}ch）");
+            Log.Write($"[audio] 麦克风开始采集（设备 {cap.SampleRate}Hz/{cap.Channels}ch/{cap.Bits}bit，" +
+                      $"回调 {LoopbackCapture.OutputChannels}ch PCM → 混进 {_aac.SampleRate}Hz/{_aac.Channels}ch）");
         }
         catch (Exception ex)
         {
@@ -630,6 +711,11 @@ internal sealed class Capture : IDisposable
     /// <summary>实际生效的命中阈值（用户覆盖优先，否则取模板自带的）。</summary>
     public float Threshold => _eng.EffectiveThreshold;
 
+    internal void SetHudScale(int value)
+    {
+        lock (_gate) _eng.SetHudScale(value);
+    }
+
     /// <summary>
     /// 运行中改阈值：立刻对下一次检测生效，不需要重开录制，也不重建引擎。
     /// 这就是用户要的「自己调阈值」——托盘菜单和回顾库里都挂了入口。
@@ -669,6 +755,15 @@ internal sealed class Capture : IDisposable
     {
         var lib = _lib;
         if (lib is null) return null;
+        long now = _clock.ElapsedMilliseconds;
+        long lastCleanup = Interlocked.Read(ref _lastDiagnosticCleanupMs);
+        if ((lastCleanup < 0 || now - lastCleanup >= 3_600_000) &&
+            Interlocked.CompareExchange(ref _lastDiagnosticCleanupMs, now, lastCleanup) == lastCleanup)
+        {
+            try { CaptureDiagnostics.Prune(OutDir, DateTime.UtcNow); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            { Log.Write($"[diagnostic] 清理失败：{ex.Message}"); }
+        }
         try
         {
             var rep = QuotaEnforcer.Run(lib, _policy);
@@ -733,6 +828,7 @@ internal sealed class Capture : IDisposable
         {
             lock (_audioFeedGate)
             {
+                if (!ReferenceEquals(_aac, aac)) return;
                 if (_audioStart100 == long.MinValue) _audioStart100 = now100;
 
                 // 静音补齐：只补到「壁钟应有的样本数」，不留未来
@@ -750,6 +846,7 @@ internal sealed class Capture : IDisposable
                         // 补静音的位置如果麦克风有货，就用麦克风顶上：
                         // 游戏安静、只有用户在说话时，这段不能是纯静音（否则只开麦克风等于没录）。
                         if (mixer is not null) mixer.TakeInto(_zeroBuf, take * 4);
+                        else Array.Clear(_zeroBuf, 0, take * 4);
                         aac.Feed(_zeroBuf.AsSpan(0, take * 4), now100, (d, p) => ring.Append(p / 10, d));
                         _audioFedFrames += take;
                         _silenceFilled += take;
@@ -770,12 +867,12 @@ internal sealed class Capture : IDisposable
     }
 
     /// <summary>静音补齐线程：WASAPI 不送包的时候也得让音频时间轴往前走。</summary>
-    private void AudioFillLoop()
+    private void AudioFillLoop(AacEncoder encoder)
     {
-        while (!_stop && _audioFillRun)
+        while (!_stop && _audioFillRun && ReferenceEquals(_aac, encoder))
         {
             Thread.Sleep(20);
-            if (!_audioFillRun) break;
+            if (!_audioFillRun || !ReferenceEquals(_aac, encoder)) break;
             Pump(null, 0, _clock.ElapsedMilliseconds * 10_000L);
         }
     }
@@ -818,7 +915,7 @@ internal sealed class Capture : IDisposable
 
     private void OnFrame()
     {
-        if (!Monitor.TryEnter(_gate)) return;
+        if (_stop || !Monitor.TryEnter(_gate)) return;
         try
         {
             using var frame = _pool!.TryGetNextFrame();
@@ -923,24 +1020,35 @@ internal sealed class Capture : IDisposable
                 _samples++; _totalMs += sw.ElapsedMilliseconds;
 
                 bool above = det.Score >= det.Threshold;
-                if (above && !_wasAbove && now - _lastHitMs >= (long)_prof.MinGapMs)
+                bool newHit = above && !_wasAbove && now - _lastHitMs >= (long)_prof.MinGapMs;
+                if (_bannerReview is { } review)
+                {
+                    lock (_pendingGate)
+                    {
+                        if (_stop || newHit) review.Complete = true;
+                        else review.Observe(now, det.Score >= NearFloor(det.Threshold), det.X, det.Y, _band);
+                        if (review.Complete) _bannerReview = null;
+                    }
+                }
+                if (newHit)
                 {
                     _lastHitMs = now;
                     _hits++; HotLoops++;
-                    Directory.CreateDirectory(OutDir);
-                    var path = Path.Combine(OutDir, $"hit_{now / 1000:00000}_{det.Score:F2}.bmp");
-                    BandBmp.Write(path, _band, _prof.Band.W, _prof.Band.H);
-                    // 只登记，不在这里切：切片段线程会等后摇录满再落盘
-                    QueueClip(new Detection(now, det.Score, det.X, det.Y, path)
+                    // 留当前帧的两个小区域。观战 OCR、诊断图和切片都由后台处理。
+                    _bannerReview = _apexHud && OcrEnabled ? new BannerReview(now, det.X, det.Y) : null;
+                    QueueClip(new Detection(now, det.Score, det.X, det.Y, null)
                     {
                         WallClock = DateTime.Now,
                         Label = det.Label,
+                        BandPixels = (byte[])_band.Clone(),
+                        SpectatorPixels = _bannerReview is not null ? ReadSpectatorHud(tex) : null,
+                        Review = _bannerReview,
                     });
-                }                else if (!above && det.Score >= NearFloor(det.Threshold) && now - _lastNearMs >= 2000 && _nearCount < 40)
+                }
+                else if (!above && det.Score >= NearFloor(det.Threshold) && now - _lastNearMs >= 2000)
                 {
                     _lastNearMs = now; _nearCount++;
-                    Directory.CreateDirectory(OutDir);
-                    BandBmp.Write(Path.Combine(OutDir, $"near_{now / 1000:00000}_{det.Score:F2}.bmp"), _band, _prof.Band.W, _prof.Band.H);
+                    MaybeSaveNearFrame(now, det.Score);
                 }
                 _wasAbove = above;
             }
@@ -953,14 +1061,89 @@ internal sealed class Capture : IDisposable
         finally { Monitor.Exit(_gate); }
     }
 
+    private void MaybeSaveNearFrame(long now, float score)
+    {
+        if (!SaveNearFrames || !OcrEnabled || Volatile.Read(ref _nearSaved) >= 40 ||
+            Interlocked.CompareExchange(ref _nearBusy, 1, 0) != 0) return;
+
+        var pixels = (byte[])_band.Clone();
+        var band = Picture.Band;
+        string name = CaptureDiagnostics.ImageName("near", now, score);
+        string dir = DiagnosticDir;
+        // OCR 在后台使用自己的引擎，采集线程和切片线程都不用等待近失图。
+        _ = Task.Run(() =>
+        {
+            string temporary = Path.Combine(Path.GetTempPath(), $"apex-near-{Guid.NewGuid():N}.bmp");
+            try
+            {
+                BandBmp.Write(temporary, pixels, band.W, band.H);
+                var (kind, text) = (_nearOcr ??= new BannerOcr()).Classify(temporary);
+                if (kind == BannerKind.Unknown || BannerOcr.IsRankScoringText(text) || _stop || !SaveNearFrames) return;
+                Directory.CreateDirectory(dir);
+                File.Copy(temporary, Path.Combine(dir, name), overwrite: true);
+                Interlocked.Increment(ref _nearSaved);
+            }
+            catch (Exception ex)
+            {
+                if (_err.Length == 0) _err = "near: " + ex.Message;
+            }
+            finally
+            {
+                try { File.Delete(temporary); } catch (IOException) { } catch (UnauthorizedAccessException) { }
+                Volatile.Write(ref _nearBusy, 0);
+            }
+        });
+    }
+
     /// <summary>只把条带小区域从 GPU 拷进小 staging 再回读（检测用，10fps）。</summary>
     private unsafe void ReadBand(ID3D11Texture2D tex)
     {
         var box = new Vortice.Mathematics.Box(_rx, _ry, 0, _rx + _bw, _ry + _bh, 1);
         _ctx!.CopySubresourceRegion(_bandStaging!, 0, 0, 0, 0, tex, 0, box);
         var map = _ctx.Map(_bandStaging!, 0, MapMode.Read);
-        try { unsafe { ExtractBand((byte*)map.DataPointer, (int)map.RowPitch, _bw, _bh); } }
+        var band = Picture.Band;
+        try { ExtractGray((byte*)map.DataPointer, (int)map.RowPitch, _bw, _bh, _band, band.W, band.H); }
         finally { _ctx.Unmap(_bandStaging!, 0); }
+    }
+
+    private unsafe byte[]? ReadSpectatorHud(ID3D11Texture2D tex)
+    {
+        long start = Stopwatch.GetTimestamp();
+        try
+        {
+            int x = Width / 4, w = Width - x, h = Math.Max(1, Height / 8);
+            _spectatorStaging ??= _dev!.CreateTexture2D(new Texture2DDescription
+            {
+                Width = (uint)w,
+                Height = (uint)h,
+                MipLevels = 1,
+                ArraySize = 1,
+                Format = Format.B8G8R8A8_UNorm,
+                SampleDescription = new SampleDescription(1, 0),
+                Usage = ResourceUsage.Staging,
+                CPUAccessFlags = CpuAccessFlags.Read,
+            });
+            _ctx!.CopySubresourceRegion(_spectatorStaging, 0, 0, 0, 0, tex, 0,
+                new Vortice.Mathematics.Box(x, 0, 0, Width, h, 1));
+            var map = _ctx.Map(_spectatorStaging, 0, MapMode.Read);
+            try
+            {
+                var pixels = new byte[SpectatorHud.Width * SpectatorHud.Height];
+                ExtractGray((byte*)map.DataPointer, (int)map.RowPitch, w, h, pixels, SpectatorHud.Width, SpectatorHud.Height);
+                return pixels;
+            }
+            finally { _ctx.Unmap(_spectatorStaging, 0); }
+        }
+        catch (Exception ex)
+        {
+            if (_err.Length == 0) _err = "观战 HUD 回读: " + ex.Message;
+            return null;
+        }
+        finally
+        {
+            Interlocked.Add(ref _spectatorReadTicks, Stopwatch.GetTimestamp() - start);
+            Interlocked.Increment(ref _spectatorReads);
+        }
     }
 
     private void DumpFrame(ID3D11Texture2D tex)
@@ -1006,12 +1189,81 @@ internal sealed class Capture : IDisposable
     /// </summary>
     private void QueueClip(Detection det)
     {
-        lock (_pendingGate) _pending.Add(det);
+        lock (_pendingGate)
+        {
+            if (_stop) return;
+            _pending.Add(det);
+        }
         if (_clipThread is null)
         {
             _clipThread = new Thread(ClipLoop) { IsBackground = true, Name = "clip" };
             _clipThread.Start();
         }
+    }
+
+    private bool TryTakePending(long latestMs, out Detection hit, out bool awaitingReview)
+    {
+        awaitingReview = false;
+        lock (_pendingGate)
+        {
+            if (_pending.Count > 0 && _pending[0].Ms <= latestMs)
+            {
+                var candidate = _pending[0];
+                if (candidate.Review is { Complete: false } review)
+                {
+                    if (_clock.ElapsedMilliseconds < review.DeadlineMs)
+                    {
+                        awaitingReview = true;
+                        hit = default;
+                        return false;
+                    }
+                    review.Complete = true;
+                }
+                _pending.RemoveAt(0);
+                hit = candidate;
+                return true;
+            }
+        }
+        hit = default;
+        return false;
+    }
+
+    private Detection? AcceptHit(Detection hit)
+    {
+        if (hit.SpectatorPixels is { } header)
+        {
+            bool spectating;
+            lock (_ocrGate)
+            {
+                long start = Stopwatch.GetTimestamp();
+                spectating = _ocr.IsSpectating(header);
+                Interlocked.Add(ref _spectatorOcrTicks, Stopwatch.GetTimestamp() - start);
+                Interlocked.Increment(ref _spectatorChecks);
+            }
+            if (spectating)
+            {
+                Interlocked.Increment(ref _spectatorSkips);
+                Log.Write($"[skip] 观战或赛后界面 +{hit.Ms / 1000.0:F1}s，跳过命中");
+                return null;
+            }
+        }
+
+        string? path = hit.BandPath;
+        if (hit.BandPixels is { } pixels)
+        {
+            try
+            {
+                Directory.CreateDirectory(DiagnosticDir);
+                var output = Path.Combine(DiagnosticDir, CaptureDiagnostics.ImageName("hit", hit.Ms, hit.Score));
+                BandBmp.Write(output, pixels, Picture.Band.W, Picture.Band.H);
+                path = output;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                if (_err.Length == 0) _err = "hit: " + ex.Message;
+            }
+        }
+        return hit with { BandPath = path, BandPixels = null, SpectatorPixels = null };
     }
 
     /// <summary>
@@ -1030,13 +1282,7 @@ internal sealed class Capture : IDisposable
         {
             Thread.Sleep(100);
 
-            Detection first;
-            lock (_pendingGate)
-            {
-                if (_pending.Count == 0) continue;
-                first = _pending[0];
-                _pending.RemoveAt(0);
-            }
+            if (_stop || !TryTakePending(long.MaxValue, out var candidate, out _) || AcceptHit(candidate) is not { } first) continue;
 
             var group = new List<Detection> { first };
             long lastMs = first.Ms;
@@ -1045,16 +1291,12 @@ internal sealed class Capture : IDisposable
             // 一边等后摇、一边继续吸纳合并窗口内的新命中
             while (!_stop)
             {
-                lock (_pendingGate)
+                bool awaitingReview = false;
+                while (!_stop && TryTakePending(lastMs + MergeMs, out var more, out awaitingReview))
                 {
-                    for (int i = _pending.Count - 1; i >= 0; i--)
-                    {
-                        var p = _pending[i];
-                        if (p.Ms - lastMs > MergeMs) continue;   // 太远，留给下一场
-                        group.Add(p);
-                        _pending.RemoveAt(i);
-                        if (p.Ms > lastMs) lastMs = p.Ms;
-                    }
+                    if (AcceptHit(more) is not { } accepted) continue;
+                    group.Add(accepted);
+                    lastMs = accepted.Ms;
                 }
 
                 bool ringReady = false;
@@ -1066,7 +1308,7 @@ internal sealed class Capture : IDisposable
                 long quiet = _clock.ElapsedMilliseconds - lastMs;
 
                 // 后摇录满了、并且安静够一个合并窗口，才算这一场结束
-                if (ringReady && quiet >= MergeMs) break;
+                if (ringReady && quiet >= MergeMs && !awaitingReview) break;
                 // 兜底：环形已经滑过足够远（比如命中后立刻暂停/退出），不再干等
                 if (_clock.ElapsedMilliseconds - started > MergeMs + 3000 + PostRollUs / 1000) break;
 
@@ -1085,7 +1327,7 @@ internal sealed class Capture : IDisposable
             {
                 foreach (var g in group.OrderByDescending(x => x.Score))
                 {
-                    if (ReferenceEquals(g, rep) || g.BandPath is null) continue;
+                    if (g.Ms == rep.Ms || g.BandPath is null) continue;
                     var alt = Classify(g);
                     if (alt.Kind == BannerKind.Unknown) continue;
                     d = d with { Kind = alt.Kind, OcrText = alt.OcrText };
@@ -1100,7 +1342,7 @@ internal sealed class Capture : IDisposable
             {
                 foreach (var g in group.OrderByDescending(x => x.Score))
                 {
-                    if (ReferenceEquals(g, rep) || g.BandPath is null) continue;
+                    if (g.Ms == rep.Ms || g.BandPath is null) continue;
                     var alt = Classify(g);
                     // 只接受「助攻击倒」这一种升级：别的字（淘汰）在噪声里也偶尔出现，
                     // 放开会让普通击倒被误判成淘汰，得不偿失。
@@ -1113,6 +1355,9 @@ internal sealed class Capture : IDisposable
                     }
                 }
             }
+
+            if (ExcludeRankTable(d, group) is not { } keepHit) continue;
+            d = keepHit;
 
             if (group.Count > 1)
             {
@@ -1135,9 +1380,30 @@ internal sealed class Capture : IDisposable
         }
     }
 
+    private Detection? ExcludeRankTable(Detection hit, IEnumerable<Detection> group)
+    {
+        if (!BannerOcr.IsRankScoringText(hit.OcrText)) return hit;
+
+        foreach (var other in group.OrderByDescending(x => x.Score))
+        {
+            if (other.Ms == hit.Ms || other.BandPath is null) continue;
+            var classified = Classify(other);
+            if (classified.Kind != BannerKind.Unknown && !BannerOcr.IsRankScoringText(classified.OcrText))
+                return classified;
+        }
+
+        Log.Write("[skip] OCR 匹配排位 RP 计分表，跳过切片");
+        foreach (var item in group)
+        {
+            if (item.BandPath is null) continue;
+            try { File.Delete(item.BandPath); } catch (IOException) { } catch (UnauthorizedAccessException) { }
+        }
+        return null;
+    }
+
     /// <summary>
     /// 读条带图上的横幅文案，判断这是击倒/再次击倒/助攻击倒/小队淘汰/助攻淘汰中的哪一种。
-    /// 只由 "clip" 线程调用（OcrEngine 非线程安全）。
+    /// 切片和退出补切都通过 OCR 锁访问。
     /// OCR 失败不是错误：返回 Unknown，照样录，只是文件名不带种类后缀。
     /// </summary>
     private Detection Classify(Detection det)
@@ -1145,11 +1411,17 @@ internal sealed class Capture : IDisposable
         if (!OcrEnabled || det.BandPath is null) return det;
         try
         {
-            var (kind, text) = _ocr.Classify(det.BandPath);
-            _ocrCount = _ocr.Count;
-            _ocrMs = _ocr.TotalMs;
-            if (!_ocrHinted && _ocr.Hint.Length > 0) { _ocrHinted = true; Log.Write($"[ocr] {_ocr.Hint}"); }
-            return det with { Kind = kind, OcrText = text };
+            lock (_ocrGate)
+            {
+                var original = _ocr.Classify(det.BandPath);
+                var band = Picture.Band;
+                var (kind, text) = det.Review?.Refine(original, pixels => _ocr.Classify(pixels, band.W, band.H)) ?? original;
+                _ocrCount = _ocr.Count;
+                _ocrMs = _ocr.TotalMs;
+                if (!_ocrHinted && _ocr.Hint.Length > 0) { _ocrHinted = true; Log.Write($"[ocr] {_ocr.Hint}"); }
+                if (kind != original.Kind) Log.Write($"[ocr] 横幅补读：{BannerOcr.Label(original.Kind)} → {BannerOcr.Label(kind)}");
+                return det with { Kind = kind, OcrText = text };
+            }
         }
         catch (Exception ex)
         {
@@ -1161,23 +1433,32 @@ internal sealed class Capture : IDisposable
     /// <summary>退出时把队列里还没切的片段切掉（后摇可能没录满，但前摇画面不能白丢）。</summary>
     private void FlushPending()
     {
-        Detection[] batch;
+        Detection[] pending;
         lock (_pendingGate)
         {
             if (_pending.Count == 0) return;
-            batch = _pending.ToArray();
+            foreach (var candidate in _pending)
+                if (candidate.Review is { } review) review.Complete = true;
+            pending = _pending.ToArray();
             _pending.Clear();
         }
+        var batch = new List<Detection>(pending.Length);
+        foreach (var candidate in pending)
+            if (AcceptHit(candidate) is { } hit) batch.Add(hit);
         // 同样按合并窗口分组，避免退出瞬间把一场交火补切成好几段
         int i = 0;
-        while (i < batch.Length)
+        while (i < batch.Count)
         {
             long firstMs = batch[i].Ms, lastMs = firstMs;
             int j = i + 1;
-            while (j < batch.Length && batch[j].Ms - lastMs <= MergeMs) { lastMs = batch[j].Ms; j++; }
+            while (j < batch.Count && batch[j].Ms - lastMs <= MergeMs) { lastMs = batch[j].Ms; j++; }
             var rep = batch[i];
             for (int k = i; k < j; k++) if (batch[k].Score > rep.Score) rep = batch[k];
-            var done = Classify(rep);
+            if (ExcludeRankTable(Classify(rep), batch.GetRange(i, j - i)) is not { } done)
+            {
+                i = j;
+                continue;
+            }
             // 退出补切也守同一条闸门，否则「关了击倒」在关程序那一刻还是会漏一段出来
             var doneKind = ClipKinds.FromBanner(done.Kind);
             bool keep = Records(doneKind);
@@ -1191,7 +1472,7 @@ internal sealed class Capture : IDisposable
     /// <summary>按前摇/后摇从环形里切一片出来写成 mp4。片段范围是 [首命中−前摇, 末命中+后摇]。</summary>
     private (string? Path, long Bytes) WriteClip(Detection det, long firstMs, long lastMs)
     {
-        if (_ring is null || _ring.Segments.Count == 0) return (null, 0);
+        if (_ring is null || _ring.SegmentCount == 0) return (null, 0);
         try
         {
             var (coverFrom, coverTo) = _ring.Coverage();
@@ -1199,6 +1480,7 @@ internal sealed class Capture : IDisposable
             long startUs = Math.Max(coverFrom, firstMs * 1000L - PreRollUs);
             long stopUs = Math.Min(endUs, lastMs * 1000L + PostRollUs);
             if (stopUs - startUs < 500_000) return (null, 0);
+            var mux = Stopwatch.StartNew();
 
             Directory.CreateDirectory(ClipDir);
             var name = $"{_prof.Id}{KindToken(det.Kind)}_{DateTime.Now:MMdd-HHmmss}_{det.Score:F2}.mp4";
@@ -1227,7 +1509,7 @@ internal sealed class Capture : IDisposable
             // 时间轴对不上（两个数差很多）还是内容对不上（两个数一样但听着错位）。
             // 顺手把实测码率打出来：画面「糊/脏」时先看这个数，比猜快
             double secs = Math.Max(0.001, (stopUs - startUs) / 1_000_000.0);
-            Log.Write($"[clip] {name} {written / (1024 * 1024)}MB {written * 8 / secs / 1_000_000:F1}Mbps {_ring.LastReport}");
+            Log.Write($"[clip] {name} {written / (1024 * 1024)}MB {written * 8 / secs / 1_000_000:F1}Mbps {_ring.LastReport} 封装落盘={mux.ElapsedMilliseconds}ms");
 
             // 提示交给宿主（托盘）：这里只报「存好了、是什么、多长」
             ClipSaved?.Invoke(ClipKinds.FromBanner(det.Kind), Math.Max(0, stopUs - startUs) / 1_000_000.0);
@@ -1252,7 +1534,7 @@ internal sealed class Capture : IDisposable
         _ => "",   // 击倒（默认种类）与未识别都不加后缀，保持 v1 的老命名
     };
 
-    private unsafe void ExtractBand(byte* src, int pitch, int bw, int bh)
+    private static unsafe void ExtractGray(byte* src, int pitch, int bw, int bh, byte[] gray, int width, int height)
     {
         int Luma(int x, int y)
         {
@@ -1260,27 +1542,27 @@ internal sealed class Capture : IDisposable
             return (p[0] * 114 + p[1] * 587 + p[2] * 299 + 500) / 1000;
         }
 
-        if (bw == _prof.Band.W && bh == _prof.Band.H)
+        if (bw == width && bh == height)
         {
             for (int y = 0; y < bh; y++)
                 for (int x = 0; x < bw; x++)
-                    _band[y * _prof.Band.W + x] = (byte)Luma(x, y);
+                    gray[y * width + x] = (byte)Luma(x, y);
             return;
         }
 
-        for (int y = 0; y < _prof.Band.H; y++)
+        for (int y = 0; y < height; y++)
         {
-            double fy = (y + 0.5) * bh / _prof.Band.H - 0.5;
+            double fy = (y + 0.5) * bh / height - 0.5;
             int y0 = Math.Clamp((int)Math.Floor(fy), 0, bh - 1), y1 = Math.Min(y0 + 1, bh - 1);
             double wy = Math.Clamp(fy - y0, 0, 1);
-            for (int x = 0; x < _prof.Band.W; x++)
+            for (int x = 0; x < width; x++)
             {
-                double fx = (x + 0.5) * bw / _prof.Band.W - 0.5;
+                double fx = (x + 0.5) * bw / width - 0.5;
                 int x0 = Math.Clamp((int)Math.Floor(fx), 0, bw - 1), x1 = Math.Min(x0 + 1, bw - 1);
                 double wx = Math.Clamp(fx - x0, 0, 1);
                 double v = (Luma(x0, y0) * (1 - wx) + Luma(x1, y0) * wx) * (1 - wy)
                          + (Luma(x0, y1) * (1 - wx) + Luma(x1, y1) * wx) * wy;
-                _band[y * _prof.Band.W + x] = (byte)Math.Clamp((int)Math.Round(v), 0, 255);
+                gray[y * width + x] = (byte)Math.Clamp((int)Math.Round(v), 0, 255);
             }
         }
     }
@@ -1312,12 +1594,13 @@ internal sealed class Capture : IDisposable
     public string Stats()
     {
         var s = $"帧={_frames} 采样={_samples} 事件={_hits} 近失={_nearCount} 灰扫={_grayScans}";
+        if (SaveNearFrames) s += $" 近失留图={Volatile.Read(ref _nearSaved)}";
         if (_samples > 0) s += $" 检测={(_totalMs / (double)_samples):F1}ms";
         var enc = _enc;                       // 改码率会换实例，只读一次，免得拼出半个旧半个新
         if (enc is not null)
         {
             s += $" 编码={_encoded} 丢帧={_droppedFrames}(限{_limiterDrops}/池{_capDrops}/队{_queueDrops}) 建池={_poolCreated} 编码器丢={enc.Dropped}";
-            if (_ring is not null) s += $" 环={_ring.Segments.Count}段/{_ring.Coverage()}";
+            if (_ring is not null) s += $" 环={_ring.SegmentCount}段/{_ring.Coverage()}";
             s += $" 码率={Bitrate / 1_000_000}Mbps 编码={enc.Name} 旋={enc.Rotations} gop[{NvEncoder.GopInfo}] q[{NvEncoder.QualityInfo}]";
         }
         if (_aRing is not null)
@@ -1326,11 +1609,17 @@ internal sealed class Capture : IDisposable
             s += $" 音频={_aRing.TotalFrames}帧/{_aRing.DiskBytes() / 1024}KB 覆盖({ac.From / 1000},{ac.To / 1000})ms";
             s += $" 源[系统={(_wcap is null ? "关" : "开")} 游戏={(_game is null ? "关" : "开")}{(GameFellBack ? "回退" : "")}" +
                  $" 麦={(MicOn ? "开" : "关")}" +
-                 $"{(MicOn ? $"/{_micMixer?.Frames ?? 0}帧缓" : "")}]";
+                 $"{(MicOn ? $"/{_micMixer?.Frames ?? 0}帧缓/{_micMixer?.Dropped ?? 0}帧丢" : "")}]";
         }
         else if (Mode == AudioMode.None) s += " 音频=关";
         if (OcrEnabled && _ocrCount > 0)
             s += $" OCR={_ocrCount}次/{_ocrMs}ms 合并={_merged}次";
+        if (_spectatorReads > 0)
+        {
+            double captureMs = Interlocked.Read(ref _spectatorReadTicks) * 1000.0 / Stopwatch.Frequency;
+            double ocrMs = Interlocked.Read(ref _spectatorOcrTicks) * 1000.0 / Stopwatch.Frequency;
+            s += $" 观战回读={_spectatorReads}次/{captureMs:F1}ms 观战OCR={_spectatorChecks}次/{ocrMs:F1}ms 观战跳过={_spectatorSkips}次";
+        }
         if (_ocr.Err.Length > 0) s += $"  ocrErr={_ocr.Err}";
         if (_err.Length > 0) s += $"  err={_err}";
         if (_encErr.Length > 0) s += $"  encErr={_encErr}";
@@ -1345,24 +1634,49 @@ internal sealed class Capture : IDisposable
         _stop = true;
         _audioFillRun = false;      // 静音补齐线程自己会退出（它每 20ms 看一次这个标志）
         try { _queue.CompleteAdding(); } catch { }
-        // 退出前把还没切完的片段切掉（后摇可能没录满，但前摇画面不能浪费）
-        try { FlushPending(); } catch { }
         try { _session?.Dispose(); } catch { }
         try { _pool?.Dispose(); } catch { }
+        try { _encThread?.Join(2000); } catch { }
+        if (_encThread?.IsAlive != true)
+        {
+            try { _ring?.Flush(); } catch { }
+        }
+        // 退出前把还没切完的片段切掉（后摇可能没录满，但前摇画面不能浪费）
+        try { FlushPending(); } catch { }
         try { _wcap?.Dispose(); } catch { }
         try { _mic?.Dispose(); } catch { }
-        try { _ring?.Flush(); } catch { }
         try { _enc?.Dispose(); } catch { }
         try { _aac?.Dispose(); } catch { }
-        try { _encThread?.Join(2000); } catch { }
         try { _audioFill?.Join(1000); } catch { }
         try { _clipThread?.Join(2000); } catch { }
+        ReleaseRing();
         _converter?.Dispose();
         foreach (var t in _texPool) try { t.Dispose(); } catch { }
         _bandStaging?.Dispose();
+        _spectatorStaging?.Dispose();
         _dumpStaging?.Dispose();
         _ctx?.Dispose();
         _dev?.Dispose();
+    }
+
+    private void ReleaseRing()
+    {
+        if (_ring is not { } ring) return;
+        var encoder = _encThread;
+        var clip = _clipThread;
+        if (encoder?.IsAlive != true && clip?.IsAlive != true)
+        {
+            ring.Dispose();
+            return;
+        }
+
+        // 落盘较慢时，等仍在使用旧缓存的线程收尾后再删分片。
+        _ = Task.Run(() =>
+        {
+            if (encoder?.IsAlive == true) encoder.Join();
+            if (clip?.IsAlive == true) clip.Join();
+            ring.Dispose();
+        });
     }
 }
 

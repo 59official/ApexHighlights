@@ -30,7 +30,6 @@ internal sealed class TrayApp : ApplicationContext
     private long _lastRestartMs;      // 上次因尺寸重开采集的时刻（冷却）
     private int _restartCount;
     /// <summary>当前检测引擎（改 HUD 缩放要在采集进行中就生效，所以得留着引用）。</summary>
-    private BannerEngine? _eng;
     private LibraryForm? _libForm;
     private readonly ToolStripMenuItem _pauseItem = new("暂停录制");
     private readonly ToolStripMenuItem _statusItem = new("启动中…") { Enabled = false };
@@ -99,6 +98,9 @@ internal sealed class TrayApp : ApplicationContext
         menu.Items.Add(BuildSensitivityMenu());
         menu.Items.Add(BuildHudScaleMenu());
         menu.Items.Add(BuildParamsItem());
+        var picture = new ToolStripMenuItem("画面配置…");
+        picture.Click += (_, _) => OpenPictureSettings();
+        menu.Items.Add(picture);
         menu.Items.Add(BuildAudioMenu());
         menu.Items.Add(BuildNoticeMenu());
         menu.Items.Add(BuildKindsMenu());
@@ -315,11 +317,7 @@ internal sealed class TrayApp : ApplicationContext
         {
             Log.Write($"[tray] 找到窗口 \"{Native.TitleOf(hwnd)}\" 0x{hwnd:X}");
             _capHwnd = hwnd;
-            // 引擎是新建的，得把用户自调的阈值套上去（Program 那次 Apply 是给控制台模式用的）
-            var eng = new BannerEngine(_profile);
-            eng.Apply(_detect);
-            _eng = eng;
-            _cap = new Capture(hwnd, eng)
+            _cap = new Capture(hwnd, _profile, _detect)
             {
                 TargetFps = _fps,
                 EncodedFps = _fps,
@@ -343,7 +341,7 @@ internal sealed class TrayApp : ApplicationContext
             var rep = _cap.RunQuotaCheck();
 
             Log.Write($"[tray] 采集已启动 {_cap.Width}x{_cap.Height} @{_fps}fps {_capture.BitrateMbps}Mbps，" +
-                      $"条带 {_profile.Band.W}x{_profile.Band.H}@{_profile.Band.X},{_profile.Band.Y}，" +
+                      $"{_cap.Picture.Description}，" +
                       $"模板 {string.Join(",", _profile.Templates.Select(t => t.Id))}，阈值 {_cap.Threshold:F2}，库 {_cap.ClipDir}" +
                       (rep is null ? "" : $"（{rep}）"));
             // 捕获成功 = 控制台可以从这一刻起算 5 秒后藏掉（用户要的「长亮 5 秒」）
@@ -420,6 +418,7 @@ internal sealed class TrayApp : ApplicationContext
     {
         var kindName = ClipKinds.Label(ClipKinds.FromBanner(d.Kind));
         var ocr = string.IsNullOrWhiteSpace(d.OcrText) ? "" : $"  ocr「{d.OcrText.Trim()}」";
+        if (d.Kind == BannerKind.Unknown) ocr += "  横幅类型未识别";
         Log.Write($"[HIT] {d.WallClock:HH:mm:ss} +{d.Ms / 1000.0:F1}s [{kindName}] score={d.Score:F2} at({d.X},{d.Y}){ocr}" +
                   (d.ClipPath is null ? "  （还没产出片段）" : $"  → {Path.GetFileName(d.ClipPath)} {QuotaReport.Mb(d.Bytes)}"));
         if (d.ClipPath is null) return;
@@ -538,7 +537,6 @@ internal sealed class TrayApp : ApplicationContext
     {
         var cap = _cap;
         _cap = null;
-        _eng = null;
         _missingTicks = 0;
         _pauseItem.Text = "暂停录制";
         if (cap is null) return;
@@ -563,6 +561,7 @@ internal sealed class TrayApp : ApplicationContext
             // 库窗口状态栏里那行「配额 / 保留」点开就能改，和托盘菜单共用同一个出口
             OnQuotaChanged = (gb, days) => ApplyQuota(gb, days),
             OnParamsRequested = OpenParams,
+            OnPictureRequested = OpenPictureSettings,
         };
         // 库窗口里的「选择目录」：搬家询问 + 改采集器 + 落盘都由托盘这侧做（它有 _capture 和配置路径），
         // 但**别关窗口**——用户正站在里面点按钮，关掉等于把他甩出来。
@@ -653,6 +652,41 @@ internal sealed class TrayApp : ApplicationContext
         _cap is not null ? Math.Max(1, _cap.Bitrate / 1_000_000) : _capture.BitrateMbps;
 
     private ParamsForm? _paramsForm;
+
+    private void OpenPictureSettings()
+    {
+        var previous = _detect.Picture;
+        var next = PictureForm.Edit(previous, _cap?.Picture, _libForm);
+        if (next is null) return;
+        _detect.Picture = next;
+        if (!_detect.Save(_cfgPath))
+        {
+            _detect.Picture = previous;
+            MessageBox.Show("无法保存画面配置。请检查配置文件是否可写。", "ApexHighlights",
+                MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+
+        Log.Write($"[picture] 画面配置已保存（{next.Source}，近失图留存={(next.SaveNearFrames ? "开" : "关")}）");
+        if (_cap is null) return;
+        _cap.SaveNearFrames = next.SaveNearFrames;
+        // 自动模式每次读取文件。即使选项没变，也允许保存时重新读取游戏最近的配置。
+        bool sourceChanged = previous.Source != next.Source ||
+            (next.Source == PictureSource.Manual && (previous.Width != next.Width || previous.Height != next.Height));
+        var expectedSize = next.Source == PictureSource.ApexConfig
+            ? ApexVideoConfig.Read(ApexVideoConfig.DefaultPath())?.Size ?? _cap.Picture.Capture : _cap.Picture.Game;
+        if (!sourceChanged && expectedSize == _cap.Picture.Game) return;
+
+        bool paused = _cap.UserPaused;
+        StopCapture();
+        StartCapture();
+        if (paused && _cap is not null)
+        {
+            _cap.UserPaused = true;
+            _pauseItem.Text = "继续录制";
+        }
+        RefreshStatus();
+    }
 
     /// <summary>
     /// 托盘里的「录制参数…」。面板是独立的小窗（菜单里塞不下滑杆），
@@ -1298,8 +1332,7 @@ internal sealed class TrayApp : ApplicationContext
 
     /// <summary>改阈值：写进内存配置 → 立刻套到正在跑的采集上 → 落盘记住。</summary>
     /// <summary>
-    /// HUD 缩放：横幅的大小跟着游戏内 HUD 缩放走，而模板是固定像素的，差 10% 就对不上。
-    /// 「自动」= 只在对不上时补扫其它尺度（平时零开销）；选具体档位 = 只按那一档扫（最快）。
+    /// HUD 缩放只调整横幅匹配模板。自动档在分数落入灰区时补扫其他尺度。
     /// </summary>
     private ToolStripMenuItem BuildHudScaleMenu()
     {
@@ -1333,7 +1366,7 @@ internal sealed class TrayApp : ApplicationContext
     private void ApplyHudScale(int pct, Action? after = null)
     {
         _detect.HudScalePct = DetectPolicy.Clamp(new DetectPolicy { HudScalePct = pct }).HudScalePct;
-        try { _eng?.SetHudScale(_detect.HudScalePct); }
+        try { _cap?.SetHudScale(_detect.HudScalePct); }
         catch (Exception ex) { Log.Write("[tray] 改 HUD 缩放失败: " + ex.Message); }
 
         var ok = _detect.Save(_cfgPath);
