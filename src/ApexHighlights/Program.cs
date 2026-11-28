@@ -49,12 +49,54 @@ internal static class Program
         catch { return false; }
     }
 
+    /// <summary>
+    /// 托盘是个「没人看着」的常驻程序，一次没接住的异常就会弹一个模态框，而五秒一次的
+    /// tick 会让它无限弹下去（实测过：半卸载的安装目录，缺一个框架程序集，屏幕上全是
+    /// 「Unhandled exception has occurred」）。这里统一接住：写 crash.log，同类异常
+    /// 只在第一次弹一句人话，之后只记日志，程序继续跑。
+    /// </summary>
+    private static void InstallCrashHandlers()
+    {
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        void Record(string where, Exception? ex)
+        {
+            var text = $"{DateTime.Now:yyyy-MM-dd HH:mm:ss} [{where}] {ex}";
+            try
+            {
+                var dir = Paths.DataRoot;
+                Directory.CreateDirectory(dir);
+                File.AppendAllText(Path.Combine(dir, "crash.log"), text + Environment.NewLine + Environment.NewLine);
+            }
+            catch { }
+
+            // 同一个异常只提醒一次，免得 tick 把它变成弹窗风暴
+            var key = where + "|" + (ex?.GetType().Name ?? "?") + "|" + (ex?.Message ?? "");
+            if (seen.Count < 8 && seen.Add(key))
+            {
+                try
+                {
+                    MessageBox.Show(
+                        $"{ex?.GetType().Name}: {ex?.Message}\n\n详细堆栈已写进 {Path.Combine(Paths.DataRoot, "crash.log")}。",
+                        "ApexHighlights 遇到一个错误（还会继续跑）",
+                        MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                }
+                catch { }
+            }
+        }
+
+        Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+        Application.ThreadException += (_, e) => Record("ui", e.Exception);
+        AppDomain.CurrentDomain.UnhandledException += (_, e) => Record("domain", e.ExceptionObject as Exception);
+        TaskScheduler.UnobservedTaskException += (_, e) => Record("task", e.Exception);
+    }
+
     private static int Main(string[] args)
     {
         try
         {
             // 挂回父终端只对「有人在看」的场景有意义：命令行参数一个都没有时就是双击启动，省掉这次调用
             if (args.Length > 0) AttachParentConsole();
+            InstallCrashHandlers();
             // 打包用：把 AppIcon 渲染成多尺寸 .ico。放在最前面——生成一张图标不该
             // 顺带创建数据目录（Paths 是懒初始化的，越早碰越容易踩）。
             var iconArg = args.FirstOrDefault(a => a.StartsWith("--make-icon=", StringComparison.OrdinalIgnoreCase));

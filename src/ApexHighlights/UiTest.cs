@@ -454,6 +454,8 @@ internal static class UiTest
             catch (Exception ex)
             {
                 Console.WriteLine($"    BAD 批量勾选抛出 {ex.GetType().Name}: {ex.Message}");
+                Console.WriteLine("    ---- stack ----");
+                Console.WriteLine(ex.StackTrace);
                 fail++;
             }
         });
